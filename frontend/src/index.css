@@ -1,0 +1,170 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+@import '@xyflow/react/dist/style.css';
+
+@custom-variant dark (&:is(.dark *));
+
+/* ── shadcn-style tokens (slate neutral + blue accent), referencing OntologyFactory ── */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(98.4% 0.003 247.86);   /* slate-50 */
+  --foreground: oklch(20.8% 0.04 265.75);    /* slate-900 */
+  --card: oklch(100% 0 0);
+  --card-foreground: oklch(20.8% 0.04 265.75);
+  --popover: oklch(100% 0 0);
+  --popover-foreground: oklch(20.8% 0.04 265.75);
+  --primary: oklch(54.6% 0.215 262.88);      /* blue-600 */
+  --primary-foreground: oklch(98.4% 0.003 247.86);
+  --secondary: oklch(96.8% 0.007 247.9);     /* slate-100 */
+  --secondary-foreground: oklch(20.8% 0.04 265.75);
+  --muted: oklch(96.8% 0.007 247.9);
+  --muted-foreground: oklch(55.5% 0.041 257.42);  /* slate-500 */
+  --accent: oklch(96.8% 0.007 247.9);
+  --accent-foreground: oklch(20.8% 0.04 265.75);
+  --destructive: oklch(57.7% 0.245 27.33);
+  --success: oklch(60% 0.13 152);
+  --warning: oklch(70% 0.16 70);
+  --border: oklch(92.9% 0.013 255.5);        /* slate-200 */
+  --input: oklch(92.9% 0.013 255.5);
+  --ring: oklch(54.6% 0.215 262.88);
+
+  /* agent identity hues (kept distinct, on the blue/slate family) */
+  --agent-control: oklch(44% 0.04 265);
+  --agent-business: oklch(62% 0.16 50);
+  --agent-data: oklch(58% 0.11 195);
+  --agent-model: oklch(54% 0.16 287);
+  --agent-report: oklch(60% 0.15 22);
+
+  /* task status */
+  --status-pending: oklch(70% 0.02 257);
+  --status-ready: oklch(60% 0.09 250);
+  --status-running: oklch(54.6% 0.215 262.88);
+  --status-waiting: oklch(70% 0.16 70);
+  --status-done: oklch(60% 0.13 152);
+}
+
+.dark {
+  --background: oklch(20.8% 0.04 265.75);
+  --foreground: oklch(98.4% 0.003 247.86);
+  --card: oklch(25.8% 0.04 265.75);
+  --card-foreground: oklch(98.4% 0.003 247.86);
+  --popover: oklch(25.8% 0.04 265.75);
+  --popover-foreground: oklch(98.4% 0.003 247.86);
+  --primary: oklch(62.3% 0.19 259.8);
+  --primary-foreground: oklch(20.8% 0.04 265.75);
+  --secondary: oklch(27.9% 0.04 260);
+  --secondary-foreground: oklch(98.4% 0.003 247.86);
+  --muted: oklch(27.9% 0.04 260);
+  --muted-foreground: oklch(71.5% 0.035 257);
+  --accent: oklch(27.9% 0.04 260);
+  --accent-foreground: oklch(98.4% 0.003 247.86);
+  --destructive: oklch(70.4% 0.191 22.2);
+  --border: oklch(100% 0 0 / 10%);
+  --input: oklch(100% 0 0 / 15%);
+  --ring: oklch(62.3% 0.19 259.8);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-agent-control: var(--agent-control);
+  --color-agent-business: var(--agent-business);
+  --color-agent-data: var(--agent-data);
+  --color-agent-model: var(--agent-model);
+  --color-agent-report: var(--agent-report);
+
+  --color-status-pending: var(--status-pending);
+  --color-status-ready: var(--status-ready);
+  --color-status-running: var(--status-running);
+  --color-status-waiting: var(--status-waiting);
+  --color-status-done: var(--status-done);
+
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-feature-settings: 'tnum' 1;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* ── status pulse for live nodes ── */
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 var(--pulse-color, oklch(54.6% 0.215 262.88 / 0.45)); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.pulse-running { --pulse-color: oklch(54.6% 0.215 262.88 / 0.4); animation: pulse-ring 2.2s var(--ease-out-expo) infinite; }
+.pulse-waiting { --pulse-color: oklch(70% 0.16 70 / 0.5); animation: pulse-ring 1.8s var(--ease-out-expo) infinite; }
+
+/* ── drawer + feed motion ── */
+@keyframes feed-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+.feed-in { animation: feed-in 0.4s var(--ease-out-expo) both; }
+
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sheet-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+@keyframes sheet-out-right { from { transform: translateX(0); } to { transform: translateX(100%); } }
+[data-slot='sheet-overlay'][data-state='open'] { animation: overlay-in 0.2s ease; }
+[data-slot='sheet-content'][data-state='open'] { animation: sheet-in-right 0.32s var(--ease-out-expo); }
+[data-slot='sheet-content'][data-state='closed'] { animation: sheet-out-right 0.22s ease-in; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-running, .pulse-waiting, .feed-in,
+  [data-slot='sheet-content'], [data-slot='sheet-overlay'] { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}
+
+/* ── React Flow (workflow canvas) theming ── */
+.react-flow__node { font-family: var(--font-sans); }
+.react-flow__controls { box-shadow: none; border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
+.react-flow__controls-button {
+  background: var(--color-card);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-foreground);
+}
+.react-flow__controls-button:hover { background: var(--color-accent); }
+.react-flow__controls-button svg { fill: currentColor; }
+.react-flow__handle { opacity: 0; }
+
+/* ── scrollbar ── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }

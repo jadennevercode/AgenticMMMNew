@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+desktop.ini
+.idea/
+.vscode/
+
+# Local reference materials (cloud-synced, large binaries)
+reference/
+
+# Env
+.env
+.env.local
+.env.*.local
