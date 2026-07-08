@@ -338,6 +338,87 @@ interface InsightCard {
 - **What it found（grounded）**：`TASK_FINDINGS` 把关键结论挂到来源 artifact——每条 finding 带证据芯片（点击在右栏打开来源），冲突/缺口/异常以 ⚠ amber 高亮。覆盖约 11 个关键任务（知识装配冲突/缺口、因子树访谈改动、指标三维优选、数据打分 0.5/0、O2O 异常、共线性剔除、技术检验红旗、候选对比、KBQ 覆盖与局限等）。无 findings 的任务回退显示 workNote。
 - 详情新顺序：标题+一句 summary →（待人工时的 action card）→ **Process** → **What it found** → Draws on → Produces。数据放 `lib/task-detail.ts`，`scenario.ts` 不动；类型加 `TaskStep`/`TaskFinding`。
 
+### 10.1.7 Phase B-8（Artifacts-Driven 工作台：Stage → Artifact → 构建流程，2026-06-13）
+
+用户提出概念重构：左侧"一大坨流程"太不 AI-Native / Human-Intuitive；流程本质都服务于 Artifacts，应把产品变成 **Artifacts-Driven**，层级为 **Stage → Artifacts → 制作该 Artifact 所需的流程步骤**。整页 Project 视图据此重构（替换原任务列表 + TaskWorkbench；流程/DAG 视角仍保留在 Workflow Canvas）。
+
+- **派生层 `lib/artifact-graph.ts`**（不改 `scenario.ts`/store）：`buildChain(artifactId)` = 生产任务（`produces` 含该 artifact）+ 直接依赖它且自身不产出的收尾任务（确认/签核/导出，如 1.21d/1.23b/2.32/3.4/4.1c）；`deliverableState()` 由链上任务状态派生 `locked/queued/building/needs-you/ready/confirmed`；`drawsOn`=lineage、`feedsInto`=反向 lineage、`artifactForTask` 供 Canvas 节点跳转回焦点 artifact。
+- **三级页面**：① `StageSpine`（顶部水平 stepper，替代拥挤 stage dots）；② `ArtifactColumn`（左栏，当前 stage 的交付物卡片，随构建链点亮，locked 仍可点以预览将做什么）；③ `ArtifactDetail`（中栏=配方：Draws on → **Build process**（每个流程步 = 一个任务，含 RunTimeline 子步骤、grounded Findings、待人工时内联 DecisionCard/AssignmentCard）→ Preview（产出后 MiniMarkdown，未产出占位）→ Feeds into）。可导出 artifact（`exportable`）提供 Export 下载（.md blob）。
+- B-7 的 `RunTimeline/Findings/EvidenceChips/Field` 抽到共享 `components/workbench/TaskTrace.tsx`；`hasFindings` 移入 `lib/task-detail.ts`。新增类型 `DeliverableState`、`ui-language.DELIVERABLE_STATE`（D4 安全词：Locked/Queued/Building/Needs you/Ready/Confirmed）、`primitives.DeliverableBadge`。删除 `StageTasksSidebar.tsx`/`TaskWorkbench.tsx`。复用 store 的 `selectedAssetId`/`viewedStageId`/`selectedTaskId`，store 无改动。焦点策略：选中 artifact（同 stage）优先，否则自动聚焦该 stage 的 needs-you → building → 首个已产出 → 第一个。
+
+### 10.1.8 Phase B-9（Artifact Canvas + Chat 协作编辑，2026-06-13）
+
+在 B-8 的 ArtifactDetail 上为每个 artifact 增加协作编辑（对应 08 §3 协作平面的人机共创，UI 不出现该术语）：
+
+- **详情双视图**：顶部 `Process | Canvas` 分段切换。`Process` = B-8 的构建透明（Draws on / Build process / Feeds into）；`Canvas` = 可编辑文档 + Chat。已产出且 ready/confirmed 的 artifact 默认进 Canvas，其余默认 Process。
+- **Canvas（可改）**：`Document | Edit` 切换——Document 用 MiniMarkdown 渲染；Edit 是 textarea，改动经 `editArtifact(id, content)` 即时写回 store 实例（不可变更新），并打 `editedAtTick`，显示"Edited · day N"。未产出的 artifact 不可编辑，显示占位但仍可在 Chat 提问。
+- **Chat（修改）**：右侧每 artifact 独立会话，`sendArtifactEdit(id, text)` 把请求作为一条受跟踪改动追加到文档末尾的 `## Edits` 区（mock：`appendEdit` 追加 `- {instruction}`），并回执"Done — I've updated …"。线程存 store `artifactChats: Record<id, AssistantTurn[]>`，跨切换保留；未产出时回复"先跑流程再编辑"。
+- 类型 `ArtifactInstance.editedAtTick?`；store 新增 `artifactChats` + `editArtifact` + `sendArtifactEdit`（含模块级 `appendEdit`）。导出仍走 `exportable` 的 .md 下载。visual-check.mjs 增加 Canvas/Chat 步骤；注意坑：confirmed artifact 默认 Canvas，断言 "Build process" 前需先点 `Process` 标签。
+
+### 10.1.9 Phase B-10（参考样式 artifacts + 多格式 Canvas，2026-06-13）
+
+用户要求：artifacts 完全参考 `reference/` 的样式，Canvas 要能展示并编辑 Excel/PPT/Word/md。基于 reference 实盘文件（以 Excel 工作簿为主：Scope 渠道/地区/产品、KBQs 多 sheet、factor&data_request 17 sheet、Data Validation 通用校验/打分/质量评分、stat test、Tech Review README/F1/F2；Word：11 份访谈纪要；PPT：2.32 趋势解读 184 页）落地：
+
+- **格式数据模型**：types 加 `ArtifactFormat = 'sheet'|'slides'|'doc'|'markdown'` + `SheetData{sheets[{name,columns,rows}]}` / `SlidesData{slides[{title,bullets}]}` / `DocData{blocks[{type,text}]}`；`ArtifactBlueprint` 加 `format` + `body?`，保留 `content`（markdown）作为预览/回退。`lib/artifact-format.ts`：`bodyToMarkdown`（结构→md 表/大纲，喂 Assets 库 MiniMarkdown 与导出回退）、`exportText`（sheet→CSV、其余→md）、`applyChatEdit`（按格式追加行/要点/段落/行）、`FORMAT_LABEL`(Excel/PPT/Word/Markdown)、`asSheet/asSlides/asDoc` 守卫。
+- **artifacts-data.ts 重写**：`RAW` 列表给每个 artifact 配 `format`+`body`（参考真实 sheet 名/列头/代表性行、slide 标题/要点、doc 分块），`ARTIFACTS = RAW.map(content = content ?? bodyToMarkdown(...))` 单一数据源、content 自动派生。代表性内容而非全量（数据集 23,791 行/184 页只取样）。
+- **Canvas 渲染/编辑** `components/project/canvas/ArtifactCanvas.tsx`：`SheetView`（sheet 标签 + 可编辑单元格网格 + Row/Column）、`SlidesView`（缩略图轨 + 16:9 标题/要点编辑 + 加页/加点）、`DocView`（分块文档编辑 + 加段）、`MarkdownView`（textarea/MiniMarkdown），按 `inst.format` 派发；`editing` 由 CanvasPane 的 Document/Edit 切换控制。dep-free，无 SheetJS/grid 库；真二进制导出（.xlsx/.pptx/.docx）暂缓，先 CSV/md。
+- store：`editArtifact(id, {content?, body?})`（给 body 时重算 content）；`sendArtifactEdit` 改走 `applyChatEdit`（删除旧 `appendEdit`）。ArtifactDetail 头部加 format chip，Export 用 `exportText`。
+- 坑：visual-check confirmed artifact 默认 Canvas tab；驱动跑完判定用"Run 按钮重新出现"（已无 Project delivered 文案）。
+
+### 10.1.10 Phase B-11（Canvas 改为右侧边栏，2026-06-13）
+
+用户：Process 与 Canvas 不要用两个 Tab，Canvas 直接做右侧边栏。ArtifactDetail 去掉 `Process | Canvas` 分段切换，改为 header 下方左右布局：**主区 = ProcessPane**（Draws on / Build process / Feeds into），**右侧栏 = `CanvasSidebar`**（`lg:w-[460px]`，竖排：顶部 Canvas 标签 + Document/Edit 切换 + Edited 标记 → 中部 `ArtifactCanvas`（flex-1）→ 底部 `EditChat`（h-64，去掉原 `lg:w-80/border-l`，改 `border-t`））。小屏 `flex-col` 堆叠。删除 `CanvasPane` 与 tab state。坑：visual-check 不再点 Process/Canvas 标签（"Canvas" 现为 span 非 button）；节点跳转后直接断言 `text=Build process`，Chat 输入框始终可见。
+
+### 10.1.11 Phase B-12（Deliverables 与 reference 文件对齐，2026-06-13）
+
+用户指出 Deliverables 仍未与 `reference/` 文件拉齐。对每个 reference 工作簿做 sheet 级提取后逐一对账并对齐：
+
+- **改名**：a-scope `Scope & KBQ Card`→`Scope`（去掉自造的颗粒度 sheet）；a-knowledge-package `Project Knowledge Package`→`Industry Knowledge`（目录/行业知识/品牌生意分析框架/客户校准）。
+- **改列**：a-kbq → KBQs(方法) / KBQs原(编号·问题分类·关键业务问题·访谈备注·提出方) / 数据&指标沟通表(问题·负责人·反馈) / Competitors List；a-quality-scorecard 加 2.11数据通用校验标准 sheet；a-dataset 改 dataset_model_data 真实列（Task name·品牌·省份组别·渠道·年·月·值）。
+- **合并**（用户裁决：与 reference 单文件一致）：a-factor-tree + a-indicator-candidates + a-indicator-list + a-data-request → 单一 **`Factor Tree & Data Request`**（id 仍 a-factor-tree，exportable），sheets：Business Factors(L1–L4+候选/主指标/颗粒度) / 逻辑关系 / 模型 / Calender / Media【发出】/ Store Execution【发出】/ Macroeconomics【发出】/ BHT【发出】。删除 3 个旧 id。
+- **新增缺失交付物**：`Interview Plan & Questions`（1.0 产出）、`Data Warehouse Dictionary`（2.21&2.23：宽表维度/数据字典/MD表，2.22 产出）、`Drill-down Factor Tree & Analysis Framework`（2.31：分析目的/框架6步/下钻因子树/输出示例，2.31 产出）。a-client-qa 改由 2.11 产出（不再永久 locked）。
+- **5D**：a-decomp-results `Results & Chart Book`(slides)→ **`Model Interpretation (5D)`(sheet)**：模型结果解读需求 / AFH·TT·MT_Charting / Decomp CHART / 技术检验。a-final-report 仍 slides。
+- **buildChain 泛化**（artifact-graph.ts）：由"producer + 直接依赖的空产出任务"改为**前向遍历依赖链**——从 producer 起，纳入后续每个"产出为空 或 产出同一 artifact"的任务，遇到分叉到别的交付物即停。使合并工作簿的构建过程串起 1.21→1.21d→1.22→1.22d→1.23→1.23b 六步。其他 artifact 链结果不变。
+- ripple：scenario.ts 改 1.0/1.22/1.22d/1.23/2.11/2.22/2.31 的 produces 与 d-1.22 evidence；task-detail 1.22 findings evidence a-indicator-candidates→a-factor-tree；collab-data p-factor-updates 因保留 a-factor-tree id 无需改。**HCP/PFME（医学营养品）sheet 属另一行业案例，已排除**。visual-check 改名 selector（Industry Knowledge）。
+
+### 10.1.12 Phase B-13（Business Understanding 重构为 6 交付物，对齐 MMM-Study，2026-06-13）
+
+用户聚焦 S1：实际只应有 6 个 artifacts。参考 MMM-Study（`docs/PRODUCT_FLOW.md` 的 scope→factor→indicator→interview→data→kbq + `docs/demo/files/*`）重构：
+
+- **6 交付物**：① Project Profile（由 SOW/Brief 抽取的 Scope，a-scope 改名）② Factor Tree（含指标候选/选型，indicator 不再单列）③ Interview Outline（a-interview-plan 改名，1.3 产出）④ Interview Minutes（a-minutes-raw，含 **AI 回写建议→Factor Tree 调整** 表 + d-1.4 决策）⑤ Data Request & Review（a-data-request 重新拆出，exportable，含 client sign-off）⑥ KBQ（a-kbq，1.6 综合生成）。
+- **输入（非交付物）**：SOW/Brief、Reports & Materials、Industry Knowledge → `ArtifactBlueprint.internal=true`，ArtifactColumn/ProjectView 过滤掉，但仍参与 lineage/evidence。
+- **拆分**：撤销 B-12 的 factor+data 合并；Factor Tree 与 Data Request & Review 独立。
+- **S1 任务流重写**（scenario.ts，S2–S5 不动，2.0a deps 改 1.6d）：1.0a→1.0(d-1.0)→1.1a→1.1→1.21→1.21d(d-1.21)→1.3→1.4a→1.4→1.4d(d-1.4 回写)→1.5→1.5r(d-1.5)→1.5b→1.6→1.6d(d-1.6)。KBQ 从 1.0 移到独立 step 6。
+- **buildChain 再泛化**（artifact-graph.ts）：在前向遍历前加**后向吸收**——把"只产出 internal 输入"的前置任务（1.0a 传 SOW、1.1a 传报告、1.1 装配知识、2.0a 传数据）并入该交付物的构建链前段；空产出（确认/签核）任务不后向吸收（属各自 forward）。**关键修复**：否则 internal 输入的人工触点（上传）因被过滤而无法聚焦/操作，run 在首个上传即卡死。
+- ripple：task-detail.ts S1 TASK_TRACE/TASK_FINDINGS 重写（访谈驱动的因子改动 findings 移到 1.4）；collab-data p-factor-updates afterTask 1.21→1.4；S2 a-data-files lineage 改 a-data-request。MMM-Study demo 文件用于内容对齐（SOW/Factor Tree 快照/访谈提纲/AI Writeback/DataTemplate/KBQ）。
+
+### 10.1.13 Phase B-14（AI 徽章 Gemini 风蓝绿渐变星，2026-06-13）
+
+AI 类行为徽章（class A "AI draft" / C "AI analysis"）加 Gemini 风格闪光：`CLASS_LABEL` 给 A/C 加 `ai:true`；`primitives.tsx` 新增 `SparkleIcon`（4 角星 SVG，`useId()` 唯一渐变 id，蓝绿渐变 #22d3ee→#2dd4bf→#3b82f6 + drop-shadow 辉光）；`BehaviorBadge` 对 AI 类渲染 SparkleIcon + 渐变文字（`.ai-gradient-text` bg-clip-text）+ teal 描边环。`index.css` 加 `.ai-gradient-text` / `.ai-sparkle` / `@keyframes ai-twinkle`（3s 轻微缩放旋转，respects reduced-motion）。M/H 徽章不变。仅 BehaviorBadge 渲染这些标签（其余为 prose）。
+
+### 10.1.14 Phase B-15（AI Cognitive Options：AI 给选项供选，2026-06-13）
+
+用户：AI 相关功能除了直接做事，还应给出 Options 供用户选，体现 AI Cognitive。新增**非阻塞**的 AI 认知选项（区别于阻塞的 Decision/Gate）：
+
+- 模型：types 加 `AiOption{label,rationale,tradeoff,recommended}` / `AiOptionSet{prompt,options}` / `AiChoiceRuntime`；`TaskBlueprint.aiOptions?`。
+- 行为（用户裁决：非阻塞）：AI 步骤完成时 store 自动选中 recommended（+Activity 事件"AI weighed N approaches → chose X"），不卡流程；`chooseAiOption(setId,optionId)` 供用户随时切换（+事件）。store 加 `aiChoices` slice、stepTick done 分支 auto-pick、reset。
+- UI：`ArtifactDetail` 的 BuildStep 加 `AiOptionsCard`（task started 后显示）——Gemini 星 + 渐变标题"AI weighed N approaches"、每项 rationale+trade-off、AI pick 标签、单选切换、running 时禁用；底部"AI applied its pick — switch anytime"。
+- 覆盖 5 个代表性 AI 步骤：1.21 铺货主指标(WD/ND/SOS)、1.6 KBQ 归类、2.31 O2O 异常处理、2.34 季节性建模、4.1b 报告叙述风格。非阻塞 → visual-check 不受影响。
+
+### 10.1.15 Phase B-16（Interview 合并 + AI 预答 + 指标选型 posture，2026-06-13）
+
+三项调整：
+
+- **Interview Outline + Interview Minutes 合并为单一 `Interview`**（S1 由 6→5 交付物：Project Profile / Factor Tree / Interview / Data Request & Review / KBQ）。`a-interview`（sheet，5 sheet：提纲 / AI 预答 / 纪要消化 / AI 回写建议 / 数据&口径反馈）；删 `a-interview-plan` + `a-minutes-raw`，repoint d-1.4 evidence、1.4 findings、a-kbq lineage → `a-interview`。
+- **新增 AI 预答步 1.3b**（class C）：出了提纲后，AI 先基于项目档案 + 竞品/品牌报告 + 行业知识 + 因子树对每题给初步回答（含置信度/依据），低置信题标为访谈重点。Interview 子流程：1.3 起草提纲 → **1.3b AI 预答** → 1.4a 传纪要 → 1.4 回写 → 1.4d 确认（1.3b/1.4a/1.4/1.4d 均 produces:[]，并入 a-interview 构建链）。
+- **Factor Tree 指标选型 AI Option 改为 posture**（用户：逐个指标选太细）：`ai-1.21` 从「铺货 WD/ND/SOS」改为整体取向 **Conservative 谨慎 / Balanced 平衡（AI pick）/ Aggressive 激进**——AI 据此为所有 L4 自动选主指标（"更多自由发挥"）。其余 AI Options（2.31/2.34/1.6/4.1b）保持具体单选（非"多选一"，无需 posture 化）。
+
+### 10.1.16 Phase B-17（构建步可折叠 + Canvas 全屏聚焦 + Factor Tree 加详，2026-06-13）
+
+- **BuildStep 可折叠**：每个流程步可折叠/展开（点 header 切换，带 Chevron）。`open = override ?? status !== 'done'` —— 完成/确认后自动折叠成一行（id+名+badge+状态），用户可手动展开任意步；`override` 记住手动选择。折叠时连接线缩短、body 隐藏。
+- **Canvas 全屏聚焦**：CanvasSidebar header 加 Maximize 按钮 → `CanvasOverlay`（`createPortal` 到 body，`fixed inset-0 z-50` + 背景虚化遮罩盖住中央页面）；内含 Document/Edit 切换 + `ArtifactCanvas`（flex-1）+ `EditChat layout="side"`（右侧全高）；Close 按钮 / 点遮罩 / Esc 关闭。抽出 `CanvasModeToggle`、`CanvasSurface` 复用；EditChat 加 `layout: 'docked'|'side'`。
+- **Factor Tree 加详**（参考 `reference/01.商业智能体/factor&data_request.xlsx` Business Factors sheet）：a-factor-tree 的「L1–L4 概览」换成完整 `Business Factors` sheet（列 L1/L2/L3/L4/指标选择/最细颗粒度，~47 行覆盖全部分支：外部因素品类趋势/宏观/竞争格局、内部因素动销/复购、品牌广告各媒体、电商、促销、渠道执行/终端营销/冰柜/铺货），让演示更真实；保留 维度统计 + 指标优选（三轴打分）sheet。
+
 ### 10.2 后端（LangGraph）设计含义（暂不实施，记录约束）
 
 - 编排图中心节点 = 项目管控（05 文档 §8 图），业务智能体不互调；

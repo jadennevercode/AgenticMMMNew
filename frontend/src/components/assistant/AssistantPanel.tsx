@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { FileText } from 'lucide-react'
-import { useSimStore } from '../../store/useSimStore'
-import { INSIGHTS } from '../../lib/collab-data'
+import { useSimStore, type BackendInsight } from '../../store/useSimStore'
 import { ARTIFACT_MAP } from '../../lib/artifacts-data'
 import { INSIGHT_KIND_LABEL, confidenceWording } from '../../lib/ui-language'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { cn } from '../../lib/cn'
-import type { EvidenceRef, InsightBlueprint } from '../../lib/types'
+import type { EvidenceRef, InsightKind } from '../../lib/types'
 
 const SUGGESTED = [
   'Why was 批发 merged into TT?',
@@ -36,13 +35,12 @@ function EvidenceRow({ evidence }: { evidence: EvidenceRef[] }) {
   )
 }
 
-function FindingCard({ insight }: { insight: InsightBlueprint }) {
-  const runtime = useSimStore((s) => s.insights[insight.id])
+function FindingCard({ insight }: { insight: BackendInsight }) {
   const resolveInsight = useSimStore((s) => s.resolveInsight)
   const selectAsset = useSimStore((s) => s.selectAsset)
-  const kind = INSIGHT_KIND_LABEL[insight.kind]
+  const kind = INSIGHT_KIND_LABEL[insight.kind as InsightKind] ?? INSIGHT_KIND_LABEL.connection
   const Icon = kind.icon
-  const isNew = runtime?.status === 'new'
+  const isNew = insight.status === 'new'
   return (
     <div className={cn('rounded-lg border bg-card px-3.5 py-3', isNew ? 'border-primary/40' : 'border-border opacity-80')}>
       <div className="flex items-center justify-between gap-2">
@@ -50,7 +48,7 @@ function FindingCard({ insight }: { insight: InsightBlueprint }) {
           <Icon className="size-3.5 text-primary" />
           {kind.label} · {confidenceWording(insight.confidence)}
         </p>
-        {!isNew && <Badge variant="muted" className="font-normal">{runtime?.status === 'actioned' ? 'Picked up' : 'Dismissed'}</Badge>}
+        {!isNew && <Badge variant="muted" className="font-normal">{insight.status === 'actioned' ? 'Picked up' : 'Dismissed'}</Badge>}
       </div>
       <h4 className="mt-1.5 text-[13px] font-semibold leading-snug">{insight.title}</h4>
       <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">{insight.finding}</p>
@@ -78,8 +76,8 @@ function FindingCard({ insight }: { insight: InsightBlueprint }) {
 }
 
 function Findings() {
-  const insightsRt = useSimStore((s) => s.insights)
-  const surfaced = INSIGHTS.filter((i) => insightsRt[i.id]?.surfacedAtTick !== undefined)
+  const insights = useSimStore((s) => s.insights)
+  const surfaced = insights.filter((i) => i.surfacedAtTick !== undefined)
   if (surfaced.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-xs text-muted-foreground">
@@ -139,7 +137,7 @@ function Chat() {
 
 export function AssistantPanel() {
   const newCount = useSimStore((s) =>
-    INSIGHTS.filter((i) => s.insights[i.id]?.status === 'new' && s.insights[i.id]?.surfacedAtTick !== undefined).length,
+    s.insights.filter((i) => i.status === 'new' && i.surfacedAtTick !== undefined).length,
   )
   const [tab, setTab] = useState('chat')
   return (

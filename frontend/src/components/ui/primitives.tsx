@@ -1,16 +1,46 @@
-import type { ReactNode } from 'react'
-import type { AgentId, ArtifactState, AutomationClass, TaskBlueprint, TaskStatus } from '../../lib/types'
+import { useId, type ReactNode } from 'react'
+import type { AgentId, ArtifactState, AutomationClass, DeliverableState, TaskBlueprint, TaskStatus } from '../../lib/types'
 import { taskNeed } from '../../lib/types'
 import { AGENTS, AGENT_COLOR } from '../../lib/profiles'
-import { ARTIFACT_STATE_LABEL, CLASS_LABEL, EXPORT_BADGE, INPUT_BADGE, STATUS_LABEL } from '../../lib/ui-language'
+import { ARTIFACT_STATE_LABEL, CLASS_LABEL, DELIVERABLE_STATE, EXPORT_BADGE, INPUT_BADGE, STATUS_LABEL } from '../../lib/ui-language'
 import { Badge } from './badge'
 import { Tooltip } from './misc'
 import { cn } from '../../lib/cn'
+
+/** Gemini-style blue-green sparkle — marks AI-generated work */
+export function SparkleIcon({ className }: { className?: string }) {
+  const id = useId()
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className={cn('ai-sparkle', className)}>
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#22d3ee" />
+          <stop offset="52%" stopColor="#2dd4bf" />
+          <stop offset="100%" stopColor="#3b82f6" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M12 0C12 6.627 6.627 12 0 12c6.627 0 12 5.373 12 12 0-6.627 5.373-12 12-12-6.627 0-12-5.373-12-12z"
+        fill={`url(#${id})`}
+      />
+    </svg>
+  )
+}
 
 /** Behavior badge — how this step runs (never names the internal taxonomy) */
 export function BehaviorBadge({ cls }: { cls: AutomationClass }) {
   const meta = CLASS_LABEL[cls]
   const Icon = meta.icon
+  if (meta.ai) {
+    return (
+      <Tooltip content={meta.hint}>
+        <Badge variant="outline" className="gap-1 font-medium [border-color:rgba(45,212,191,0.45)]">
+          <SparkleIcon className="size-3.5 ai-twinkle" />
+          <span className="ai-gradient-text">{meta.label}</span>
+        </Badge>
+      </Tooltip>
+    )
+  }
   return (
     <Tooltip content={meta.hint}>
       <Badge variant={cls === 'H' ? 'default' : 'outline'} className="font-normal">
@@ -76,7 +106,7 @@ const STATE_VARIANT: Record<string, 'muted' | 'outline' | 'default' | 'secondary
 }
 
 export function AssetStateBadge({ state }: { state: ArtifactState }) {
-  const meta = ARTIFACT_STATE_LABEL[state]
+  const meta = ARTIFACT_STATE_LABEL[state] ?? ARTIFACT_STATE_LABEL.draft
   return (
     <Badge
       variant={STATE_VARIANT[meta.variant]}
@@ -84,6 +114,25 @@ export function AssetStateBadge({ state }: { state: ArtifactState }) {
     >
       {meta.label}
     </Badge>
+  )
+}
+
+/** Deliverable lifecycle on the artifact board */
+export function DeliverableBadge({ state }: { state: DeliverableState }) {
+  const meta = DELIVERABLE_STATE[state]
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium" style={{ color: meta.color }}>
+      <span
+        aria-hidden
+        className={cn(
+          'inline-block size-1.5 rounded-full',
+          state === 'building' && 'pulse-running',
+          state === 'needs-you' && 'pulse-waiting',
+        )}
+        style={{ background: meta.color }}
+      />
+      {meta.label}
+    </span>
   )
 }
 

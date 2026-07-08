@@ -1,16 +1,16 @@
 import { useState } from 'react'
 import { ArrowDown, ArrowUp, ChevronLeft, FileText } from 'lucide-react'
-import { useSimStore } from '../../store/useSimStore'
+import { useSimStore, type BackendProposal } from '../../store/useSimStore'
 import { ARTIFACTS, ARTIFACT_MAP } from '../../lib/artifacts-data'
-import { PROPOSALS, ASSISTANT_SCRIPT, ASSISTANT_FALLBACK } from '../../lib/collab-data'
 import { STAGES, STAGE_ORDER } from '../../lib/profiles'
 import { confidenceWording } from '../../lib/ui-language'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { AgentChip, AssetStateBadge, MiniMarkdown } from '../ui/primitives'
+import { api } from '../../api/client'
 import { cn } from '../../lib/cn'
-import type { ArtifactInstance, DiffLine, ProposalBlueprint } from '../../lib/types'
+import type { AgentId, ArtifactInstance, DiffLine } from '../../lib/types'
 
 export function AssetList({ onPick, selectedId }: { onPick: (id: string) => void; selectedId?: string | null }) {
   const artifacts = useSimStore((s) => s.artifacts)
@@ -80,18 +80,17 @@ function DiffView({ diff }: { diff: DiffLine[] }) {
   )
 }
 
-function SuggestionCard({ proposal }: { proposal: ProposalBlueprint }) {
-  const runtime = useSimStore((s) => s.proposals[proposal.id])
+function SuggestionCard({ proposal }: { proposal: BackendProposal }) {
   const resolveProposal = useSimStore((s) => s.resolveProposal)
-  const open = runtime?.status === 'open'
+  const open = proposal.status === 'open'
   return (
     <div className="rounded-lg border border-border bg-card px-3.5 py-3">
       <div className="flex items-start justify-between gap-2">
         <p className="text-[13px] font-semibold">{proposal.title}</p>
-        {!open && <Badge variant="muted" className="font-normal">{runtime?.status === 'accepted' ? 'Applied' : 'Set aside'}</Badge>}
+        {!open && <Badge variant="muted" className="font-normal">{proposal.status === 'accepted' ? 'Applied' : 'Set aside'}</Badge>}
       </div>
       <p className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-        <AgentChip agent={proposal.sourceAgent} /> · {confidenceWording(proposal.confidence)}
+        <AgentChip agent={proposal.sourceAgent as AgentId} /> · {confidenceWording(proposal.confidence)}
       </p>
       <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">{proposal.summary}</p>
       <div className="mt-2">
@@ -99,8 +98,8 @@ function SuggestionCard({ proposal }: { proposal: ProposalBlueprint }) {
       </div>
       {open && (
         <div className="mt-2.5 flex gap-2">
-          <Button size="sm" onClick={() => resolveProposal(proposal.id, true)}>Apply change</Button>
-          <Button size="sm" variant="outline" onClick={() => resolveProposal(proposal.id, false)}>Set aside</Button>
+          <Button size="sm" onClick={() => void resolveProposal(proposal.id, true)}>Apply change</Button>
+          <Button size="sm" variant="outline" onClick={() => void resolveProposal(proposal.id, false)}>Set aside</Button>
         </div>
       )}
     </div>
@@ -146,12 +145,18 @@ function Sources({ asset, onPick }: { asset: ArtifactInstance; onPick: (id: stri
 function Ask() {
   const [q, setQ] = useState('')
   const [thread, setThread] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
-  const ask = () => {
-    if (!q.trim()) return
-    const lower = q.toLowerCase()
-    const hit = ASSISTANT_SCRIPT.find((e) => e.match.some((m) => lower.includes(m.toLowerCase())))
-    setThread((t) => [...t, { role: 'user', text: q }, { role: 'assistant', text: hit?.answer ?? ASSISTANT_FALLBACK }])
+  const projectId = useSimStore((s) => s.activeProjectId)
+  const ask = async () => {
+    const text = q.trim()
+    if (!text || !projectId) return
+    setThread((t) => [...t, { role: 'user', text }])
     setQ('')
+    try {
+      const reply = await api.askAssistant(projectId, text)
+      setThread((t) => [...t, { role: 'assistant', text: reply.text }])
+    } catch {
+      setThread((t) => [...t, { role: 'assistant', text: 'Could not reach the project service.' }])
+    }
   }
   return (
     <div className="flex h-full flex-col">
@@ -171,11 +176,11 @@ function Ask() {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && ask()}
+          onKeyDown={(e) => e.key === 'Enter' && void ask()}
           placeholder="Ask…"
           className="min-w-0 flex-1 rounded-md border border-border bg-card px-3 py-1.5 text-[13px] outline-none placeholder:text-muted-foreground focus:border-primary/50"
         />
-        <Button size="sm" onClick={ask}>Ask</Button>
+        <Button size="sm" onClick={() => void ask()}>Ask</Button>
       </div>
     </div>
   )
@@ -185,9 +190,8 @@ type Tab = 'content' | 'sources' | 'changes' | 'ask'
 
 export function AssetDetail({ asset, onBack, onPick }: { asset: ArtifactInstance; onBack?: () => void; onPick: (id: string) => void }) {
   const proposals = useSimStore((s) => s.proposals)
-  const tasks = useSimStore((s) => s.tasks)
-  const related = PROPOSALS.filter((p) => p.targetArtifactId === asset.id && tasks[p.afterTask]?.status === 'done')
-  const openCount = related.filter((p) => proposals[p.id]?.status === 'open').length
+  const related = proposals.filter((p) => p.targetArtifactId === asset.id)
+  const openCount = related.filter((p) => p.status === 'open').length
   const [tab, setTab] = useState<Tab>('content')
   return (
     <div className="flex min-h-0 flex-1 flex-col px-4 py-3">

@@ -1,4 +1,4 @@
-/* End-to-end walkthrough — left collapsible rail + Canvas / Decisions / Assets destinations */
+/* End-to-end walkthrough — artifact-driven Project workspace + Canvas / Decisions / Assets */
 import { chromium } from 'playwright'
 import { mkdirSync, rmSync } from 'node:fs'
 
@@ -15,6 +15,13 @@ page.on('console', (m) => {
   if (m.type() === 'error') errors.push(`console: ${m.text()}`)
 })
 
+const onProject = async () => (await page.locator('text=Deliverables').count()) > 0
+const ensureProject = async () => {
+  if (!(await onProject())) {
+    await page.click('a:has-text("Project")')
+    await page.waitForTimeout(150)
+  }
+}
 const attachOrDownloadAll = async () => {
   for (let n = 0; n < 14; n++) {
     const a = page.getByRole('button', { name: 'Attach', exact: true }).first()
@@ -26,22 +33,18 @@ const attachOrDownloadAll = async () => {
   }
 }
 
-// 1. Initial — left rail expanded
+// 1. Initial — artifact-driven workspace (stage spine + deliverables + detail)
 await page.goto(`${BASE}/#/`)
-await page.waitForSelector('text=Your workbench')
-await page.screenshot({ path: `${OUT}/01-rail-expanded.png` })
+await page.waitForSelector('text=Deliverables')
+await page.waitForTimeout(300)
+await page.screenshot({ path: `${OUT}/01-project-initial.png` })
 
-// 2. Collapse the rail
+// 2. Collapse / expand the nav rail
 await page.click('button[aria-label="Collapse navigation"]')
 await page.waitForTimeout(300)
 await page.screenshot({ path: `${OUT}/02-rail-collapsed.png` })
 await page.click('button[aria-label="Expand navigation"]')
 await page.waitForTimeout(300)
-
-// 2b. Assets — all deliverables shown grayed before the run
-await page.click('a:has-text("Assets")')
-await page.waitForTimeout(300)
-await page.screenshot({ path: `${OUT}/02b-assets-grayed.png` })
 
 // 3. Workflow Canvas — three views
 await page.click('a:has-text("Workflow Canvas")')
@@ -57,86 +60,95 @@ await page.screenshot({ path: `${OUT}/03c-canvas-execution.png` })
 await page.click('button:has-text("Stage")')
 await page.waitForTimeout(300)
 
-// 4. Run the project to advance the DAG
+// 4. Run — first human touchpoint is the SOW upload (inline in the artifact detail)
+await ensureProject()
 await page.click('button:has-text("Run")')
-let modelShot = false
-for (let i = 0; i < 420; i++) {
-  // resolve human touchpoints regardless of which page we're on
+let uploadShot = false
+let decisionShot = false
+let buildingShot = false
+for (let i = 0; i < 460; i++) {
+  if ((await page.locator('text=Project delivered').count()) > 0) break
+  await ensureProject()
+
   const confirm = page.locator('button:has-text("Confirm choice"):not([disabled])').first()
-  if ((await confirm.count()) > 0) {
-    if (!modelShot && (await page.locator('text=Pick the final model').count()) > 0) {
-      await page.screenshot({ path: `${OUT}/05-decision-card.png` })
-      modelShot = true
-    }
-    await confirm.click()
-    await page.waitForTimeout(180)
-    continue
-  }
-  if (
+  const hasUpload =
     (await page.getByRole('button', { name: 'Attach', exact: true }).count()) > 0 ||
     (await page.getByRole('button', { name: 'Download', exact: true }).count()) > 0
-  ) {
+
+  if (!uploadShot && hasUpload) {
+    await page.screenshot({ path: `${OUT}/04-needs-you-upload.png` })
+    uploadShot = true
+  }
+  if (!decisionShot && (await confirm.count()) > 0) {
+    await page.screenshot({ path: `${OUT}/05-decision-inline.png` })
+    decisionShot = true
+  }
+  if (!buildingShot && i === 18) {
+    await page.screenshot({ path: `${OUT}/06-building.png` })
+    buildingShot = true
+  }
+
+  if ((await confirm.count()) > 0) {
+    await confirm.click()
+    await page.waitForTimeout(160)
+    continue
+  }
+  if (hasUpload) {
     await attachOrDownloadAll()
     const submit = page
       .locator('button:has-text("Submit"):not([disabled]), button:has-text("Mark as sent"):not([disabled])')
       .first()
     if ((await submit.count()) > 0) {
       await submit.click()
-      await page.waitForTimeout(180)
+      await page.waitForTimeout(160)
       continue
     }
-  }
-  // mid-run snapshot of the canvas
-  if (i === 14) {
-    await page.click('a:has-text("Workflow Canvas")')
-    await page.waitForTimeout(400)
-    await page.screenshot({ path: `${OUT}/04-canvas-running.png` })
-  }
-  // decisions/inputs only appear on Project workbench → hop there to act
-  if ((await page.locator('text=Project delivered').count()) > 0) break
-  const onProject = (await page.locator('text=Your workbench').count()) > 0
-  if (!onProject && (await confirm.count()) === 0) {
-    // go to Decisions inbox to clear, fall back to Project for inputs
-    await page.click('a:has-text("Project")')
-    await page.waitForTimeout(150)
-    // jump to what needs you if a selection is holding focus
-    const wny = page.locator('button:has-text("What needs you")').first()
-    if ((await wny.count()) > 0) await wny.click()
   }
   await page.waitForTimeout(220)
 }
 
-// 6. Decisions inbox (full page)
-await page.click('a:has-text("Decisions")')
-await page.waitForSelector('text=Already decided', { timeout: 8000 }).catch(() => {})
-await page.screenshot({ path: `${OUT}/06-decisions-inbox.png`, fullPage: true })
+// 7. Delivered state
+await ensureProject()
+await page.waitForTimeout(300)
+await page.screenshot({ path: `${OUT}/07-project-delivered.png` })
 
-// 7. Assets library (full page, list + detail)
+// 8. Decisions inbox (full page)
+await page.click('a:has-text("Decisions")')
+await page.waitForTimeout(400)
+await page.screenshot({ path: `${OUT}/08-decisions-inbox.png`, fullPage: true })
+
+// 9. Assets library (list + detail)
 await page.click('a:has-text("Assets")')
 await page.waitForTimeout(300)
-await page.getByText('Project Knowledge Package', { exact: true }).click()
+await page.getByText('Industry Knowledge', { exact: true }).click()
 await page.waitForTimeout(300)
-await page.screenshot({ path: `${OUT}/07-assets-library.png` })
+await page.screenshot({ path: `${OUT}/09-assets-library.png` })
 
-// 8. Canvas final + click a node → lands on Project with it selected
+// 10. Canvas node → lands on Project with that artifact focused (Process main + Canvas sidebar)
 await page.click('a:has-text("Workflow Canvas")')
 await page.waitForTimeout(500)
-await page.screenshot({ path: `${OUT}/08-canvas-final.png` })
 await page.locator('.react-flow__node', { hasText: 'Technical review' }).click()
-await page.waitForSelector('text=Your workbench')
-await page.waitForTimeout(200)
-await page.screenshot({ path: `${OUT}/09-canvas-node-to-project.png` })
+await page.waitForSelector('text=Build process')
+await page.waitForTimeout(300)
+await page.screenshot({ path: `${OUT}/10-canvas-node-to-project.png` })
 
-// 9. Knowledge still works
+// 10b. Canvas sidebar chat — applies an edit to the document
+const chatInput = page.getByPlaceholder('Ask AI to change this…')
+await chatInput.fill('加一条校验：VIF 全部 < 5')
+await chatInput.press('Enter')
+await page.waitForTimeout(400)
+await page.screenshot({ path: `${OUT}/10c-canvas-chat-edit.png` })
+
+// 11. Knowledge still works
 await page.click('a:has-text("Knowledge")')
 await page.waitForSelector('text=What the team knows')
-await page.screenshot({ path: `${OUT}/10-knowledge.png` })
+await page.screenshot({ path: `${OUT}/11-knowledge.png` })
 
-// 10. Responsive
+// 12. Responsive
 await page.setViewportSize({ width: 768, height: 1024 })
 await page.goto(`${BASE}/#/`)
 await page.waitForTimeout(600)
-await page.screenshot({ path: `${OUT}/11-responsive-768.png` })
+await page.screenshot({ path: `${OUT}/12-responsive-768.png` })
 
 await browser.close()
 

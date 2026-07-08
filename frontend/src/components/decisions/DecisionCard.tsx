@@ -1,14 +1,13 @@
 import { useState } from 'react'
 import { CheckCircle2, FileText } from 'lucide-react'
-import { useSimStore } from '../../store/useSimStore'
+import { useSimStore, type BackendDecision } from '../../store/useSimStore'
 import { TASKS } from '../../lib/scenario'
 import { ARTIFACT_MAP } from '../../lib/artifacts-data'
 import { Button } from '../ui/button'
 import { AgentChip, AssetStateBadge } from '../ui/primitives'
 import { cn } from '../../lib/cn'
-import type { DecisionBlueprint, DecisionRuntime } from '../../lib/types'
 
-function EvidenceChips({ decision }: { decision: DecisionBlueprint }) {
+function EvidenceChips({ decision }: { decision: BackendDecision }) {
   const artifacts = useSimStore((s) => s.artifacts)
   const selectAsset = useSimStore((s) => s.selectAsset)
   return (
@@ -35,20 +34,17 @@ function EvidenceChips({ decision }: { decision: DecisionBlueprint }) {
   )
 }
 
-export function DecisionCard({
-  decision,
-  runtime,
-  taskId,
-}: {
-  decision: DecisionBlueprint
-  runtime: DecisionRuntime
-  taskId: string
-}) {
+/**
+ * One decision card. `decision` is the FULL backend object (blueprint fields
+ * + runtime status/resolution); `taskId` ties it to the producing step.
+ */
+export function DecisionCard({ decision, taskId }: { decision: BackendDecision; taskId: string }) {
   const resolveDecision = useSimStore((s) => s.resolveDecision)
   const task = TASKS.find((t) => t.id === taskId)
   const [choice, setChoice] = useState<string | null>(decision.options.find((o) => o.recommended)?.id ?? null)
   const [note, setNote] = useState('')
-  const open = runtime.status === 'open'
+  const open = decision.status === 'open'
+  const resolution = decision.resolution
 
   return (
     <article className={cn('rounded-xl border bg-card', open ? 'border-warning/50 shadow-sm' : 'border-border')}>
@@ -59,9 +55,9 @@ export function DecisionCard({
           </p>
           <h3 className="mt-1 text-base font-semibold">{decision.title}</h3>
         </div>
-        {!open && runtime.resolution && (
+        {!open && resolution && (
           <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 font-mono text-[10px] text-muted-foreground">
-            <CheckCircle2 className="size-3" /> day {runtime.resolution.decidedAtTick}
+            <CheckCircle2 className="size-3" /> day {resolution.decidedAtTick}
           </span>
         )}
       </header>
@@ -81,7 +77,7 @@ export function DecisionCard({
 
         <div className="space-y-2">
           {decision.options.map((opt) => {
-            const picked = open ? choice === opt.id : runtime.resolution?.optionId === opt.id
+            const picked = open ? choice === opt.id : resolution?.optionId === opt.id
             return (
               <label
                 key={opt.id}
@@ -124,13 +120,13 @@ export function DecisionCard({
               placeholder="Add a note for the record (optional, any language)"
               className="min-w-0 flex-1 rounded-md border border-border bg-card px-3 py-1.5 text-[13px] outline-none placeholder:text-muted-foreground focus:border-primary/50"
             />
-            <Button size="sm" disabled={!choice} onClick={() => choice && resolveDecision(decision.id, choice, note)}>
+            <Button size="sm" disabled={!choice} onClick={() => choice && void resolveDecision(decision.id, choice, note)}>
               Confirm choice
             </Button>
           </div>
         ) : (
-          runtime.resolution?.note && (
-            <p className="border-t border-border pt-3 text-[12px] text-muted-foreground">Note: {runtime.resolution.note}</p>
+          resolution?.note && (
+            <p className="border-t border-border pt-3 text-[12px] text-muted-foreground">Note: {resolution.note}</p>
           )
         )}
       </div>

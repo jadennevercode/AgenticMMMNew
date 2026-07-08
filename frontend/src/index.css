@@ -168,3 +168,18 @@
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── AI accent: Gemini-style blue-green sparkle ── */
+.ai-gradient-text {
+  background-image: linear-gradient(135deg, #22d3ee 0%, #2dd4bf 52%, #3b82f6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.ai-sparkle { filter: drop-shadow(0 0 1.5px rgba(45, 212, 191, 0.55)); }
+@keyframes ai-twinkle {
+  0%, 100% { opacity: 0.85; transform: scale(1) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1.14) rotate(8deg); }
+}
+.ai-twinkle { animation: ai-twinkle 3s ease-in-out infinite; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .ai-twinkle { animation: none; } }

@@ -63,7 +63,7 @@ export const STAGES: Record<StageId, StageProfile> = {
   s1: {
     id: 's1', index: 1, name: 'Business Understanding',
     goal: 'Scope, factor tree (L1–L4), metrics, interviews and data request',
-    milestone: 'M1 · Scope, factor tree & key questions confirmed',
+    milestone: 'M1 · Scope, factor tree & data request confirmed',
   },
   s2: {
     id: 's2', index: 2, name: 'Data Intake & Quality',
@@ -97,10 +97,5 @@ export const AGENT_COLOR: Record<AgentId, string> = {
   report: 'var(--color-agent-report)',
 }
 
-export const PROJECT = {
-  name: 'Danone Mizone · MMM POC 2026',
-  client: '脉动（Mizone）— 功能饮料',
-  kpi: 'Sell-out Volume',
-  window: '2022-10 — 2025-10 · monthly',
-  scope: '4 channels (MT / TT / AFH / EC+O2O) · ≤6 region-platform groups · 1 product group',
-}
+// Project metadata (name / brand / industry / window) is now per-project and
+// comes from the backend registry — see store `activeMeta` and ProjectMeta.

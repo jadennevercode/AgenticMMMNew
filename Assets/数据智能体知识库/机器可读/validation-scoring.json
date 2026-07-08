@@ -1,0 +1,50 @@
+{
+  "id": "2.11-2.12",
+  "title": "数据校验打分规则",
+  "scale": [0, 0.5, 1],
+  "dimensions": {
+    "consistency": {
+      "label": "一致性",
+      "subchecks": {
+        "dimension": { "0": "不一致比例>10%", "0.5": "不一致<=10%且影响小", "1": "口径完全统一、定义清晰" },
+        "time": { "0": "粒度混乱(混用日/周/月)>10% 或 颗粒度<月度", "0.5": "少量不一致<=10%且颗粒度>=月度", "1": "统一时间粒度且颗粒度>月度" },
+        "caliber": { "0": "口径/源变化且前后半年同比变化>30%", "0.5": "口径/源变化但同比变化<=30%", "1": "口径自始统一或变更有记录且对齐" }
+      }
+    },
+    "accuracy": {
+      "label": "准确性",
+      "subchecks": {
+        "numeric": { "0": "明显录入/计算错误且占比>10%", "0.5": "个别微小错误占比5%-10%", "1": "数值正确或误差<5%" },
+        "business": { "0": "与财务/系统口径偏差>10%", "0.5": "偏差5%-10%", "1": "偏差<5%" }
+      }
+    },
+    "comprehensiveness": {
+      "label": "完整性",
+      "subchecks": {
+        "field": { "0": "无范围内字段", "0.5": "只有spending无对应performance", "1": "metrics字段齐全" },
+        "data": { "0": "建模/时间维度缺失>=10%", "0.5": "缺失<10%", "1": "全覆盖无缺失" }
+      }
+    },
+    "granularity": {
+      "label": "颗粒度",
+      "subchecks": {
+        "time": { "0": "月度以上(季度/年度)", "1": "月度及以下(月/周/日)", "note": "越细越好，建模最低月度" },
+        "model": { "0": "无法适配L4(缺关键维度)", "0.5": "基本适配需额外聚合/拆解", "1": "完全适配L4颗粒度" },
+        "drilldown": { "0": "无L5-L8或与业务无关", "0.5": "仅2个下钻维度", "1": "每个L4有>2个下钻维度" }
+      }
+    }
+  },
+  "acceptance": {
+    "formula": "Final = consistency + accuracy + comprehensiveness + granularity",
+    "alt_checks": {
+      "consistency": { "1": "计算逻辑未变", "0": "逻辑变化" },
+      "frequency": { "1": "周/月度", "0": "年度" },
+      "coverage": { "1": ">2年", "0.5": "1-2年", "0": "<1年" },
+      "brand_integrity": { "1": "complete", "0.5": "incomplete", "0": "missing" },
+      "channel_integrity": { "1": "complete", "0.5": "incomplete", "0": "missing" },
+      "geography_integrity": { "1": "complete", "0.5": "incomplete", "0": "missing" }
+    },
+    "disposition": { "1": "accept", "0": "reject_and_warn", "0.5": "human_decision" }
+  },
+  "scorecardColumns": ["L1", "L2", "L3", "L4", "指标", "一致性评分", "一致性情况", "完整性评分", "完整性情况", "颗粒度评分", "颗粒度情况", "真实性评分", "真实性情况", "TotalScore"]
+}

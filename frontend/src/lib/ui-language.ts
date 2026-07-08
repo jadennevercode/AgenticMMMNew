@@ -17,7 +17,7 @@ import {
   UserCheck,
   type LucideIcon,
 } from 'lucide-react'
-import type { AutomationClass, ArtifactState, InsightKind, TaskStatus } from './types'
+import type { AutomationClass, ArtifactState, DeliverableState, InsightKind, TaskStatus } from './types'
 
 /**
  * Terms that must never appear in user-visible copy.
@@ -41,10 +41,10 @@ export const BANNED_UI_TERMS = [
 ] as const
 
 /** Behavior badge per automation class — describes behavior, not taxonomy */
-export const CLASS_LABEL: Record<AutomationClass, { label: string; hint: string; icon: LucideIcon }> = {
+export const CLASS_LABEL: Record<AutomationClass, { label: string; hint: string; icon: LucideIcon; ai?: boolean }> = {
   M: { label: 'Runs automatically', hint: 'Computed by rules — repeatable, no review needed', icon: Cpu },
-  A: { label: 'AI draft', hint: 'AI drafts it; spot-check and adjust as needed', icon: CircleDot },
-  C: { label: 'AI analysis', hint: 'AI reasons and suggests; review before it counts', icon: Lightbulb },
+  A: { label: 'AI draft', hint: 'AI drafts it; spot-check and adjust as needed', icon: CircleDot, ai: true },
+  C: { label: 'AI analysis', hint: 'AI reasons and suggests; review before it counts', icon: Lightbulb, ai: true },
   H: { label: 'Your decision', hint: 'Only a person can settle this', icon: UserCheck },
 }
 
@@ -67,6 +67,16 @@ export const ARTIFACT_STATE_LABEL: Record<ArtifactState, { label: string; varian
   proposed: { label: 'Awaiting review', variant: 'outline' },
   confirmed: { label: 'Confirmed', variant: 'success' },
   frozen: { label: 'Locked', variant: 'locked' },
+}
+
+/** Deliverable lifecycle on the artifact board — plain product words */
+export const DELIVERABLE_STATE: Record<DeliverableState, { label: string; color: string; hint: string }> = {
+  locked: { label: 'Locked', color: 'var(--color-status-pending)', hint: 'Waiting on earlier deliverables' },
+  queued: { label: 'Queued', color: 'var(--color-status-ready)', hint: 'Ready to start' },
+  building: { label: 'Building', color: 'var(--color-status-running)', hint: 'The team is working on it' },
+  'needs-you': { label: 'Needs you', color: 'var(--color-status-waiting)', hint: 'A step needs your input or decision' },
+  ready: { label: 'Ready', color: 'var(--color-status-done)', hint: 'Produced — review it' },
+  confirmed: { label: 'Confirmed', color: 'var(--color-status-done)', hint: 'Locked in' },
 }
 
 export const INSIGHT_KIND_LABEL: Record<InsightKind, { label: string; icon: LucideIcon }> = {

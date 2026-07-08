@@ -1,8 +1,8 @@
-import { Activity, MessageSquare, X } from 'lucide-react'
+import { Activity, FolderOpen, MessageSquare, X } from 'lucide-react'
 import { useSimStore } from '../../store/useSimStore'
-import { INSIGHTS } from '../../lib/collab-data'
 import { ActivityPanel } from './ActivityPanel'
 import { AssistantPanel } from '../assistant/AssistantPanel'
+import { ProjectFolderPanel } from '../folder/ProjectFolderPanel'
 import { cn } from '../../lib/cn'
 import type { ReactNode } from 'react'
 
@@ -44,12 +44,18 @@ function Fab({ onClick, active, badge, label, children }: { onClick: () => void;
 export function FloatingDock() {
   const panels = useSimStore((s) => s.panels)
   const togglePanel = useSimStore((s) => s.togglePanel)
+  const fileCount = useSimStore((s) => s.files.length)
   const newFindings = useSimStore((s) =>
-    INSIGHTS.filter((i) => s.insights[i.id]?.status === 'new' && s.insights[i.id]?.surfacedAtTick !== undefined).length,
+    s.insights.filter((i) => i.status === 'new' && i.surfacedAtTick !== undefined).length,
   )
 
   return (
     <div className="fixed bottom-5 right-5 z-30 flex flex-col items-end gap-3">
+      {panels.folder && (
+        <FloatingCard title="Project Folder" onClose={() => togglePanel('folder', false)}>
+          <ProjectFolderPanel />
+        </FloatingCard>
+      )}
       {panels.activity && (
         <FloatingCard title="Activity" onClose={() => togglePanel('activity', false)}>
           <ActivityPanel />
@@ -61,6 +67,9 @@ export function FloatingDock() {
         </FloatingCard>
       )}
       <div className="flex gap-2.5">
+        <Fab onClick={() => togglePanel('folder')} active={panels.folder} badge={fileCount} label="Project folder">
+          <FolderOpen className="size-5" />
+        </Fab>
         <Fab onClick={() => togglePanel('activity')} active={panels.activity} label="Activity log">
           <Activity className="size-5" />
         </Fab>

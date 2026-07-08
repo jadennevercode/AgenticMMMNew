@@ -22,3 +22,9 @@ reference/
 .env
 .env.local
 .env.*.local
+
+# Local run state (start.sh / stop.sh)
+.run/
+
+# Run materials kit — real client data, do not commit
+run-materials/

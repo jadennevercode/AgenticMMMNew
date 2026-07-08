@@ -1,0 +1,47 @@
+{
+  "id": "2.33",
+  "title": "指标技术校验规则",
+  "purpose": "判断指标是否合建模标准；同因子多指标时淘汰不达标者；因子全失则预警",
+  "tests": {
+    "cv": {
+      "label": "波动性检验",
+      "metric": "波动系数CV = 方差/均值 (数据先缩放到0-1)",
+      "bands": [
+        { "score": 0, "cond": "CV<=0.05", "meaning": "变异极小，强烈建议剔除或替代" },
+        { "score": 0.5, "cond": "0.05<CV<0.1", "meaning": "变异弱，除非不可替代否则不入模" },
+        { "score": 1, "cond": "0.1<=CV<0.2", "meaning": "变异中等" },
+        { "score": 2, "cond": "CV>=0.2", "meaning": "变异高，波动明显" }
+      ]
+    },
+    "pearson": {
+      "label": "相关性检验",
+      "metric": "Pearson r (因子 vs KPI, 单变量)",
+      "bands": [
+        { "score": 0, "cond": "|r|<0.1", "meaning": "基本不相关，不建议入模" },
+        { "score": 0.5, "cond": "0.1<=|r|<0.3", "meaning": "弱相关，视因子数量/重要性决定" },
+        { "score": 1, "cond": "0.3<=|r|<0.5", "meaning": "较相关，建议入模" },
+        { "score": 2, "cond": "|r|>=0.5", "meaning": "强相关，建议入模" }
+      ]
+    },
+    "vif": {
+      "label": "共线性检验",
+      "metric": "VIF (因子 vs 因子)",
+      "bands": [
+        { "score": 0, "cond": "VIF=1", "meaning": "无线性相关" },
+        { "score": 0.5, "cond": "1<VIF<5", "meaning": "中等共线性，一般可接受" },
+        { "score": 1, "cond": "VIF>=5", "meaning": "明显共线性，需关注" },
+        { "score": 2, "cond": "VIF>=10", "meaning": "严重共线性，通常必须处理" }
+      ],
+      "note": "VIF越大共线性越严重；高VIF指标需降维/合并/剔除，结合业务取舍"
+    }
+  },
+  "verdict": {
+    "formula": "Total = CV + Pearson + VIF",
+    "thresholds": [
+      { "label": "Good", "cond": "Total>=3" },
+      { "label": "Acceptable", "cond": "1.5<=Total<3" },
+      { "label": "unconsiderable", "cond": "Total<1.5" }
+    ]
+  },
+  "differsFrom2_1": "2.1衡量数据本身质量(4维)；2.33衡量指标对建模的适用性(CV/Pearson/VIF)"
+}

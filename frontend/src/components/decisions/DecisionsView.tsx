@@ -2,12 +2,15 @@ import { useSimStore } from '../../store/useSimStore'
 import { TASKS } from '../../lib/scenario'
 import { DecisionCard } from './DecisionCard'
 
-/** Full-page inbox of every decision (open then resolved) */
+/** decision id → the step that produces it (from the blueprint DAG) */
+const DECISION_TASK = new Map(TASKS.filter((t) => t.decision).map((t) => [t.decision!.id, t.id]))
+
+/** Full-page inbox of every decision (open then resolved), driven by /api/state */
 export default function DecisionsView() {
   const decisions = useSimStore((s) => s.decisions)
-  const withDecision = TASKS.filter((t) => t.decision)
-  const open = withDecision.filter((t) => decisions[t.decision!.id]?.status === 'open')
-  const resolved = withDecision.filter((t) => decisions[t.decision!.id]?.status === 'resolved')
+  const all = Object.values(decisions)
+  const open = all.filter((d) => d.status === 'open')
+  const resolved = all.filter((d) => d.status === 'resolved')
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-6">
@@ -29,14 +32,14 @@ export default function DecisionsView() {
       )}
 
       <div className="space-y-5">
-        {open.map((t) => (
-          <DecisionCard key={t.id} decision={t.decision!} runtime={decisions[t.decision!.id]} taskId={t.id} />
+        {open.map((d) => (
+          <DecisionCard key={d.id} decision={d} taskId={DECISION_TASK.get(d.id) ?? ''} />
         ))}
         {resolved.length > 0 && (
           <p className="pt-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Already decided</p>
         )}
-        {resolved.map((t) => (
-          <DecisionCard key={t.id} decision={t.decision!} runtime={decisions[t.decision!.id]} taskId={t.id} />
+        {resolved.map((d) => (
+          <DecisionCard key={d.id} decision={d} taskId={DECISION_TASK.get(d.id) ?? ''} />
         ))}
       </div>
     </div>

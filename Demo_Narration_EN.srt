@@ -1,0 +1,763 @@
+1
+00:00:00,000 --> 00:00:03,500
+Good morning, everyone, and thank you for your time.
+
+2
+00:00:05,500 --> 00:00:10,500
+Today, I'll introduce our product — AgenticMMM — and give you a live,
+
+3
+00:00:12,500 --> 00:00:17,100
+end-to-end demonstration of how it delivers a real Marketing Mix Modeling project.
+
+4
+00:00:19,100 --> 00:00:28,300
+Before I begin, let me take a moment to make two things clear: what MMM is, and the problem we set out to solve.
+
+5
+00:00:30,300 --> 00:00:36,100
+Marketing Mix Modeling — MMM for short — is a well-established discipline in marketing science.
+
+6
+00:00:38,100 --> 00:00:43,900
+It answers the question every marketing leader cares about most: for every dollar I spend,
+
+7
+00:00:45,900 --> 00:00:48,600
+how much business does it actually generate?
+
+8
+00:00:50,600 --> 00:00:55,600
+TV, e-commerce, offline, promotions — what is each channel's true contribution to sales?
+
+9
+00:00:57,600 --> 00:00:59,900
+What is the return on investment?
+
+10
+00:01:01,900 --> 00:01:06,100
+If I increase or cut a budget, how will sales respond?
+
+11
+00:01:08,100 --> 00:01:13,100
+And how should I reallocate next quarter's budget across channels to maximize return?
+
+12
+00:01:15,100 --> 00:01:17,400
+So how does MMM do it?
+
+13
+00:01:19,400 --> 00:01:29,000
+In simple terms, it splits the sales over a period into two parts: a 'base' — the sales you'd get even with no advertising —
+
+14
+00:01:31,000 --> 00:01:36,800
+and the extra sales that each marketing and promotional activity drove on top of that.
+
+15
+00:01:38,800 --> 00:01:44,200
+It tracks no individual consumer's data; instead, from aggregate historical sales and media data,
+
+16
+00:01:46,200 --> 00:01:50,400
+it uses statistics to work out how much each channel contributed.
+
+17
+00:01:52,400 --> 00:01:57,000
+It also respects two realities of marketing: first, a carryover effect —
+
+18
+00:01:59,000 --> 00:02:07,800
+the ad you run today keeps working for the following weeks; and second, diminishing returns — the more you pour into one channel,
+
+19
+00:02:09,800 --> 00:02:12,500
+the less each additional dollar brings back.
+
+20
+00:02:14,500 --> 00:02:22,600
+Because it accounts for both, MMM can explain each channel's past return and project how best to split future budget —
+
+21
+00:02:24,600 --> 00:02:27,300
+and it sidesteps privacy concerns by design.
+
+22
+00:02:29,300 --> 00:02:36,600
+Its value is beyond dispute — but the way it has traditionally been delivered carries a fundamental pain point.
+
+23
+00:02:38,600 --> 00:02:42,800
+And that is exactly what I want to talk about today.
+
+24
+00:02:44,800 --> 00:02:52,500
+A traditional MMM project typically takes six to twelve weeks and relies on a dedicated team of consultants, data engineers,
+
+25
+00:02:54,500 --> 00:02:56,100
+and modeling scientists.
+
+26
+00:02:58,100 --> 00:03:03,900
+But the core burden of this delivery model is not the time it takes —
+
+27
+00:03:05,900 --> 00:03:10,100
+it is that it places an extraordinary cognitive load on people.
+
+28
+00:03:12,100 --> 00:03:18,600
+In a traditional, process-driven delivery, every step depends heavily on expert judgment: how to structure the factors,
+
+29
+00:03:20,600 --> 00:03:27,100
+which data is usable, how to set the model priors, whether the results align with business logic.
+
+30
+00:03:29,100 --> 00:03:36,400
+And on top of making these judgments, the experts must also carry out an enormous amount of mechanical, repetitive,
+
+31
+00:03:38,400 --> 00:03:43,000
+low-value execution — cleaning data, aligning formats, tuning parameters over and over.
+
+32
+00:03:45,000 --> 00:03:48,800
+The high-order cognition of experts gets buried under low-order labor.
+
+33
+00:03:50,800 --> 00:03:55,800
+The design philosophy of AgenticMMM is built entirely around relieving that cognitive load.
+
+34
+00:03:57,800 --> 00:04:00,100
+We distill it into three principles.
+
+35
+00:04:02,100 --> 00:04:07,900
+Principle one: draw a clear line between three roles — AI, Human, and Machine —
+
+36
+00:04:09,900 --> 00:04:14,900
+and assign every piece of work to whichever is best suited to it.
+
+37
+00:04:16,900 --> 00:04:20,700
+We classify every task in the project into three kinds:
+
+38
+00:04:22,700 --> 00:04:28,100
+- Machine handles deterministic computation — data extraction and transformation, regression fitting, quality scoring.
+
+39
+00:04:30,100 --> 00:04:36,300
+This work has exactly one correct answer, so we hand it to code: fast and error-free.
+
+40
+00:04:38,300 --> 00:04:43,300
+- AI handles grounded generation — business interpretation, key business questions, decision recommendations.
+
+41
+00:04:45,300 --> 00:04:52,600
+This work requires understanding and expression, but it must be built strictly on real data and real model results.
+
+42
+00:04:54,600 --> 00:05:01,100
+- Human handles judgment and decisions — the critical junctures that require business experience, trade-offs, and accountability.
+
+43
+00:05:03,100 --> 00:05:11,600
+This division of labor frees the expert entirely from mechanical labor and concentrates their cognitive resources where a human is truly needed.
+
+44
+00:05:13,600 --> 00:05:19,400
+Principle two: Human-in-the-Loop, or HITL — ensuring people step in only when it is necessary.
+
+45
+00:05:21,400 --> 00:05:23,000
+This is critical.
+
+46
+00:05:25,000 --> 00:05:31,200
+We do not chase full automation, nor do we exhaust people by making them confirm everything.
+
+47
+00:05:33,200 --> 00:05:37,400
+The system places decision nodes at every critical quality gate —
+
+48
+00:05:39,400 --> 00:05:44,400
+the workflow deliberately blocks there and waits for human confirmation, while everywhere else,
+
+49
+00:05:46,400 --> 00:05:49,100
+AI and Machine advance autonomously, without interruption.
+
+50
+00:05:51,100 --> 00:05:54,900
+Here is an example: data validation uses a three-state score.
+
+51
+00:05:56,900 --> 00:06:03,800
+A pass is cleared automatically; an unusable metric is discarded automatically with an alert; and only the borderline,
+
+52
+00:06:05,800 --> 00:06:08,900
+questionable metrics bring a person into the decision.
+
+53
+00:06:10,900 --> 00:06:17,400
+A person's attention is therefore directed precisely to where judgment is most needed, rather than consumed indiscriminately.
+
+54
+00:06:19,400 --> 00:06:23,200
+Principle three works on two levels — Artifacts-Driven and Human-Intuitive.
+
+55
+00:06:25,200 --> 00:06:31,000
+Being Artifacts-Driven means the entire workflow is organized around concrete deliverables, rather than an opaque,
+
+56
+00:06:33,000 --> 00:06:34,600
+black-box process.
+
+57
+00:06:36,600 --> 00:06:38,500
+This yields four practical benefits.
+
+58
+00:06:40,500 --> 00:06:45,900
+First, visible progress — the status of every deliverable is clear at a glance.
+
+59
+00:06:47,900 --> 00:06:53,700
+Second, controllable quality — every deliverable is a natural unit for human review and sign-off.
+
+60
+00:06:55,700 --> 00:06:59,900
+Third, full traceability — every deliverable carries version history and lineage,
+
+61
+00:07:01,900 --> 00:07:09,600
+so the final report can be traced all the way back to the model, data, and interviews it rests on.
+
+62
+00:07:11,600 --> 00:07:15,400
+Fourth, reliable propagation — the moment a deliverable is rejected,
+
+63
+00:07:17,400 --> 00:07:23,600
+every affected downstream output is automatically reset and rebuilt, so no inconsistency is ever left behind.
+
+64
+00:07:25,600 --> 00:07:30,200
+Being Human-Intuitive means the system presents work the way a person thinks,
+
+65
+00:07:32,200 --> 00:07:36,400
+rather than forcing the person to adapt to the machine's logic.
+
+66
+00:07:38,400 --> 00:07:43,800
+A project unfolds naturally along the hierarchy of Stage → Deliverable → build process;
+
+67
+00:07:45,800 --> 00:07:53,500
+business factors are presented as an intuitive factor tree; items requiring a decision are gathered into a single, clear inbox.
+
+68
+00:07:55,500 --> 00:08:03,200
+The user needs to learn no complex system concepts — everything is presented in the business language they already know.
+
+69
+00:08:05,200 --> 00:08:10,600
+Built on this philosophy, the core of the product is carried by three interfaces.
+
+70
+00:08:12,600 --> 00:08:14,500
+Let me walk through each.
+
+71
+00:08:16,500 --> 00:08:18,100
+First, Workflow.
+
+72
+00:08:20,100 --> 00:08:26,300
+This is the methodology blueprint the product crystallizes, visualized as a directed acyclic graph, a DAG.
+
+73
+00:08:28,300 --> 00:08:34,500
+The horizontal axis is the five delivery stages; the vertical swim lanes are the five agents.
+
+74
+00:08:36,500 --> 00:08:44,200
+Every task node is labeled with its collaboration mode — whether it is executed autonomously by Machine, generated by AI,
+
+75
+00:08:46,200 --> 00:08:47,800
+or requires human intervention.
+
+76
+00:08:49,800 --> 00:08:54,400
+Click any node to see its inputs, outputs, dependencies, and reasoning log.
+
+77
+00:08:56,400 --> 00:09:01,000
+This single diagram is the complete picture of how the project runs.
+
+78
+00:09:03,000 --> 00:09:04,600
+Second, Project.
+
+79
+00:09:06,600 --> 00:09:13,100
+This is the primary workspace for execution and delivery, and the direct embodiment of the Artifacts-Driven principle.
+
+80
+00:09:15,100 --> 00:09:23,900
+The interface is organized along the hierarchy of Stage spine → Deliverable list → build process: the stage progress sits at the top,
+
+81
+00:09:25,900 --> 00:09:34,400
+the full set of deliverables for that stage on the left, and the main area shows exactly how each deliverable is built.
+
+82
+00:09:36,400 --> 00:09:41,000
+The real materials a project needs are uploaded through the Project Folder;
+
+83
+00:09:43,000 --> 00:09:46,100
+items requiring human confirmation are handled right here.
+
+84
+00:09:48,100 --> 00:09:52,300
+All of the user's day-to-day work happens in this one interface.
+
+85
+00:09:54,300 --> 00:09:55,900
+Third, Knowledge.
+
+86
+00:09:57,900 --> 00:10:01,400
+This is the platform's hub for accumulation and reuse.
+
+87
+00:10:03,400 --> 00:10:09,900
+MMM industry knowledge — factor templates, interview frameworks, validation rules — is accumulated here, organized by industry,
+
+88
+00:10:11,900 --> 00:10:13,500
+editable, maintainable, and versioned.
+
+89
+00:10:15,500 --> 00:10:19,700
+Every new project inherits the relevant industry's knowledge base from here;
+
+90
+00:10:21,700 --> 00:10:28,600
+and every confirmation and correction a person makes during a project flows back and enriches this knowledge base.
+
+91
+00:10:30,600 --> 00:10:34,400
+The platform therefore grows smarter with every project it runs.
+
+92
+00:10:36,400 --> 00:10:39,900
+Enough talk — let the results speak for themselves.
+
+93
+00:10:41,900 --> 00:10:51,100
+What I have open here is a project that has already run to completion — a real modeling dataset of some twenty thousand rows.
+
+94
+00:10:53,100 --> 00:10:58,500
+Traditionally, this is six to twelve weeks of output from a full expert team.
+
+95
+00:11:00,500 --> 00:11:05,900
+Over the next few minutes, I'll walk you through its results from the top,
+
+96
+00:11:07,900 --> 00:11:16,700
+and I'd ask you to watch just one thing: behind these results, how did the three roles — AI, Human, and Machine —
+
+97
+00:11:18,700 --> 00:11:21,800
+divide the work and collaborate to produce them.
+
+98
+00:11:23,800 --> 00:11:25,400
+Stage one, Business Understanding.
+
+99
+00:11:27,400 --> 00:11:35,900
+This used to be the most cognitively demanding part of the entire project — a consultant poring over the Statement of Work,
+
+100
+00:11:37,900 --> 00:11:43,300
+industry reports, and a dozen interview transcripts, then hand-drawing a factor tree from experience.
+
+101
+00:11:45,300 --> 00:11:53,400
+The project scope you see here was framed automatically by the Business Agent after it read the client's SOW: product lines,
+
+102
+00:11:55,400 --> 00:11:58,500
+channels, regions, and time granularity, all of it.
+
+103
+00:12:00,500 --> 00:12:05,900
+And this entire factor tree was generated by it drawing on industry knowledge —
+
+104
+00:12:07,900 --> 00:12:14,800
+from the top-level business drivers all the way down to modelable metrics, each factor matched with its indicators;
+
+105
+00:12:16,800 --> 00:12:23,700
+the common parts recalled directly, the specific parts added by it on its own, with their sources labeled.
+
+106
+00:12:25,700 --> 00:12:28,800
+And the crux is in these flagged nodes.
+
+107
+00:12:30,800 --> 00:12:35,400
+AI ran through the entire process, yet it never decided for anyone.
+
+108
+00:12:37,400 --> 00:12:44,700
+Every factor the AI added was, at the time, placed in front of a person to confirm or reject;
+
+109
+00:12:46,700 --> 00:12:53,600
+and every one of those judgments flowed back into the knowledge base, making the platform smarter with use.
+
+110
+00:12:55,600 --> 00:13:01,400
+This is what AI-Native collaboration looks like: AI and Machine carry all the heavy lifting,
+
+111
+00:13:03,400 --> 00:13:08,000
+and the human appears only where a real decision must be made.
+
+112
+00:13:10,000 --> 00:13:13,100
+The interview step shows this even more fully.
+
+113
+00:13:15,100 --> 00:13:23,600
+This interview outline was generated by the agent after it had first read all existing materials and drafted its own first-pass answers,
+
+114
+00:13:25,600 --> 00:13:31,400
+leaving only the questions that truly needed validating in person; once the notes came back,
+
+115
+00:13:33,400 --> 00:13:39,900
+it compared them automatically and highlighted, right on the factor tree, what should change and why —
+
+116
+00:13:41,900 --> 00:13:44,200
+the person only had to confirm.
+
+117
+00:13:46,200 --> 00:13:49,700
+Following on, this is the data-request document it generated,
+
+118
+00:13:51,700 --> 00:13:58,200
+and the single Business Understanding summary into which it folded the scope, factor tree, and interview insights.
+
+119
+00:14:00,200 --> 00:14:06,000
+A stage that once took weeks — its results, all here in front of you.
+
+120
+00:14:08,000 --> 00:14:10,300
+Stage two, Data Intake & Quality.
+
+121
+00:14:12,300 --> 00:14:20,800
+Once the data was back, this used to be a data engineer's most grueling weeks — cleaning, aligning, checking column by column.
+
+122
+00:14:22,800 --> 00:14:29,300
+This deterministic work, the kind with exactly one right answer, was taken over entirely by the Machine.
+
+123
+00:14:31,300 --> 00:14:37,800
+Look at this data-quality scorecard: the system scores every metric across a few dimensions — consistency, accuracy,
+
+124
+00:14:39,800 --> 00:14:41,400
+comprehensiveness, granularity.
+
+125
+00:14:43,400 --> 00:14:52,200
+A full score is cleared automatically, a failing one is discarded with an alert — the vast majority, it handles on its own.
+
+126
+00:14:54,200 --> 00:15:02,700
+And this flagged metric is the one that landed on the borderline and was brought specifically to a person to decide —
+
+127
+00:15:04,700 --> 00:15:09,300
+the human's attention landed precisely on the one place that needed judgment.
+
+128
+00:15:11,300 --> 00:15:15,100
+Once validation passes, the multi-source data is automatically cleaned, mapped,
+
+129
+00:15:17,100 --> 00:15:23,300
+and integrated into this unified wide-table master dataset on the right, together with a data dictionary.
+
+130
+00:15:25,300 --> 00:15:31,500
+Notice one elegant thing: the columns of this wide table are the factor tree itself —
+
+131
+00:15:33,500 --> 00:15:38,100
+the business structure and the data structure are one and the same.
+
+132
+00:15:40,100 --> 00:15:43,900
+From raw data to final dataset, every step is traceable.
+
+133
+00:15:45,900 --> 00:15:47,800
+Stage three, Validation & Hypotheses.
+
+134
+00:15:49,800 --> 00:15:56,000
+Clean isn't enough — the data has to withstand two interrogations at once: business, and statistical.
+
+135
+00:15:58,000 --> 00:16:03,800
+First, business validation: the Data Agent drills down through the factor tree layer by layer,
+
+136
+00:16:05,800 --> 00:16:08,500
+checking whether each metric makes commercial sense,
+
+137
+00:16:10,500 --> 00:16:18,200
+then auto-generates charts and trend interpretations for the client to sign off on — another gate guarded by a human.
+
+138
+00:16:20,200 --> 00:16:26,400
+Once cleared comes statistical validation: it screens each metric with coefficient of variation, correlation, and collinearity,
+
+139
+00:16:28,400 --> 00:16:34,600
+then runs a quick regression pre-fit to produce rough contribution and ROI ranges for each factor,
+
+140
+00:16:36,600 --> 00:16:38,500
+finally locking the model input.
+
+141
+00:16:40,500 --> 00:16:47,800
+And more importantly, this stage also distilled the modeling priors — the likely elasticity range of a given channel,
+
+142
+00:16:49,800 --> 00:16:54,400
+that a competitor's effect should be negative, that brand search leads sales.
+
+143
+00:16:56,400 --> 00:17:02,900
+Each of these hypotheses was confirmed by the client, becoming a constraint for the next stage's modeling.
+
+144
+00:17:04,900 --> 00:17:08,700
+Business intuition and statistical rigor, brought together in one system.
+
+145
+00:17:10,700 --> 00:17:12,300
+Stage four, Modeling.
+
+146
+00:17:14,300 --> 00:17:18,900
+First, model choice: when you need to iterate ROI quickly, use OLS;
+
+147
+00:17:20,900 --> 00:17:29,000
+when you need high precision and want to feed business priors in to guide the result, use a Bayesian probabilistic model.
+
+148
+00:17:31,000 --> 00:17:36,000
+Those business hypotheses from the last stage were translated here into mathematical constraints.
+
+149
+00:17:38,000 --> 00:17:46,800
+Here I'll draw a hard line: every number you see in the report — adstock, saturation curves, each channel's contribution and ROI —
+
+150
+00:17:48,800 --> 00:17:55,300
+comes from a real regression engine, computed one by one, not conjured up by a language model.
+
+151
+00:17:57,300 --> 00:18:03,800
+AI-Native never means letting AI make things up; what should be computed is left, faithfully, to computation.
+
+152
+00:18:05,800 --> 00:18:12,700
+After tuning comes technical validation — and not on a single metric: goodness of fit, prediction accuracy, residuals,
+
+153
+00:18:14,700 --> 00:18:20,100
+contribution decomposition, all cross-validated across dimensions, where any single red flag stops the model.
+
+154
+00:18:22,100 --> 00:18:25,900
+Only when all of that passes does model selection come.
+
+155
+00:18:27,900 --> 00:18:33,300
+These here are the Pareto-optimal candidates the system produced, laid out side by side.
+
+156
+00:18:35,300 --> 00:18:42,600
+The system never picks for anyone automatically — the one finally chosen was this one, owned by a person.
+
+157
+00:18:44,600 --> 00:18:48,800
+Because choosing a model is, at its core, a business trade-off.
+
+158
+00:18:50,800 --> 00:18:52,400
+Stage five, Reporting.
+
+159
+00:18:54,400 --> 00:18:59,400
+The Report Agent turned cold coefficients into an entire language the business understands.
+
+160
+00:19:01,400 --> 00:19:09,500
+Look at this report: the decomposition chart shows you how sales break down into Base plus the contribution of each channel;
+
+161
+00:19:11,500 --> 00:19:17,700
+the Due-to chart attributes 'why did sales rise or fall this period' to each individual channel;
+
+162
+00:19:19,700 --> 00:19:24,700
+the ROI chart sets every channel's return next to an industry benchmark line,
+
+163
+00:19:26,700 --> 00:19:33,600
+with a reminder that upper-funnel channels have naturally lower ROI yet real value, and can't be extrapolated linearly.
+
+164
+00:19:35,600 --> 00:19:41,800
+Every chart is a templated chart plus AI adding business-contextual narration — both standard and business-savvy.
+
+165
+00:19:43,800 --> 00:19:50,700
+And you can question it directly, say, 'Why does this channel have the highest ROI?' — it answers,
+
+166
+00:19:52,700 --> 00:19:55,000
+grounded in the real model results.
+
+167
+00:19:57,000 --> 00:20:03,900
+But here is the real highlight: the model is not the finish line — it's the starting line.
+
+168
+00:20:05,900 --> 00:20:14,000
+This simulator, delivered to the client, can be re-run at any time — set the total budget and your business constraints,
+
+169
+00:20:16,000 --> 00:20:20,200
+and it runs a marginal optimization on the real response curves,
+
+170
+00:20:22,200 --> 00:20:26,800
+telling you directly how to split the money for the greatest return.
+
+171
+00:20:28,800 --> 00:20:34,200
+Traditionally, a modeling team would compute this one question for days; here, it's seconds,
+
+172
+00:20:36,200 --> 00:20:40,400
+and you can play out as many scenarios as you like.
+
+173
+00:20:42,400 --> 00:20:49,300
+A real MMM project, carried all the way from a single SOW to an executable budget recommendation —
+
+174
+00:20:51,300 --> 00:20:53,600
+that is what it ultimately delivers.
+
+175
+00:20:55,600 --> 00:21:01,400
+In a little over ten minutes, we have walked through a complete, real MMM project.
+
+176
+00:21:03,400 --> 00:21:05,700
+Let me close on three points.
+
+177
+00:21:07,700 --> 00:21:10,000
+First, this is AI-Native, not AI-attached.
+
+178
+00:21:12,000 --> 00:21:19,300
+We did not bolt a chat box onto legacy software; we rebuilt from the skeleton of the process outward.
+
+179
+00:21:21,300 --> 00:21:27,800
+The methodology is crystallized into a visible workflow, AI, Human, and Machine each play their proper role,
+
+180
+00:21:29,800 --> 00:21:34,400
+and AI reaches into every step rather than floating on the surface.
+
+181
+00:21:36,400 --> 00:21:42,200
+Second, it relieves the cognitive burden on people — it does not replace their judgment.
+
+182
+00:21:44,200 --> 00:21:50,700
+Machine takes on mechanical computation, AI takes on grounded generation, and the human — through Human-in-the-Loop —
+
+183
+00:21:52,700 --> 00:22:00,400
+is called precisely to every juncture that genuinely requires judgment: not one interruption too many, not one checkpoint too few.
+
+184
+00:22:02,400 --> 00:22:07,400
+Everything is artifacts-driven, visible, and traceable, presented in a way people already understand.
+
+185
+00:22:09,400 --> 00:22:14,000
+Third, it delivers not just a report, but a lasting decision capability.
+
+186
+00:22:16,000 --> 00:22:23,700
+Once the model is complete, you can return to the simulator at any time to play out any budget scenario;
+
+187
+00:22:25,700 --> 00:22:30,300
+and the platform keeps evolving as each project deposits knowledge into it.
+
+188
+00:22:32,300 --> 00:22:41,100
+For a brand, this means three things: a faster delivery cycle, a lower project cost, and — because the entire process is visible,
+
+189
+00:22:43,100 --> 00:22:46,600
+controllable, and traceable — results you can trust more.
+
+190
+00:22:48,600 --> 00:22:50,200
+Thank you.
+
+191
+00:22:52,200 --> 00:22:58,000
+I'd be glad to run through any specific scenario you care about, live, right now.
