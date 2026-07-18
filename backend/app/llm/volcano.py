@@ -127,11 +127,22 @@ class VolcanoClient:
                     resp = await client.post(self._url, headers=self._headers, json=payload)
                     if resp.status_code >= 400:
                         raise LLMError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-                    data = resp.json()
+                    try:
+                        data = resp.json()
+                    except ValueError as e:  # 200 with a non-JSON body (proxy page,
+                        # truncated stream, empty response) — must not escape as a raw
+                        # JSONDecodeError: every caller degrades on LLMError, and an
+                        # unexpected type sails straight through those fallbacks and
+                        # kills the run instead of dropping to the computed values.
+                        raise LLMError(
+                            f"non-JSON response ({resp.status_code}): {resp.text[:200]!r}") from e
                     return data["choices"][0]["message"]["content"] or ""
-                except (httpx.HTTPError, LLMError, KeyError) as e:
+                except (httpx.HTTPError, LLMError, KeyError, IndexError, TypeError) as e:
                     last_err = e
-        raise LLMError(f"LLM chat failed after {self._max_retries} attempts: {last_err}")
+        # Name the type: httpx timeouts stringify to "", which otherwise reports as
+        # "failed after 3 attempts: " and says nothing about what went wrong.
+        detail = f"{type(last_err).__name__}: {last_err}" if last_err else "unknown error"
+        raise LLMError(f"LLM chat failed after {self._max_retries} attempts — {detail}")
 
     async def json(
         self,

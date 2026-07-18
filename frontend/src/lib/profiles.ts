@@ -66,28 +66,23 @@ export const STAGES: Record<StageId, StageProfile> = {
     milestone: 'M1 · Scope, factor tree & data request confirmed',
   },
   s2: {
-    id: 's2', index: 2, name: 'Data Intake & Quality',
-    goal: 'Collect, score, integrate client data into one governed dataset',
-    milestone: 'M2 · Data acceptance completed',
-  },
-  s3: {
-    id: 's3', index: 3, name: 'Validation & Hypotheses',
-    goal: 'Business sense-check, client sign-off, statistical screening, model input',
-    milestone: 'M3 · Client sign-off & model input ready',
+    id: 's2', index: 2, name: 'Data Intake & Validation',
+    goal: 'Reference prepared data assets, validate layer by layer, lock the master feature table',
+    milestone: 'M2 · Master data locked',
   },
   s4: {
-    id: 's4', index: 4, name: 'Modeling',
+    id: 's4', index: 3, name: 'Modeling',
     goal: 'Priors, training, technical and business review',
-    milestone: 'M4 · Model passed both reviews',
+    milestone: 'M3 · Model passed both reviews',
   },
   s5: {
-    id: 's5', index: 5, name: 'Reporting',
+    id: 's5', index: 4, name: 'Reporting',
     goal: 'Standard report, narrative and interactive Q&A',
-    milestone: 'M5 · Client review passed',
+    milestone: 'M4 · Client review passed',
   },
 }
 
-export const STAGE_ORDER: StageId[] = ['s1', 's2', 's3', 's4', 's5']
+export const STAGE_ORDER: StageId[] = ['s1', 's2', 's4', 's5']
 
 export const AGENT_COLOR: Record<AgentId, string> = {
   control: 'var(--color-agent-orchestration)',

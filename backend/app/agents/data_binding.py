@@ -135,7 +135,10 @@ def _melt_sheet(df: pd.DataFrame, *, l1: str, l2: str, l3: str, l4: str,
             "channel_type": _cell(r, roles.get("channel_type")),
             "channel": _cell(r, roles.get("channel") or roles.get("channel_type")),
             "year": (period // 100 if isinstance(period, int) else pd.NA), "month": period,
-            "source": "upload", "l1": l1, "l2": l2, "l3": l3, "l4": l4,
+            # Tag each row with its originating file so Business Validation can filter
+            # a chart down to one contributing data source (mirrors the Data-Engine
+            # compiler's per-row `source` provenance).
+            "source": task_name or "upload", "l1": l1, "l2": l2, "l3": l3, "l4": l4,
             "l5": "", "l6": "", "l7": "", "l8": "",
         }
         for mc in indicators:

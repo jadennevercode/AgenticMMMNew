@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     db_path: str = "./data/mmm.db"
     reference_dir: str = "../reference"
 
+    # dbt Fusion engine (Data Engine transform layer). Empty ⇒ auto-detect the
+    # binary (env DBT_BIN, then ~/.local/bin/dbt, then PATH). See app/dataeng/dbt.
+    dbt_bin: str = ""
+    dbt_timeout: int = 300
+
     @property
     def data_path(self) -> Path:
         p = (BACKEND_ROOT / self.data_dir).resolve()

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.config import BACKEND_ROOT
+from app.config import BACKEND_ROOT, get_settings
 from app.domain.models import (
     GENERAL_INDUSTRY,
     FactorTreeRow,
@@ -24,6 +24,11 @@ from app.domain.models import (
 ASSETS_DIR = BACKEND_ROOT.parent / "Assets"
 _FACTOR_TREE_FILE = "Default Factor Tree.xlsx"
 _INTERVIEW_FILE = "Interview Plan & Question.xlsx"
+# Enriched beverage factor tree carrying the ROI / Contribution range columns
+# (5 base columns + ROI range + Contribution Range). Lives under the reference
+# folder; preferred over the plain Assets tree so the seeded beverage example
+# ships the expected post-OLS bands. Falls back to the Assets tree if absent.
+_REFERENCE_FACTOR_TREE_FILE = "roi- contribution-range.xlsx"
 
 # Beverage built-ins are keyed to the food-bev > beverage industry node.
 _BEV_L1 = "food-bev"
@@ -92,8 +97,10 @@ def _parse_factor_tree(path: Path) -> list[FactorTreeRow]:
     for i, raw in enumerate(ws.iter_rows(values_only=True)):
         if i == 0:
             continue  # header banner
-        cells = [_clean(c) for c in (list(raw) + [""] * 5)[:5]]
-        l1, l2, l3, l4, indicator = cells
+        # 5 base columns (L1..L4 + indicator) plus optional ROI / Contribution
+        # range columns. The range columns are per-row (never merged).
+        cells = [_clean(c) for c in (list(raw) + [""] * 7)[:7]]
+        l1, l2, l3, l4, indicator, roi_range, contribution_range = cells
         for idx, val in enumerate((l1, l2, l3, l4)):
             if val:
                 carry[idx] = val
@@ -102,7 +109,8 @@ def _parse_factor_tree(path: Path) -> list[FactorTreeRow]:
         if not any(carry) and not indicator:
             continue
         rows.append(FactorTreeRow(
-            l1=carry[0], l2=carry[1], l3=carry[2], l4=carry[3], indicator=indicator))
+            l1=carry[0], l2=carry[1], l3=carry[2], l4=carry[3], indicator=indicator,
+            roiRange=roi_range, contributionRange=contribution_range))
     wb.close()
     return rows
 
@@ -161,7 +169,10 @@ def build_builtin_templates() -> list[KnowledgeTemplate]:
     templates: list[KnowledgeTemplate] = []
     now = _now_iso()
 
-    ft_path = ASSETS_DIR / _FACTOR_TREE_FILE
+    # Prefer the enriched reference tree (carries ROI / Contribution ranges); fall
+    # back to the plain Assets tree when the reference folder is not present.
+    ref_ft_path = get_settings().reference_path / _REFERENCE_FACTOR_TREE_FILE
+    ft_path = ref_ft_path if ref_ft_path.exists() else ASSETS_DIR / _FACTOR_TREE_FILE
     factor_rows: list[FactorTreeRow] = []
     if ft_path.exists():
         try:
@@ -171,7 +182,7 @@ def build_builtin_templates() -> list[KnowledgeTemplate]:
     templates.append(KnowledgeTemplate(
         id="tpl-bev-factor-tree", kind="factor_tree",
         name="Beverage Factor Tree (default)", industryL1=_BEV_L1, industryL2=_BEV_L2,
-        version=1, builtin=True, factorRows=factor_rows, updatedAt=now,
+        version=2, builtin=True, factorRows=factor_rows, updatedAt=now,
     ))
 
     iv_path = ASSETS_DIR / _INTERVIEW_FILE

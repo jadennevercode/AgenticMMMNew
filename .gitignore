@@ -28,3 +28,8 @@ reference/
 
 # Run materials kit — real client data, do not commit
 run-materials/
+
+# Local reference-only checkouts (large, do not commit)
+dbt-core-main/
+dagster-master/
+cube-master/

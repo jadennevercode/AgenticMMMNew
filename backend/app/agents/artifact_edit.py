@@ -13,7 +13,7 @@ The flow is two-step (preview-then-confirm), mirrored by two endpoints in
 Two classes of artifact:
 
   • **model-backed** (`a-scope`, `a-factor-tree`, `a-quality-scorecard`,
-    `a-client-qa`) — the artifact body is *rendered from* a Pydantic domain
+    `a-stat-tests`) — the artifact body is *rendered from* a Pydantic domain
     model. We ask the LLM to revise the model JSON (validated against the
     schema), then re-render via the same helper the manual editors use, so the
     structured state (st.profile / factor_tree / ...) and the deliverable never
@@ -41,10 +41,11 @@ from app.agents.common import (
 from app.domain.models import (
     ArtifactEditProposal,
     ArtifactInstance,
-    ClientQA,
     FactorTree,
+    OlsConfig,
     ProjectProfile,
     QualityScorecard,
+    StatScorecard,
 )
 from app.llm.volcano import get_llm
 from app.store.state import ProjectState
@@ -96,15 +97,53 @@ def apply_quality_scorecard(st: ProjectState, model: QualityScorecard) -> None:
     st.analysis["quality"] = quality
 
 
-def apply_client_qa(st: ProjectState, model: ClientQA) -> None:
-    from app.agents.data import client_qa_sheet
+def apply_stat_scorecard(st: ProjectState, model: StatScorecard) -> None:
+    from app.agents.stat_scoring import accepted_stat_labels, stat_sheet
 
-    st.client_qa = model
-    art = st.artifact("a-client-qa")
+    st.stat_scorecard = model
+    art = st.artifact("a-stat-tests")
     if art is not None:
-        art.body = client_qa_sheet(model)
+        art.body = stat_sheet(model)
         art.version += 1
         art.edited_at_tick = st.tick
+    # Keep the 2.4 screening blackboard in sync with the human's kept indicators.
+    kept = accepted_stat_labels(model)
+    screening = dict(st.analysis.get("screening") or {})
+    screening["kept"] = kept
+    screening["drop"] = sum(1 for r in model.rows if r.disposition == "drop")
+    st.analysis["screening"] = screening
+
+
+def apply_ols_config(st: ProjectState, model: OlsConfig) -> None:
+    """Persist the 2.5 setup and re-fit immediately.
+
+    The OLS is cheap and the human is iterating (change Y, untick a collinear
+    variable, adjust seasonality), so the fit runs synchronously here rather than
+    through the run loop — there is no single-task rerun, and `d-2.5`'s rework
+    resets 2.3 and everything downstream, which is far too destructive for a
+    configuration tweak. Before Y is confirmed there is nothing to fit, so the
+    config is just persisted.
+    """
+    from app.agents.ols_review import build_ols_review
+
+    st.ols_config = model
+    art = st.artifact("a-ols-test")
+    if art is None:
+        return
+    fit = bool(model.y)  # no response confirmed yet → stay in the setup state
+    try:
+        body, prefit, flagged = build_ols_review(st, fit=fit)
+    except Exception as e:  # noqa: BLE001 — a bad setup must not 500 the editor
+        body, prefit, flagged = build_ols_review(st, fit=False)
+        body["note"] = f"The fit could not run with this setup: {e}"
+    art.body = body
+    art.version += 1
+    art.edited_at_tick = st.tick
+    if fit:
+        st.analysis["prefit"] = prefit
+        st.analysis["ols_flagged"] = flagged
+        st.analysis["selection_warnings"] = [
+            f"{f['l4']} · {f['indicator']}" for f in flagged][:20]
 
 
 # Registry: artifact id -> how to read / revise / apply its backing model.
@@ -140,10 +179,10 @@ def _render_quality(st: ProjectState, m: QualityScorecard) -> dict:
     return quality_sheet(m)
 
 
-def _render_client_qa(st: ProjectState, m: ClientQA) -> dict:
-    from app.agents.data import client_qa_sheet
+def _render_stat_scorecard(st: ProjectState, m: StatScorecard) -> dict:
+    from app.agents.stat_scoring import stat_sheet
 
-    return client_qa_sheet(m)
+    return stat_sheet(m)
 
 
 MODEL_BINDINGS: dict[str, _ModelBinding] = {
@@ -156,8 +195,8 @@ MODEL_BINDINGS: dict[str, _ModelBinding] = {
     "a-quality-scorecard": _ModelBinding(
         QualityScorecard, lambda st: st.quality_scorecard, _render_quality, apply_quality_scorecard
     ),
-    "a-client-qa": _ModelBinding(
-        ClientQA, lambda st: st.client_qa, _render_client_qa, apply_client_qa
+    "a-stat-tests": _ModelBinding(
+        StatScorecard, lambda st: st.stat_scorecard, _render_stat_scorecard, apply_stat_scorecard
     ),
 }
 

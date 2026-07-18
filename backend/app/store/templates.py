@@ -56,12 +56,25 @@ class TemplateStore:
             self._write(build_builtin_templates())
         else:
             # Heal older installs: back-fill any built-in section added since the
-            # index was first written (e.g. rules / industry / general knowledge).
+            # index was first written (e.g. rules / industry / general knowledge),
+            # and refresh built-ins whose seed version advanced (e.g. the beverage
+            # factor tree gaining ROI / Contribution range columns). Built-ins are
+            # meant to be cloned, not edited in place, so replacing them is safe.
             items = self._read()
+            builtins = {t.id: t for t in build_builtin_templates()}
             have = {t.id for t in items}
-            missing = [t for t in build_builtin_templates() if t.id not in have]
-            if missing:
-                self._write(items + missing)
+            changed = False
+            healed: list[KnowledgeTemplate] = []
+            for t in items:
+                seed = builtins.get(t.id)
+                if seed and seed.builtin and t.builtin and seed.version > t.version:
+                    healed.append(seed)
+                    changed = True
+                else:
+                    healed.append(t)
+            missing = [t for t in builtins.values() if t.id not in have]
+            if missing or changed:
+                self._write(healed + missing)
         self._initialized = True
 
     # ── public API ───────────────────────────────────────

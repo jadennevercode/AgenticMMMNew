@@ -1,4 +1,14 @@
-import type { ArtifactBody, ArtifactFormat, DocData, ReviewData, SheetData, SlidesData } from './types'
+import type {
+  ArtifactBody,
+  ArtifactFormat,
+  DocData,
+  MasterData,
+  OlsTreeData,
+  ReviewData,
+  SheetData,
+  SlidesData,
+  ValidationReviewData,
+} from './types'
 
 /**
  * Format helpers — project a structured artifact body to a markdown preview
@@ -12,6 +22,9 @@ export const FORMAT_LABEL: Record<ArtifactFormat, string> = {
   doc: 'Word',
   markdown: 'Markdown',
   review: 'Review',
+  validation: 'Validation',
+  olsTree: 'OLS',
+  masterData: 'Master Data',
 }
 
 export function asSheet(body?: ArtifactBody): SheetData | null {
@@ -25,6 +38,19 @@ export function asDoc(body?: ArtifactBody): DocData | null {
 }
 export function asReview(body?: ArtifactBody): ReviewData | null {
   return body && 'steps' in body ? body : null
+}
+export function asValidation(body?: ArtifactBody): ValidationReviewData | null {
+  return body && 'groups' in body && 'kpiMetric' in body ? body : null
+}
+export function asOlsTree(body?: ArtifactBody): OlsTreeData | null {
+  return body && 'tree' in body && 'objects' in body ? body : null
+}
+export function asMasterData(body?: ArtifactBody): MasterData | null {
+  return body && 'funnel' in body && 'adopted' in body ? body : null
+}
+
+function fmtNum(v: number | null, digits = 2): string {
+  return v === null || v === undefined ? '—' : v.toFixed(digits)
 }
 
 /** Render a body to markdown for previews / fallback display */
@@ -68,6 +94,70 @@ export function bodyToMarkdown(format: ArtifactFormat, body: ArtifactBody | unde
         return `## ${st.title}\n${st.intro ?? ''}\n\n${charts}`
       })
       .join('\n\n')
+  }
+  const validation = asValidation(body)
+  if (validation) {
+    const header = `# Business Validation\nKPI: ${validation.kpiMetric || '—'}`
+    const groups = validation.groups
+      .map((g) => {
+        const sign = g.signoff === 'yes' ? '✓ signed off' : g.signoff === 'no' ? '✗ rejected' : 'pending'
+        return `## ${[g.l1, g.l2, g.l3].filter(Boolean).join(' › ')}\n${g.interpretation}\n> Indicators: ${g.defaultIndicators.join(', ') || '—'} · Sign-off: ${sign}`
+      })
+      .join('\n\n')
+    return `${header}\n\n${groups}`
+  }
+  const ols = asOlsTree(body)
+  if (ols) {
+    const objs = ols.objects
+      .map((o) =>
+        o.error
+          ? `- **${o.object}**: ${o.error}`
+          : `- **${o.object}** — R² ${fmtNum(o.r2)}, MAPE ${fmtNum(o.mape, 1)}%, DW ${fmtNum(o.durbinWatson)}, baseline ${fmtNum(o.baselinePct, 1)}%${o.redFlags.length ? ` · ${o.redFlags.length} red flag(s)` : ''}`,
+      )
+      .join('\n')
+    const cols = ['Path', 'Indicator', 'Coef', 't', 'ROI', 'ROI band', 'Contribution', 'Contribution band', 'Status']
+    const head = `| ${cols.join(' | ')} |`
+    const sep = `| ${cols.map(() => '---').join(' | ')} |`
+    const rows = ols.tree.map((r) => {
+      const path = [r.l1, r.l2, r.l3, r.l4].filter(Boolean).join(' › ')
+      const cells = [
+        path, r.indicator, fmtNum(r.coef), fmtNum(r.tValue),
+        fmtNum(r.roi), r.roiRange || '—',
+        r.contribution === null ? '—' : `${fmtNum(r.contribution)}%`, r.contributionRange || '—',
+        r.status + (r.flagReason ? ` (${r.flagReason})` : ''),
+      ]
+      return `| ${cells.join(' | ')} |`
+    })
+    const summary = `In model ${ols.summary.inModel} · In range ${ols.summary.inRange} · Flagged ${ols.summary.flagged} · No benchmark ${ols.summary.noBenchmark} · Not in model ${ols.summary.notInModel} · Dropped ${ols.summary.dropped}`
+    return `# OLS Regression Test\n\n## Model objects\n${objs}\n\n## Factor tree results\n${summary}\n\n${[head, sep, ...rows].join('\n')}`
+  }
+  const master = asMasterData(body)
+  if (master) {
+    // The wide table itself is a live per-slice query, so the projection carries
+    // what is durable: what got in, what did not, and which layer decided.
+    const objs = master.objects
+      .map((o) => (o.error
+        ? `- **${o.object}**: ${o.error}`
+        : `- **${o.object}** — ${o.features} features over ${o.months} periods · Y: ${o.y}`))
+      .join('\n')
+    const funnel = [
+      '| Layer | Task | Intake | Rejected | Survivors |',
+      '| --- | --- | --- | --- | --- |',
+      ...master.funnel.map((f) => `| ${f.label} | ${f.task} | ${f.intake} | ${f.rejected} | ${f.survivors} |`),
+    ].join('\n')
+    const adopted = master.adopted
+      .map((a) => `- ${[a.l1, a.l2, a.l3, a.l4].filter(Boolean).join(' › ')} — ${a.indicator}`)
+      .join('\n') || '- (none)'
+    const rejected = master.rejected
+      .map((r) => `- ${[r.l4, r.indicator].filter(Boolean).join(' · ')} — rejected at ${r.rejectedAt}: ${r.reason}`)
+      .join('\n') || '- (none)'
+    return [
+      '# Master Data',
+      `\n## Model objects\n${objs}`,
+      `\n## Filter funnel\n${funnel}`,
+      `\n## Adopted indicators (${master.adopted.length})\n${adopted}`,
+      `\n## Rejected indicators (${master.rejected.length})\n${rejected}`,
+    ].join('\n')
   }
   return content
 }

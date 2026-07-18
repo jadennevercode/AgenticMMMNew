@@ -35,25 +35,18 @@ const RAW: RawArtifact[] = [
   { id: 'a-data-request', name: 'Data Request', taskRef: '1.5', type: 'document', stage: 's1', lineage: ['a-factor-tree'], format: 'sheet', exportable: true },
   { id: 'a-bu-summary', name: 'Business Understanding Summary', taskRef: '1.7', type: 'report', stage: 's1', lineage: ['a-scope', 'a-factor-tree', 'a-interview', 'a-data-request'], format: 'doc', exportable: true },
 
-  /* ── S2 · Data Intake & Quality (2.1 Validation + 2.2 Process) ── */
-  { id: 'a-data-files', name: 'Collected Client Data (provided)', taskRef: '2.0a', type: 'dataset', stage: 's2', lineage: ['a-data-request'], format: 'sheet', internal: true },
-  { id: 'a-validation-standard', name: 'Data Validation Standard', taskRef: '2.11', type: 'document', stage: 's2', lineage: ['a-data-files'], format: 'sheet', internal: true },
-  { id: 'a-quality-scorecard', name: 'Data Quality Score', taskRef: '2.12', type: 'scorecard', stage: 's2', lineage: ['a-validation-standard', 'a-data-files'], format: 'sheet', exportable: true },
-  { id: 'a-schema', name: 'Wide-table Schema', taskRef: '2.21', type: 'master-data', stage: 's2', lineage: ['a-factor-tree', 'a-quality-scorecard'], format: 'sheet', internal: true },
-  { id: 'a-data-dictionary', name: 'Data Processing (TaskLog)', taskRef: '2.22', type: 'document', stage: 's2', lineage: ['a-schema', 'a-quality-scorecard'], format: 'sheet' },
-  { id: 'a-data-warehouse', name: 'Data Dictionary', taskRef: '2.23', type: 'master-data', stage: 's2', lineage: ['a-data-dictionary'], format: 'sheet', internal: true },
-  { id: 'a-dataset', name: 'Master Dataset', taskRef: '2.24', type: 'dataset', stage: 's2', lineage: ['a-data-warehouse', 'a-schema'], format: 'sheet' },
-
-  /* ── S3 · Validation & Hypotheses (2.3 Data Cross-Validation) ── */
-  { id: 'a-drill-framework', name: 'Business Validation Rules & Drill-down Framework', taskRef: '2.31', type: 'document', stage: 's3', lineage: ['a-dataset'], format: 'sheet' },
-  { id: 'a-trend-review', name: 'Data Review Deck', taskRef: '2.32', type: 'report', stage: 's3', lineage: ['a-dataset', 'a-drill-framework'], format: 'review' },
-  { id: 'a-client-qa', name: 'Client Q&A Tracker', taskRef: '2.32', type: 'workflow', stage: 's3', lineage: ['a-factor-tree', 'a-drill-framework'], format: 'sheet' },
-  { id: 'a-stat-tests', name: 'Statistical Screening Results', taskRef: '2.33', type: 'scorecard', stage: 's3', lineage: ['a-dataset', 'a-trend-review'], format: 'sheet' },
-  { id: 'a-model-input', name: 'Model Input', taskRef: '2.34', type: 'dataset', stage: 's3', lineage: ['a-dataset', 'a-stat-tests'], format: 'sheet' },
+  /* ── S2 · Data Intake & Validation — six artifacts, each a filter layer:
+        Processing → Quality → Business → Statistical → OLS test → Master data ── */
+  { id: 'a-data-processing', name: 'Data Processing', taskRef: '2.1', type: 'dataset', stage: 's2', lineage: ['a-data-request', 'a-factor-tree'], format: 'sheet', exportable: true },
+  { id: 'a-quality-scorecard', name: 'Data Quality Score', taskRef: '2.2', type: 'scorecard', stage: 's2', lineage: ['a-data-processing'], format: 'sheet', exportable: true },
+  { id: 'a-business-validation', name: 'Business Validation', taskRef: '2.3', type: 'report', stage: 's2', lineage: ['a-data-processing', 'a-quality-scorecard'], format: 'validation' },
+  { id: 'a-stat-tests', name: 'Statistical Score', taskRef: '2.4', type: 'scorecard', stage: 's2', lineage: ['a-data-processing', 'a-business-validation'], format: 'sheet' },
+  { id: 'a-ols-test', name: 'OLS Regression Test', taskRef: '2.5', type: 'report', stage: 's2', lineage: ['a-stat-tests', 'a-factor-tree', 'a-knowledge-package'], format: 'olsTree' },
+  { id: 'a-master-data', name: 'Master Data', taskRef: '2.6', type: 'dataset', stage: 's2', lineage: ['a-data-processing', 'a-quality-scorecard', 'a-business-validation', 'a-stat-tests', 'a-ols-test'], format: 'masterData', exportable: true },
 
   /* ── S4 · Modeling ───────────────────────────────────── */
-  { id: 'a-prior-register', name: 'Prior Setting Rules', taskRef: '3.1', type: 'document', stage: 's4', lineage: ['a-knowledge-package', 'a-trend-review', 'a-model-input'], format: 'sheet' },
-  { id: 'a-model-candidates', name: 'Model Candidates', taskRef: '3.2', type: 'model', stage: 's4', lineage: ['a-model-input', 'a-prior-register'], format: 'sheet' },
+  { id: 'a-prior-register', name: 'Prior Setting Rules', taskRef: '3.1', type: 'document', stage: 's4', lineage: ['a-knowledge-package', 'a-business-validation', 'a-master-data'], format: 'sheet' },
+  { id: 'a-model-candidates', name: 'Model Candidates', taskRef: '3.2', type: 'model', stage: 's4', lineage: ['a-master-data', 'a-prior-register'], format: 'sheet' },
   { id: 'a-tech-review', name: 'Technical Review', taskRef: '3.3', type: 'report', stage: 's4', lineage: ['a-model-candidates'], format: 'sheet' },
   { id: 'a-model-diagnostics', name: 'Model Diagnostics', taskRef: '3.3', type: 'report', stage: 's4', lineage: ['a-model-candidates'], format: 'review' },
 

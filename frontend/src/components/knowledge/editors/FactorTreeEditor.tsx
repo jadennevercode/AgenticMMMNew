@@ -8,9 +8,13 @@ const COLS: { key: keyof FactorTreeRow; label: string }[] = [
   { key: 'l3', label: 'L3' },
   { key: 'l4', label: 'L4' },
   { key: 'indicator', label: 'Indicator' },
+  { key: 'roiRange', label: 'ROI Range' },
+  { key: 'contributionRange', label: 'Contribution Range' },
 ]
 
-const EMPTY_ROW: FactorTreeRow = { l1: '', l2: '', l3: '', l4: '', indicator: '' }
+const EMPTY_ROW: FactorTreeRow = {
+  l1: '', l2: '', l3: '', l4: '', indicator: '', roiRange: '', contributionRange: '',
+}
 
 interface Props {
   rows: FactorTreeRow[]

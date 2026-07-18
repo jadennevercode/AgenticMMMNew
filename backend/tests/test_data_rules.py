@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from app.agents.data_rules import (
     MetricStats,
+    RangeBenchmark,
+    RangeIndex,
     _parse_range,
     factor_ranges,
     in_range,
@@ -93,6 +95,29 @@ def test_in_range() -> None:
     assert in_range(1.0, (0.8, 1.3)) is True
     assert in_range(2.0, (0.8, 1.3)) is False
     assert in_range(1.0, None) is False
+
+
+def test_range_index_precedence() -> None:
+    # A (l4, indicator) pair beats an l4-only knowledge row.
+    pair = RangeBenchmark(roi=(2.0, 3.0), contribution=(1.0, 2.0),
+                          roi_text="2~3", contribution_text="1%~2%", source="knowledge")
+    l4only = RangeBenchmark(roi=(9.0, 9.5), contribution=None,
+                            roi_text="9~9.5", contribution_text="/", source="knowledge")
+    idx = RangeIndex({("冰柜", "自有冰柜"): pair}, {"冰柜": l4only})
+    assert idx.match("冰柜", "自有冰柜") is pair            # exact pair wins
+    assert idx.match("冰柜", "其他指标") is l4only          # l4-only fallback
+    # No knowledge match → falls back to the reference factor-ranges.json library.
+    ref = idx.match("Digital Display", "曝光量")
+    assert ref is not None and ref.source == "reference" and ref.roi == (0.8, 1.3)
+    # Nothing anywhere → None.
+    assert idx.match("一个不存在的因子", "x") is None
+
+
+def test_range_index_normalises_case_and_space() -> None:
+    pair = RangeBenchmark(roi=(1.0, 2.0), contribution=None,
+                          roi_text="1~2", contribution_text="/", source="knowledge")
+    idx = RangeIndex({("tt display", "费用"): pair}, {"tt display": pair})
+    assert idx.match("  TT Display ", " 费用 ") is pair
 
 
 if __name__ == "__main__":

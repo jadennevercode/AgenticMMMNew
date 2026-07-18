@@ -3,13 +3,11 @@
 These reflect what the user put in the Project Folder. S1 upload handlers list
 the user's real files only (no Danone-reference fallback); the upstream upload
 gate blocks until real files are present, and these handlers re-run on submit so
-the artifact reflects exactly what was uploaded. (The S2 data handler still
-summarizes the reference data dictionary when no data files are uploaded, since
-the quantitative engine runs on the single reference dataset.)
+the artifact reflects exactly what was uploaded. (The S2 data intake is handled
+by ``data.data_processing`` — it references Data Engine published assets.)
 """
 from __future__ import annotations
 
-from app import ingest
 from app.domain.models import FileCategory
 from app.orchestrator.engine import Engine
 from app.store.files import get_files
@@ -54,31 +52,3 @@ async def provide_materials(eng: Engine, st: ProjectState, task: dict) -> None:
     eng.produce(st, "a-source-materials", body={"blocks": blocks}, state="confirmed", agent="business")
 
 
-async def provide_data_files(eng: Engine, st: ProjectState, task: dict) -> None:
-    uploaded = [f for f in get_files().list(st.project_id) if f.category == "data"]
-    if uploaded:
-        rows = [[f.filename, str(f.size // 1024 or 1) + " KB",
-                 "parsed" if f.parsed else "not parsed"] for f in uploaded]
-        body = {"sheets": [{"name": "Uploaded data files",
-                            "columns": ["File", "Size", "Parse"], "rows": rows}]}
-        eng.produce(st, "a-data-files", body=body, state="confirmed", agent="data")
-        eng.emit(st, "data", "info", f"{len(uploaded)} data files catalogued from the Project Folder", task["id"])
-        return
-    # Fallback: summarize the real returned data sources from the data dictionary.
-    rows = []
-    try:
-        dd = ingest.load_data_dictionary()
-        seen = set()
-        for r in dd:
-            sysn = str(r.get("source_system") or r.get("source_dept") or "—")
-            tbl = str(r.get("table_name") or r.get("sheet") or "")
-            if not tbl or (sysn, tbl) in seen:
-                continue
-            seen.add((sysn, tbl))
-            rows.append([sysn, tbl, str(r.get("granularity") or ""), str(r.get("y_or_x") or "")])
-    except Exception:  # noqa: BLE001
-        rows = [["—", "(reference unavailable)", "", ""]]
-    body = {"sheets": [{"name": "回填清单 (returned data sources)",
-                        "columns": ["来源系统", "表/Sheet", "颗粒度", "Y/X"], "rows": rows[:60]}]}
-    eng.produce(st, "a-data-files", body=body, state="confirmed", agent="data")
-    eng.emit(st, "data", "info", f"{len(rows)} data sources catalogued", task["id"])

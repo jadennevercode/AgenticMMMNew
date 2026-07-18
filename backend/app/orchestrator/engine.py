@@ -26,6 +26,11 @@ from app.store.state import ProjectState
 # Handler signature: async (engine, state, task_def) -> None
 Handler = Callable[["Engine", ProjectState, dict], Awaitable[None]]
 
+# Decision-effect signature: (state, option_id) -> None. Runs the moment a gate
+# is answered, so a verdict that later steps depend on becomes durable state
+# instead of something re-derived from whatever the last run left behind.
+DecisionEffect = Callable[[ProjectState, str], None]
+
 
 def _default_choice(asg: dict) -> str:
     """The recommended (else first) option id of a source-choice assignment."""
@@ -36,12 +41,45 @@ def _default_choice(asg: dict) -> str:
     return str(opts[0].get("id", "")) if opts else ""
 
 
+def _mapping_complete(st: ProjectState) -> bool:
+    """Every active factor row is mapped to a published asset or ignored."""
+    try:
+        from app.dataeng.mapping import mapping_complete
+        return mapping_complete(st)
+    except Exception:  # noqa: BLE001 — never let a mapping error hard-block the engine
+        return False
+
+
+def data_intake_ready(st: ProjectState, asg: dict) -> bool:
+    """The 2.1 data gate. Clears when the FactorTree↔DataAssets mapping is fully
+    resolved (Data-Engine path, ``requiresMapping``) OR the legacy per-L3 manifest
+    validates (slot-upload path, ``requiresManifest``). A gate with only one flag
+    is judged only by that flag."""
+    ready = False
+    if asg.get("requiresMapping") and _mapping_complete(st):
+        ready = True
+    if asg.get("requiresManifest") and not ready:
+        try:
+            from app.agents.data_request import manifest_satisfied
+            ready = manifest_satisfied(st)
+        except Exception:  # noqa: BLE001
+            ready = True
+    return ready
+
+
+
+
 class Engine:
     def __init__(self) -> None:
         self.handlers: dict[str, Handler] = {}
+        self.decision_effects: dict[str, DecisionEffect] = {}
 
     def register(self, task_id: str, handler: Handler) -> None:
         self.handlers[task_id] = handler
+
+    def register_decision(self, decision_id: str, effect: DecisionEffect) -> None:
+        """Attach an effect that runs when this gate is answered."""
+        self.decision_effects[decision_id] = effect
 
     # ── event / artifact helpers ─────────────────────────
     def emit(self, st: ProjectState, agent: str, etype: str, message: str,
@@ -170,9 +208,15 @@ class Engine:
             if t.get("assignment", {}).get("id") == assignment_id:
                 asg = t["assignment"]
                 from app.store.files import get_files
+                # Data Engine: a resolved FactorTree↔DataAssets mapping (or published
+                # indicators) satisfies the S2 data gate (2.1) in lieu of per-L3 slot
+                # uploads. Additive — projects without indicators keep the original
+                # upload/manifest flow unchanged.
+                indicators_provide_data = bool(getattr(st, "indicators", None)) or _mapping_complete(st)
                 if asg.get("requiresUpload"):
                     category = asg.get("category")
-                    if not category or not get_files().has_category(st.project_id, category):
+                    has_files = bool(category) and get_files().has_category(st.project_id, category)
+                    if not has_files and not (category == "data" and indicators_provide_data):
                         return False
                 # Optional source-choice gate (e.g. 1.1a factor-tree origin). Persist the
                 # pick; the upload-option additionally requires a real file in its category.
@@ -185,9 +229,11 @@ class Engine:
                     up_cat = asg.get("choiceUploadCategory")
                     if picked == "upload" and up_cat and not get_files().has_category(st.project_id, up_cat):
                         return False
-                if asg.get("requiresManifest"):
-                    from app.agents.data_request import manifest_satisfied
-                    if not manifest_satisfied(st):
+                # 2.1 data gate: clears when the FactorTree↔DataAssets mapping is fully
+                # resolved (every indicator mapped or ignored) OR the legacy per-L3
+                # manifest validates. Slot-upload projects keep using the manifest.
+                if asg.get("requiresMapping") or asg.get("requiresManifest"):
+                    if not data_intake_ready(st, asg):
                         return False
                 ar = st.assignments[assignment_id]
                 ar.status = "submitted"
@@ -208,6 +254,9 @@ class Engine:
                 dr = st.decisions[decision_id]
                 dr.status = "resolved"
                 dr.resolution = {"optionId": option_id, "note": note, "decidedAtTick": st.tick}
+                effect = self.decision_effects.get(decision_id)
+                if effect is not None:
+                    effect(st, option_id)
                 self.emit(st, t["agent"], "decision_resolved",
                           f"{dr.title}: {option_id}", t["id"])
                 rework_opt = t["decision"].get("rework_option_id")

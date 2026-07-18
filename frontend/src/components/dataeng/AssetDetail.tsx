@@ -1,28 +1,28 @@
 import { useRef, useState } from 'react'
 import {
-  CheckCircle2, FileSpreadsheet, Loader2, RefreshCw, Rocket, Trash2, Upload,
+  Download, Eye, FileSpreadsheet, Loader2, RefreshCw, Trash2, Upload,
 } from 'lucide-react'
-import type { CleaningSpec, DataAsset, DataAssetStatus } from '../../lib/types'
+import type { DataAsset, DataAssetStatus, DbtPreview } from '../../lib/types'
+import { api } from '../../api/client'
 import { useSimStore } from '../../store/useSimStore'
 import { Card } from '../ui/card'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { cn } from '../../lib/cn'
 import { ReviewPanel } from './ReviewPanel'
-import { CleaningSpecEditor } from './CleaningSpecEditor'
-import { SqlPanel } from './SqlPanel'
+import { TransformPanel } from './pipeline/TransformPanel'
+import { PublishPanel } from './pipeline/PublishPanel'
 
-type Step = 'source' | 'review' | 'clean' | 'sql' | 'publish'
+type Step = 'source' | 'review' | 'workspace' | 'publish'
 const STEPS: { id: Step; label: string }[] = [
-  { id: 'source', label: '① 数据源' },
-  { id: 'review', label: '② 快速 Review' },
-  { id: 'clean', label: '③ 清洗要求' },
-  { id: 'sql', label: '④ 生成 SQL' },
-  { id: 'publish', label: '⑤ 发布资产' },
+  { id: 'source', label: '1 · Sources' },
+  { id: 'review', label: '2 · Review' },
+  { id: 'workspace', label: '3 · Transform' },
+  { id: 'publish', label: '4 · Publish' },
 ]
 
 const STATUS_LABEL: Record<DataAssetStatus, string> = {
-  raw: '原始', reviewed: '已体检', spec: '已定义清洗', cleaned: '已清洗', published: '已发布',
+  raw: 'Raw', reviewed: 'Reviewed', spec: 'Spec', cleaned: 'Cleaned', published: 'Published',
 }
 const STATUS_STYLE: Record<DataAssetStatus, string> = {
   raw: 'bg-muted text-muted-foreground',
@@ -35,20 +35,23 @@ const STATUS_STYLE: Record<DataAssetStatus, string> = {
 export function AssetDetail({ asset }: { asset: DataAsset }) {
   const files = useSimStore((s) => s.files)
   const busyId = useSimStore((s) => s.dataAssetBusy)
-  const {
-    reviewDataAsset, updateCleaningSpec, generateAssetSql, runAssetSql,
-    publishDataAsset, uploadRawForAsset, deleteDataAsset,
-  } = useSimStore.getState()
+  const pid = useSimStore((s) => s.activeProjectId)
+  const { reviewDataAsset, uploadRawForAsset, deleteDataAsset } = useSimStore.getState()
   const [step, setStep] = useState<Step>('source')
+  const [rawPrev, setRawPrev] = useState<{ table: string; data: DbtPreview } | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const busy = busyId === asset.id
 
   const sourceFiles = files.filter((f) => asset.sourceFileIds.includes(f.id))
   const hasSource = sourceFiles.length > 0
 
-  function onSpec(spec: CleaningSpec) {
-    void updateCleaningSpec(asset.id, spec)
+  async function previewRaw(table: string) {
+    if (!pid) return
+    try {
+      setRawPrev({ table, data: await api.rawPreview(pid, asset.id, table) })
+    } catch { setRawPrev(null) }
   }
+
   async function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const list = e.target.files
     if (!list) return
@@ -96,35 +99,72 @@ export function AssetDetail({ asset }: { asset: DataAsset }) {
         {step === 'source' && (
           <div className="space-y-4">
             <Card className="space-y-3 p-4">
-              <h3 className="text-sm font-semibold">原始数据源</h3>
+              <h3 className="text-sm font-semibold">Raw sources</h3>
               <p className="text-[11px] text-muted-foreground">
-                上传客户交来的原始文件(.xlsx/.xlsm/.csv,非标准格式也可)。它们将作为该资产的清洗输入。
+                Upload the client's raw files (.xlsx/.xlsm/.csv — non-standard shapes are fine). They become this asset's cleaning input.
               </p>
               {sourceFiles.length > 0 ? (
                 <div className="space-y-1">
-                  {sourceFiles.map((f) => (
-                    <div key={f.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[12px]">
-                      <FileSpreadsheet className="size-4 text-muted-foreground" />
-                      <span className="truncate font-medium">{f.filename}</span>
-                      <span className="ml-auto text-[11px] text-muted-foreground">
-                        {f.parsed ? `✓ ${f.parseChars} chars` : `⚠ ${f.parseError ?? '解析失败'}`}
-                      </span>
-                    </div>
-                  ))}
+                  {sourceFiles.map((f) => {
+                    const table = asset.rawTables.find((t) => t.fileId === f.id)?.name
+                      ?? f.filename.replace(/\.[^.]+$/, '').replace(/[^0-9a-zA-Z_]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase()
+                    return (
+                      <div key={f.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[12px]">
+                        <FileSpreadsheet className="size-4 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-medium">{f.filename}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {f.parsed ? '✓' : `⚠ ${f.parseError ?? 'parse failed'}`}
+                        </span>
+                        <span className="ml-auto flex shrink-0 gap-1">
+                          <Button size="sm" variant="ghost" onClick={() => void previewRaw(table)}>
+                            <Eye className="size-3.5" />Preview
+                          </Button>
+                          {pid && (
+                            <a href={api.fileDownloadUrl(pid, f.id)} download
+                              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground">
+                              <Download className="size-3.5" />Download
+                            </a>
+                          )}
+                        </span>
+                      </div>
+                    )
+                  })}
                 </div>
               ) : (
                 <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted-foreground">
-                  还没有原始文件。
+                  No raw files yet.
                 </p>
               )}
               <input ref={fileInput} type="file" multiple accept=".xlsx,.xlsm,.csv" hidden onChange={onUpload} />
               <Button size="sm" variant="outline" onClick={() => fileInput.current?.click()} disabled={busy}>
-                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}上传原始数据
+                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}Upload raw data
               </Button>
             </Card>
+            {rawPrev && (
+              <Card className="overflow-hidden p-0">
+                <div className="flex items-center justify-between border-b border-border px-4 py-2">
+                  <h4 className="text-[13px] font-semibold">Preview · <span className="font-mono text-primary">{rawPrev.table}</span></h4>
+                  <span className="text-[11px] text-muted-foreground">{rawPrev.data.rowCount.toLocaleString()} rows</span>
+                </div>
+                <div className="max-h-72 overflow-auto">
+                  <table className="w-full border-collapse text-[11px]">
+                    <thead className="sticky top-0 bg-muted/80 text-left text-muted-foreground backdrop-blur">
+                      <tr>{rawPrev.data.columns.map((c) => <th key={c} className="whitespace-nowrap px-3 py-1.5 font-medium">{c}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {rawPrev.data.rows.map((row, ri) => (
+                        <tr key={ri} className="border-t border-border">
+                          {row.map((cell, ci) => <td key={ci} className="whitespace-nowrap px-3 py-1">{cell}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            )}
             {hasSource && (
               <Button onClick={() => { void reviewDataAsset(asset.id); setStep('review') }} disabled={busy}>
-                {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}运行快速 Review →
+                {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}Run review →
               </Button>
             )}
           </div>
@@ -133,70 +173,15 @@ export function AssetDetail({ asset }: { asset: DataAsset }) {
         {step === 'review' && (
           <div className="space-y-4">
             <Button size="sm" variant="outline" onClick={() => void reviewDataAsset(asset.id)} disabled={busy || !hasSource}>
-              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}重新 Review
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}Re-run review
             </Button>
             <ReviewPanel asset={asset} />
           </div>
         )}
 
-        {step === 'clean' && <CleaningSpecEditor asset={asset} onChange={onSpec} />}
+        {step === 'workspace' && <TransformPanel asset={asset} />}
 
-        {step === 'sql' && (
-          <SqlPanel
-            asset={asset}
-            busy={busy}
-            onGenerate={() => void generateAssetSql(asset.id)}
-            onRun={(sql) => void runAssetSql(asset.id, sql)}
-          />
-        )}
-
-        {step === 'publish' && (
-          <div className="space-y-4">
-            <Card className="space-y-3 p-4">
-              <h3 className="text-sm font-semibold">发布为数据资产</h3>
-              <p className="text-[11px] text-muted-foreground">
-                发布会在沙箱中物化清洗 SQL 为 parquet,并注册一个新版本。已发布的资产会进入统一长表,
-                供当前 project 工作流(S2–S5)直接调用。
-              </p>
-              {asset.sqlDraft?.status === 'ok' ? (
-                <p className="flex items-center gap-1.5 text-[12px] text-emerald-700">
-                  <CheckCircle2 className="size-4" />清洗 SQL 预览成功({asset.sqlDraft.rowCount.toLocaleString()} 行),可发布。
-                </p>
-              ) : (
-                <p className="text-[12px] text-muted-foreground">先在“④ 生成 SQL”里运行预览成功后再发布。</p>
-              )}
-              <Button onClick={() => void publishDataAsset(asset.id)} disabled={busy || asset.sqlDraft?.status !== 'ok'}>
-                {busy ? <Loader2 className="size-4 animate-spin" /> : <Rocket className="size-4" />}发布资产
-              </Button>
-            </Card>
-
-            {asset.versions.length > 0 && (
-              <Card className="overflow-hidden p-0">
-                <div className="border-b border-border px-4 py-2 text-sm font-semibold">版本历史</div>
-                <table className="w-full border-collapse text-[12px]">
-                  <thead className="bg-muted/60 text-left text-muted-foreground">
-                    <tr>
-                      <th className="px-3 py-1.5 font-medium">版本</th>
-                      <th className="px-3 py-1.5 text-right font-medium">行数</th>
-                      <th className="px-3 py-1.5 text-right font-medium">列数</th>
-                      <th className="px-3 py-1.5 font-medium">时间</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...asset.versions].reverse().map((v) => (
-                      <tr key={v.version} className="border-t border-border">
-                        <td className="px-3 py-1.5">v{v.version}</td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">{v.rowCount.toLocaleString()}</td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">{v.columns.length}</td>
-                        <td className="px-3 py-1.5 text-muted-foreground">{v.producedAt.replace('T', ' ').slice(0, 16)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </Card>
-            )}
-          </div>
-        )}
+        {step === 'publish' && <PublishPanel asset={asset} />}
       </div>
     </div>
   )

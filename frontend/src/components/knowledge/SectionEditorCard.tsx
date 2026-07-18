@@ -18,8 +18,8 @@ function errMsg(e: unknown): string {
 function exportSection(t: KnowledgeTemplate): void {
   switch (t.kind) {
     case 'factor_tree':
-      void exportTable(t.name, ['L1', 'L2', 'L3', 'L4', 'Indicator'],
-        t.factorRows.map((r) => [r.l1, r.l2, r.l3, r.l4, r.indicator]))
+      void exportTable(t.name, ['L1', 'L2', 'L3', 'L4', 'Indicator', 'ROI Range', 'Contribution Range'],
+        t.factorRows.map((r) => [r.l1, r.l2, r.l3, r.l4, r.indicator, r.roiRange, r.contributionRange]))
       break
     case 'interview':
       void exportTable(t.name, ['Category', 'Role', 'Question'],

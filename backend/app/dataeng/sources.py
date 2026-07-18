@@ -33,24 +33,30 @@ def _read_file(path: Path) -> dict[str, pd.DataFrame]:
 def read_asset_frames(project_id: str, asset) -> list[tuple[RawTable, pd.DataFrame]]:
     """Resolve an asset's source files → (RawTable, DataFrame) pairs.
 
-    Table names are unique safe identifiers; a single source file with one sheet
-    is named ``raw`` for the common case so generated SQL reads naturally.
+    Table names are unique safe identifiers derived from the *clean* filename (a
+    single-sheet file → the filename stem; a multi-sheet workbook → one table per
+    sheet name). A lone single-sheet source is named ``raw`` so SQL reads naturally.
     """
     files = get_files()
     pairs: list[tuple[RawTable, pd.DataFrame]] = []
     used: set[str] = set()
-    raw_frames: list[tuple[str, str, str, pd.DataFrame]] = []  # file_id, filename, sheet, df
+    # (file_id, clean_filename, sheet, is_multi_sheet, df)
+    raw_frames: list[tuple[str, str, str, bool, pd.DataFrame]] = []
     for file_id in asset.source_file_ids:
         got = files.get_path(project_id, file_id)
         if got is None:
             continue
         record, path = got
-        for sheet, df in _read_file(path).items():
-            raw_frames.append((record.id, record.filename, sheet, df))
+        sheets = _read_file(path)
+        multi = len(sheets) > 1
+        for sheet, df in sheets.items():
+            raw_frames.append((record.id, record.filename, sheet, multi, df))
 
     single = len(raw_frames) == 1
-    for file_id, filename, sheet, df in raw_frames:
-        base = "raw" if single else sanitize_ident(sheet or filename)
+    for file_id, filename, sheet, multi, df in raw_frames:
+        # Multi-sheet workbook → sheet name; otherwise the clean filename stem.
+        stem = Path(filename).stem
+        base = "raw" if single else sanitize_ident(sheet if multi else (stem or sheet))
         name = base
         i = 2
         while name in used:

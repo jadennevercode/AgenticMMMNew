@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
+from app.agents.registry import build_engine
 from app.domain import blueprint as bp
 from app.domain import industries as ind
 from app.domain.models import IndustryRef, ProjectMeta
@@ -29,7 +30,7 @@ def _test_meta(project_id: str) -> ProjectMeta:
 
 def _seed_s1_uploads(project_id: str) -> None:
     """Put a parseable stub file in each upload-gate category so the gates open
-    (S1: background/reference/minutes; S2: the data gate 2.0a)."""
+    (S1: background/reference/minutes; S2: the data gate 2.1)."""
     csv = b"field,value\nObjective,Quantify ROI\nTime,Month\n"
     for cat in ("project_background", "industry_reference", "interview_minutes", "data"):
         get_files().add(project_id, cat, f"{cat}.csv", csv, content_type="text/csv")
@@ -114,7 +115,7 @@ def test_s1_blocks_without_uploads() -> None:
 
 
 def test_project_data_binding() -> None:
-    """A slot-bound L3 workbook validates the 2.0a manifest gate and makes
+    """A slot-bound L3 workbook validates the 2.1 manifest gate and makes
     `model_df` switch from the reference to the project's own long table."""
     import io
 
@@ -155,7 +156,7 @@ def test_project_data_binding() -> None:
 
 
 def test_data_gate_blocks_without_slot_coverage() -> None:
-    """With a factor tree but no slot-bound data, the 2.0a manifest gate stays shut."""
+    """With a factor tree but no slot-bound data, the 2.1 manifest gate stays shut."""
     from app.agents.data_request import manifest_satisfied
     from app.domain.models import FactorRow, FactorTree
 
@@ -171,8 +172,37 @@ def test_data_gate_blocks_without_slot_coverage() -> None:
         get_files().purge(pid)
 
 
+def test_factor_map_gate() -> None:
+    """2.1 Data Processing gate: blocks while any active factor row is unresolved,
+    clears once every row is mapped (published indicator) or ignored, and re-blocks
+    when an ignore is undone."""
+    from app.dataeng.mapping import mapping_complete, resolve_factor_map
+    from app.domain.models import FactorRow, FactorTree, Indicator
+    from app.orchestrator.engine import data_intake_ready
+
+    st = initial_state(_test_meta("smoke-factor-map"))
+    st.factor_tree = FactorTree(rows=[
+        FactorRow(id="fr-1", l1="生意", l2="营销", l3="店内促销", l4="折扣", indicator="折扣率", status="baseline"),
+        FactorRow(id="fr-2", l1="生意", l2="媒体", l3="社媒", l4="曝光", indicator="曝光量", status="baseline"),
+    ])
+    asg = {"requiresMapping": True, "requiresManifest": True}
+    # unresolved → blocked
+    assert mapping_complete(st) is False
+    assert data_intake_ready(st, asg) is False
+    # map fr-1 via an exact tree_row_id, ignore fr-2 → complete
+    st.indicators = [Indicator(id="i1", metric="折扣率", l1="生意", l2="营销", l3="店内促销",
+                               l4="折扣", assetId="a1", assetName="Promo", treeRowId="fr-1")]
+    st.factor_map_ignores = {"fr-2": "no reliable source"}
+    fmap = resolve_factor_map(st)
+    assert (fmap.mapped, fmap.ignored, fmap.pending) == (1, 1, 0)
+    assert mapping_complete(st) is True and data_intake_ready(st, asg) is True
+    # undo the ignore → pending again, gate re-blocks
+    st.factor_map_ignores = {}
+    assert mapping_complete(st) is False and data_intake_ready(st, asg) is False
+
+
 def test_validation_verdict_rollup() -> None:
-    """2.12 final verdict = weakest of the four 0/0.5/1 dimensions (1→accept,
+    """2.2 final verdict = weakest of the four 0/0.5/1 dimensions (1→accept,
     0→unusable, 0.5→human)."""
     from app.agents.data_rules import final_verdict
 
@@ -183,12 +213,92 @@ def test_validation_verdict_rollup() -> None:
 
 
 def test_validation_chain_shape() -> None:
-    """2.1 Validation is standard(loaded) → AI score → human review: 2.12 has no
-    gate, the verdict gate is d-2.13, and 2.21 waits on the human review."""
-    assert bp.TASK_MAP["2.11"]["produces"] == ["a-validation-standard"]
-    assert "decision" not in bp.TASK_MAP["2.12"] and bp.TASK_MAP["2.12"]["klass"] == "A"
-    assert bp.TASK_MAP["2.13"]["decision"]["id"] == "d-2.13"
-    assert bp.TASK_MAP["2.21"]["depends_on"] == ["2.13"]
+    """S2 is a six-artifact filter chain: 2.1 Processing (gate) → 2.2 AI quality
+    score → 2.2d human review → 2.3 Business Validation → 2.4 Statistical Score
+    → 2.5 OLS test → 2.6 Master Data, which Modeling (3.1) consumes."""
+    assert bp.TASK_MAP["2.1"]["produces"] == ["a-data-processing"]
+    assert bp.TASK_MAP["2.1"]["assignment"]["requiresManifest"] is True
+    assert "decision" not in bp.TASK_MAP["2.2"] and bp.TASK_MAP["2.2"]["klass"] == "A"
+    assert bp.TASK_MAP["2.2d"]["decision"]["id"] == "d-2.2"
+    assert bp.TASK_MAP["2.3"]["depends_on"] == ["2.2d"]
+    assert bp.TASK_MAP["2.3"]["produces"] == ["a-business-validation"]
+    assert bp.TASK_MAP["2.4"]["produces"] == ["a-stat-tests"]
+    assert bp.TASK_MAP["2.5"]["produces"] == ["a-ols-test"]
+    # 2.5 renders the OLS factor-tree view, not a plain sheet.
+    assert bp.ARTIFACT_MAP["a-ols-test"]["format"] == "olsTree"
+    assert bp.TASK_MAP["2.6"]["produces"] == ["a-master-data"]
+    assert bp.TASK_MAP["2.6"]["depends_on"] == ["2.5r"]
+    # 2.6 is a sliceable feature table, and locking it is a human act (2.6d).
+    assert bp.ARTIFACT_MAP["a-master-data"]["format"] == "masterData"
+    assert bp.TASK_MAP["2.6d"]["decision"]["id"] == "d-2.6"
+    assert bp.TASK_MAP["2.6d"]["produces"] == []
+    assert bp.TASK_MAP["3.1"]["depends_on"] == ["2.6d"]
+    assert {s["id"] for s in bp.STAGES} == {"s1", "s2", "s4", "s5"}
+
+
+def test_ols_setup_process_chain() -> None:
+    """2.5 is a five-step Process on one deliverable: propose → confirm Y →
+    review X → confirm settings → fit. The three middle steps are human gates
+    that produce nothing, so `buildChain` absorbs them into a-ols-test (cf. 2.2d).
+    """
+    chain = ["2.5", "2.5y", "2.5x", "2.5p", "2.5r"]
+    for prev, nxt in zip(chain, chain[1:]):
+        assert bp.TASK_MAP[nxt]["depends_on"] == [prev], nxt
+
+    # The producer proposes; only the last step re-produces the fitted artifact.
+    assert bp.TASK_MAP["2.5"]["produces"] == ["a-ols-test"]
+    assert bp.TASK_MAP["2.5r"]["produces"] == ["a-ols-test"]
+    for tid in ("2.5y", "2.5x", "2.5p"):
+        t = bp.TASK_MAP[tid]
+        assert t["produces"] == [], tid          # absorbed as a step, not a deliverable
+        assert t["klass"] == "H", tid
+        assert t["panel"], tid                   # renders a structured input inline
+
+    # Every gate must carry a recommended option or autopilot would stall.
+    for tid in ("2.5y", "2.5x", "2.5p", "2.5r"):
+        opts = bp.TASK_MAP[tid]["decision"]["options"]
+        assert any(o.get("recommended") for o in opts), tid
+
+    # The seasonality ai_options set was retired — the params panel owns it now.
+    assert "ai_options" not in bp.TASK_MAP["2.5"]
+
+
+def test_ols_gate_drop_feeds_master_data_exclusion() -> None:
+    """The d-2.5 'drop' resolution is what 2.6 reads to physically exclude the
+    OLS-flagged indicators (ols_drop_pairs)."""
+    from app.agents.ols_review import ols_drop_pairs
+
+    st = initial_state(danone_meta())
+    st.analysis["ols_flagged"] = [{"l4": "冰柜", "indicator": "费用", "reason": "ROI out"}]
+    assert ols_drop_pairs(st) == {("冰柜", "费用")}
+    eng = build_engine()
+    st.tasks["2.5"].status = "awaiting_human"
+    st.decisions["d-2.5"].status = "open"
+    eng.resolve_decision(st, "d-2.5", "drop", "drop flagged")
+    assert (st.decisions["d-2.5"].resolution or {}).get("optionId") == "drop"
+
+
+def test_range_gate_drop_survives_a_later_refit() -> None:
+    """Dropping at d-2.5 must stick even though the next fit stops flagging.
+
+    Once the flagged indicators are excluded they produce no records, so the
+    re-fit reports nothing out of range. Re-deriving the verdict from that empty
+    list would walk them straight back into the model, so the gate freezes what
+    it dropped onto its own resolution.
+    """
+    from app.agents.ledger import range_drop_pairs
+
+    st = initial_state(danone_meta())
+    st.analysis["ols_flagged"] = [{"l4": "冰柜", "indicator": "费用", "reason": "ROI out"}]
+    eng = build_engine()
+    st.tasks["2.5"].status = "awaiting_human"
+    st.decisions["d-2.5"].status = "open"
+    eng.resolve_decision(st, "d-2.5", "drop", "drop flagged")
+
+    assert (st.decisions["d-2.5"].resolution or {}).get("droppedPairs") == [["冰柜", "费用"]]
+    # A re-fit clears the live flags; the frozen verdict must not move.
+    st.analysis["ols_flagged"] = []
+    assert range_drop_pairs(st) == {("冰柜", "费用")}
 
 
 def test_rework_resets_downstream() -> None:

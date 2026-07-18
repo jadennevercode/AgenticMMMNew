@@ -13,10 +13,11 @@ import { DecisionCard } from '../decisions/DecisionCard'
 import { AssignmentCard } from '../workbench/AssignmentCard'
 import { Field, RunTimeline, Findings } from '../workbench/TaskTrace'
 import { ArtifactCanvas } from './canvas/ArtifactCanvas'
+import { TaskStepPanel } from './panels/TaskStepPanel'
 import { ProfileEditor } from './ProfileEditor'
 import { FactorTreeEditor } from './FactorTreeEditor'
 import { QualityScorecardEditor } from './QualityScorecardEditor'
-import { ClientQAEditor } from './ClientQAEditor'
+import { StatScoreEditor } from './StatScoreEditor'
 import { AgentChip, TaskBadge, StatusPill, DeliverableBadge, SparkleIcon } from '../ui/primitives'
 import { Button } from '../ui/button'
 import { cn } from '../../lib/cn'
@@ -180,6 +181,12 @@ function BuildStep({ task, index, total }: { task: TaskBlueprint; index: number;
                 <AssignmentCard assignment={assignments[task.assignment.id]} taskId={task.id} />
               </div>
             )}
+
+            {/* Structured input for this step (2.2d / 2.4d reviews, 2.5 setup).
+                Rendered whenever the step is open — not only while awaiting —
+                so a confirmed step can be reopened, adjusted and re-fitted
+                without sending the whole stage back through rework. */}
+            {task.panel && <TaskStepPanel kind={task.panel} />}
 
             {task.aiOptions && <AiOptionsCard task={task} />}
 
@@ -434,7 +441,7 @@ const STRUCTURED_EDITORS: Record<string, () => ReactElement> = {
   'a-scope': () => <ProfileEditor />,
   'a-factor-tree': () => <FactorTreeEditor />,
   'a-quality-scorecard': () => <QualityScorecardEditor />,
-  'a-client-qa': () => <ClientQAEditor />,
+  'a-stat-tests': () => <StatScoreEditor />,
 }
 
 /** The canvas surface (document/edit renderer or placeholder) */

@@ -1,7 +1,8 @@
-"""End-to-end data-engine slice: register → profile → SQL preview → publish →
-bound into model_df. Uses a hand-written cleaning SQL (no LLM).
+"""End-to-end data-engine slice on the PIPELINE path: register → raw upload →
+review (per-table profiles + enum candidates) → typed transform pipeline →
+dbt build (quality gates) → publish → indicators → bound into model_df.
 
-Run: PYTHONPATH=. .venv/bin/python tests/test_dataeng_e2e.py
+Run: PATH="$HOME/.local/bin:$PATH" PYTHONPATH=. .venv/bin/python tests/test_dataeng_e2e.py
 """
 from __future__ import annotations
 
@@ -12,47 +13,70 @@ import pandas as pd
 from app.agents.dataset_cache import invalidate_project, model_df, uses_project_data
 from app.dataeng import assets as asset_svc
 from app.dataeng.binding import build_published_long_table
+from app.dataeng.dbt import binary, service
 from app.dataeng.profile import build_review_report
-from app.dataeng.sql_gen import run_preview
-from app.domain.models import CleaningSpec, FieldRule
+from app.domain.models import (
+    AggSpec, FieldMapEntry, IndustryRef, TransformPipeline, TransformStep,
+)
 from app.store.files import get_files
 from app.store.state import get_store
-from app.domain.models import IndustryRef
 
-# A hand-written cleaning SQL that long-table-izes the raw sheet onto the 2.21 schema.
-_CLEAN_SQL = """
-SELECT 'sales.xlsx' AS task_name, '' AS brand, Region AS province_group,
-  Channel AS channel_type, Channel AS channel,
-  CAST(substr(replace(Month,'-',''),1,4) AS INTEGER) AS year,
-  CAST(replace(Month,'-','') AS INTEGER) AS month,
-  'upload' AS source, 'MARKETING FACTOR' AS l1, '' AS l2, '' AS l3, 'Sales' AS l4,
-  '' AS l5, '' AS l6, '' AS l7, '' AS l8,
-  'Y' AS metric_type, '本品销量' AS metric, CAST(Sales AS DOUBLE) AS value
-FROM raw
-UNION ALL
-SELECT 'sales.xlsx', '', Region, Channel, Channel,
-  CAST(substr(replace(Month,'-',''),1,4) AS INTEGER), CAST(replace(Month,'-','') AS INTEGER),
-  'upload', 'MARKETING FACTOR', '', '', 'Spend', '', '', '', '',
-  'spending', '花费', CAST(Spend AS DOUBLE)
-FROM raw
-"""
+_LONG_CONSTANTS = [
+    ("task_name", "'sales.xlsx'"), ("brand", "''"), ("source", "'upload'"),
+    ("l1", "'MARKETING FACTOR'"), ("l2", "''"), ("l3", "''"), ("l4", "'Sales'"),
+    ("l5", "''"), ("l6", "''"), ("l7", "''"), ("l8", "''"),
+    ("metric_type", "'Y'"), ("metric", "'本品销量'"),
+]
+
+_GROUP = ["task_name", "brand", "province_group", "channel_type", "channel",
+          "year", "month", "source", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8",
+          "metric_type", "metric"]
 
 
 def _raw_xlsx() -> bytes:
-    months = [f"2023-{m:02d}" for m in range(1, 13)]
-    rows = []
-    for region in ("华东", "华南"):
-        for i, mo in enumerate(months):
-            rows.append({"Month": mo, "Region": region, "Channel": "MT",
-                         "Spend": 1000 + i * 30, "Sales": 5000 + i * 120})
-    df = pd.DataFrame(rows)
+    months = pd.period_range("2022-01", "2023-12", freq="M").astype(str)
+    df = pd.DataFrame({
+        "Month": list(months) * 2,
+        "Region": ["华东"] * len(months) + ["华南"] * len(months),
+        "Channel": ["MT"] * len(months) + ["EC"] * len(months),
+        "Sales": [5000 + (i * 137) % 900 for i in range(len(months) * 2)],
+    })
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
     return buf.getvalue()
 
 
-def main() -> None:
+def _pipeline() -> TransformPipeline:
+    field_map = [
+        FieldMapEntry(source="Region", target="province_group"),
+        FieldMapEntry(source="Channel", target="channel_type"),
+        FieldMapEntry(source="Channel", target="channel"),
+        FieldMapEntry(source="Month", target="ym"),
+        FieldMapEntry(source="Sales", target="value", cast="double"),
+    ] + [FieldMapEntry(target=t, expr=e) for t, e in _LONG_CONSTANTS]
+    return TransformPipeline(steps=[
+        TransformStep(id="fm", kind="field_map", name="map sales",
+                      note="Rename raw columns onto the long-table shape.",
+                      inputs=["source:raw"], fieldMap=field_map),
+        TransformStep(id="dv", kind="derive", name="time columns", inputs=["fm"],
+                      derive=[
+                          {"name": "year", "expr": "cast(substr(replace(ym,'-',''),1,4) as integer)"},
+                          {"name": "month", "expr": "cast(replace(ym,'-','') as integer)"},
+                      ]),
+        TransformStep(id="agg", kind="aggregate", name="mart", inputs=["dv"],
+                      groupBy=_GROUP, aggs=[AggSpec(column="value", func="sum")]),
+    ], outputStep="agg")
+
+
+def main() -> int:
+    ok, msg = binary.available()
+    print(f"[binary] {msg}")
+    if not ok:
+        print("SKIP: dbt binary unavailable")
+        return 0
+
     store = get_store()
+    files = get_files()
     meta = store.create("DataEng E2E", "TestBrand",
                         IndustryRef(l1="food-bev", l2="beverage", l3="sports-functional"))
     pid = meta.id
@@ -60,59 +84,51 @@ def main() -> None:
         st = store.get(pid)
         assert st is not None
 
-        # 1) register raw source file
-        rec = get_files().add(pid, "raw_data", "sales.xlsx", _raw_xlsx())
+        # 1) register asset + raw upload
+        rec = files.add(pid, "raw_data", "sales.xlsx", _raw_xlsx())
         assert rec.parsed, rec.parse_error
-        print(f"✓ raw uploaded: {rec.filename} ({rec.parse_chars} chars)")
+        asset = asset_svc.create_asset(st, "Sales E2E", source_file_ids=[rec.id])
 
-        # 2) create asset + profile
-        asset = asset_svc.create_asset(st, "Mizone sell-out", source_file_ids=[rec.id])
+        # 2) per-table review, with full enum candidates for categorical fields
         asset.review = build_review_report(pid, asset)
         asset.raw_tables = asset.review.tables
-        asset.status = "reviewed"
         assert asset.review.time_field == "Month", asset.review.time_field
-        assert asset.review.row_count == 24, asset.review.row_count
-        print(f"✓ review: time={asset.review.time_field}/{asset.review.time_granularity}, "
-              f"{asset.review.column_count} fields, charts={[c['id'] for c in asset.review.charts]}")
+        enum_fields = {f.name: f.enum_values for f in asset.review.fields if f.enum_values}
+        assert set(enum_fields.get("Channel", [])) == {"MT", "EC"}, enum_fields
+        print(f"✓ review: {asset.review.column_count} fields, enum candidates: {list(enum_fields)}")
 
-        # 3) cleaning spec (illustrative) + SQL preview via sandbox
-        asset.cleaning_spec = CleaningSpec(rules=[
-            FieldRule(id="r1", sourceField="Month", targetColumn="month",
-                      transform="transform", rule="'2023-01' → 202301"),
-            FieldRule(id="r2", sourceField="Sales", targetColumn="value",
-                      transform="passthrough"),
-        ], targetSchema=[])
-        draft = run_preview(pid, asset, _CLEAN_SQL)
-        assert draft.status == "ok", draft.error
-        assert draft.row_count == 48, draft.row_count
-        assert "metric_type" in draft.preview_columns
-        asset.sql_draft = draft
-        asset.status = "cleaned"
-        print(f"✓ SQL preview ok: {draft.row_count} long rows, cols={len(draft.preview_columns)}")
+        # 3) typed pipeline → deterministic compile → dbt build (quality gates)
+        asset.pipeline = _pipeline()
+        summary = service.build(st, pid, asset)
+        assert summary.ok, f"build failed: {summary.error}"
+        assert summary.step_models, "step→model mapping missing"
+        assert summary.tests > 0 and summary.failed == 0
+        print(f"✓ build: {summary.models} models, {summary.passed}/{summary.tests} tests passed")
 
-        # 4) publish → parquet version
-        ver = asset_svc.publish_asset(pid, st, asset)
-        assert ver.version == 1 and ver.row_count == 48, ver
-        assert asset.status == "published"
-        print(f"✓ published v{ver.version}: {ver.row_count} rows → {ver.parquet_path}")
+        # 4) publish → parquet + indicators (factor-path grounded)
+        ver = service.publish(pid, st, asset)
+        assert ver.version == 1 and asset.status == "published"
+        assert st.indicators and st.indicators[0].metric == "本品销量"
+        print(f"✓ published v{ver.version}: {ver.row_count} rows; {len(st.indicators)} indicator(s)")
 
-        # 5) binding + model_df now serves the published asset (not reference)
+        # 5) binding + model_df serve the published asset (not the reference)
         bound = build_published_long_table(pid, st)
-        assert bound is not None and len(bound) == 48, None if bound is None else len(bound)
+        assert bound is not None and not bound.empty
         invalidate_project(pid)
         df = model_df(st)
         assert uses_project_data(st), "model_df should serve project data"
-        assert df["metric_type"].isin(["Y", "spending"]).all()
-        assert df["month"].dropna().nunique() == 12
+        assert df["metric_type"].isin(["Y"]).all()
+        assert df["month"].dropna().nunique() == 24
         print(f"✓ model_df serves project data: {len(df)} rows, "
-              f"{df['month'].dropna().nunique()} months, objects={sorted(df['channel_type'].unique())}")
+              f"{df['month'].dropna().nunique()} months")
 
         print("\nALL DATAENG E2E TESTS PASSED")
+        return 0
     finally:
         invalidate_project(pid)
         store.delete(pid)
-        get_files().purge(pid)
+        files.purge(pid)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

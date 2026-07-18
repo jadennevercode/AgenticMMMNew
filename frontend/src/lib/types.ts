@@ -6,7 +6,7 @@
 
 export type AgentId = 'control' | 'business' | 'data' | 'model' | 'report'
 
-export type StageId = 's1' | 's2' | 's3' | 's4' | 's5'
+export type StageId = 's1' | 's2' | 's4' | 's5'
 
 /**
  * Automation class per task sub-step (08 §2):
@@ -58,7 +58,8 @@ export type DeliverableState = 'locked' | 'queued' | 'building' | 'needs-you' | 
  * (Excel workbooks, slide decks, Word-style notes, markdown). Drives the
  * canvas renderer/editor.
  */
-export type ArtifactFormat = 'sheet' | 'slides' | 'doc' | 'markdown' | 'review'
+export type ArtifactFormat =
+  | 'sheet' | 'slides' | 'doc' | 'markdown' | 'review' | 'validation' | 'olsTree' | 'masterData'
 
 /** A spreadsheet: one or more named sheets, each a column header + rows */
 export interface SheetData {
@@ -118,7 +119,328 @@ export interface ReviewData {
   steps: ReviewStep[]
 }
 
-export type ArtifactBody = SheetData | SlidesData | DocData | ReviewData
+/**
+ * Business Validation (task 2.3) body — per-FactorTree-L3 metadata. The chart
+ * series themselves are NOT stored here; they are queried live (`validationSeries`)
+ * so the page's filters resolve against real rows. This body only persists the
+ * per-factor interpretation and sign-off.
+ */
+export interface ValidationGroup {
+  l1: string
+  l2: string
+  l3: string
+  rowIds: string[]
+  defaultIndicators: string[]
+  interpretation: string
+  signoff: string // '' | 'yes' | 'no'
+}
+export interface ValidationAnomaly {
+  channel: string
+  year: string
+  growthPct: number
+}
+export interface ValidationReviewData {
+  kpiMetric: string
+  groups: ValidationGroup[]
+  anomalies: ValidationAnomaly[]
+  note?: string
+}
+
+/** Live series payload from `/validation/series` (one L3 chart's data). */
+export interface ValidationSeriesRequest {
+  l3: string
+  l4?: string
+  indicators?: string[]
+  grain?: string
+  sources?: string[]
+  brand?: string[]
+  channelType?: string[]
+  provinceGroup?: string[]
+}
+export interface ValidationKpi {
+  metric: string
+  kind: 'area'
+  data: number[]
+}
+export interface ValidationOverlay {
+  metric: string
+  metricType: string
+  kind: 'bar' | 'line'
+  data: (number | null)[]
+}
+export interface ValidationYearlyRow {
+  metric: string
+  values: (number | null)[]
+  yoy: (number | null)[]
+}
+export interface ValidationIndicatorOption {
+  metric: string
+  metricType: string
+  l4: string
+}
+export interface ValidationSeriesResponse {
+  l3: string
+  grain: string
+  x: string[]
+  kpi: ValidationKpi | null
+  series: ValidationOverlay[]
+  yearly: { years: number[]; rows: ValidationYearlyRow[] }
+  options: {
+    grains: string[]
+    l4: string[]
+    indicators: ValidationIndicatorOption[]
+    sources: string[]
+    brand: string[]
+    channelType: string[]
+    provinceGroup: string[]
+  }
+}
+
+/** ── OLS Regression Test (2.5, format 'olsTree') ── */
+export type OlsRowStatus = 'inRange' | 'review' | 'noBenchmark' | 'notInModel' | 'dropped'
+export type OlsRangeStatus = 'in' | 'out' | 'none'
+export interface OlsObjectSummary {
+  object: string
+  nObs: number
+  drivers: number
+  r2: number | null
+  adjR2: number | null
+  mape: number | null
+  durbinWatson: number | null
+  baselinePct: number | null
+  redFlags: string[]
+  error: string
+  /** The response actually fitted, the df left after controls, and the controls used. */
+  yMetric?: string
+  roiUnit?: string
+  dfRemaining?: number | null
+  controls?: string[]
+}
+export interface OlsRowResult {
+  object: string
+  coef: number | null
+  tValue: number | null
+  pValue: number | null
+  roi: number | null
+  contribution: number | null
+}
+export interface OlsTreeRow {
+  key: string
+  treeRowId: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  mapped: boolean
+  inModel: boolean
+  droppedBy: '' | 'quality' | 'statistical'
+  objects: string[]
+  coef: number | null
+  tValue: number | null
+  pValue: number | null
+  significant: boolean | null
+  roi: number | null
+  contribution: number | null
+  roiRange: string
+  contributionRange: string
+  rangeSource: 'knowledge' | 'reference' | ''
+  roiStatus: OlsRangeStatus
+  contributionStatus: OlsRangeStatus
+  status: OlsRowStatus
+  flagReason: string
+  results: OlsRowResult[]
+}
+export interface OlsTreeSummary {
+  total: number
+  inModel: number
+  inRange: number
+  flagged: number
+  noBenchmark: number
+  notInModel: number
+  dropped: number
+}
+export interface OlsSetupSummary {
+  dataSource: string
+  roiUnit: string
+  configured: boolean
+  selectedX: number
+  totalX: number
+  params: OlsParams | null
+  y: OlsYChoice[]
+}
+export interface OlsTreeData {
+  objects: OlsObjectSummary[]
+  tree: OlsTreeRow[]
+  summary: OlsTreeSummary
+  setup?: OlsSetupSummary
+  note?: string
+}
+
+/**
+ * OLS setup (2.5) — AI-proposed, human-confirmed through the 2.5y / 2.5x / 2.5p
+ * Process steps. Mirrors backend/app/domain/models.py OlsConfig. Saving it
+ * re-fits the regression (PUT /ols-config → apply_ols_config).
+ */
+export type OlsSaturation = 'hill' | 'none'
+export type OlsTrend = 'linear' | 'none'
+export type OlsSeasonality = 'fourier' | 'dummies' | 'none'
+export interface OlsYCandidate {
+  object: string
+  metric: string
+  metricType: string
+  months: number
+  isMoney: boolean
+  recommended: boolean
+  rationale: string
+}
+export interface OlsYChoice {
+  object: string
+  metric: string
+  metricType: string
+  isMoney: boolean
+}
+export interface OlsXCandidate {
+  key: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  metric: string
+  isSpend: boolean
+  pearson: number
+  vif: number
+  cv: number
+  statVerdict: string
+  recommended: boolean
+  selected: boolean
+  /** An earlier S2 layer rejected this indicator: shown so the human can see
+   *  where it went, but never selectable. `lockedBy` is the ledger layer id. */
+  locked: boolean
+  lockedBy: string
+  rationale: string
+}
+export interface OlsParams {
+  adstock: number
+  saturation: OlsSaturation
+  hillHalf: number
+  trend: OlsTrend
+  seasonality: OlsSeasonality
+  fourierK: number
+  pricePerUnit: number | null
+}
+export interface OlsConfig {
+  dataSource: string
+  yCandidates: OlsYCandidate[]
+  y: OlsYChoice[]
+  xCandidates: OlsXCandidate[]
+  params: OlsParams
+  proposedAt: string
+}
+
+/**
+ * Master Data (2.6) — the modeling feature table plus the filter funnel that
+ * produced it. Mirrors backend/app/agents/data.py::assemble_master_data.
+ *
+ * The table itself is NOT in here: the user slices it by product × channel ×
+ * region and it is fetched live (POST /master-data/table). What the artifact
+ * carries is the funnel, the slicing options, and every indicator's fate.
+ */
+export interface LedgerVerdict {
+  layer: string
+  task: string
+  label: string
+  /** adopted | rejected | flagged | pending | inherited */
+  status: string
+  note: string
+}
+export interface MasterDataObject {
+  object: string
+  months: number
+  features: number
+  y: string
+  error?: string
+}
+export interface FunnelLayer {
+  layer: string
+  task: string
+  label: string
+  intake: number
+  rejected: number
+  survivors: number
+  dropped: { l4: string; indicator: string; reason: string }[]
+}
+export interface MasterDataDimensions {
+  brand: string[]
+  provinceGroup: string[]
+  channelType: string[]
+  channel: string[]
+  grains: string[]
+  indicators: string[]
+}
+export interface MasterDataAdopted {
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+}
+export interface MasterDataRejected extends MasterDataAdopted {
+  rejectedAt: string
+  reason: string
+  verdicts: LedgerVerdict[]
+}
+export interface MasterData {
+  objects: MasterDataObject[]
+  funnel: FunnelLayer[]
+  dimensions: MasterDataDimensions
+  adopted: MasterDataAdopted[]
+  rejected: MasterDataRejected[]
+  note?: string
+}
+/** One live slice of the master feature table (POST /master-data/table). */
+export interface MasterTable {
+  columns: string[]
+  rows: (string | number | null)[][]
+  kpi: string
+  grain?: string
+  truncated: boolean
+  rowCount: number
+  colCount: number
+  note?: string
+}
+export interface MasterTableQuery {
+  brand?: string[]
+  provinceGroup?: string[]
+  channelType?: string[]
+  channel?: string[]
+  indicators?: string[]
+  grain?: string
+}
+
+/** GET /indicator-ledger — every indicator's fate across the six S2 layers. */
+export interface IndicatorLedgerRow {
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  adopted: boolean
+  rejectedAt: string
+  reason: string
+  verdicts: LedgerVerdict[]
+}
+export interface IndicatorLedger {
+  layers: { layer: string; task: string; label: string }[]
+  rows: IndicatorLedgerRow[]
+  funnel: FunnelLayer[]
+  adopted: number
+  rejected: number
+}
+
+export type ArtifactBody =
+  | SheetData | SlidesData | DocData | ReviewData | ValidationReviewData | OlsTreeData | MasterData
 
 export interface ArtifactBlueprint {
   id: string
@@ -273,9 +595,13 @@ export interface AssignmentBlueprint {
   /** When true, real parsed files must exist in `category` before submit; the
    *  gate stays blocked otherwise (S1 deliverables have no reference fallback). */
   requiresUpload?: boolean
-  /** When true (data gate 2.0a), the data-request manifest must report every L3
+  /** When true (data gate 2.1), the data-request manifest must report every L3
    *  slot validated (per-L3 coverage) before submit, not just any file present. */
   requiresManifest?: boolean
+  /** When true (data gate 2.1, Data-Engine path), every active factor-tree
+   *  indicator must be mapped to a published data asset or explicitly ignored
+   *  before submit. Combined with `requiresManifest`: either path clears the gate. */
+  requiresMapping?: boolean
   /** Optional source-choice gate (e.g. 1.1a factor-tree origin). When present the
    *  UI shows `choiceOptions`; the option whose id is the upload option requires a
    *  real file in `choiceUploadCategory` before the gate clears. */
@@ -351,6 +677,44 @@ export interface TaskBlueprint {
   assignment?: AssignmentBlueprint
   /** AI cognitive alternatives the step weighed — non-blocking, switchable */
   aiOptions?: AiOptionSet
+  /**
+   * Structured input panel rendered inside this Process step (mirrors how
+   * `decision`/`assignment` are declared). The id maps to a component —
+   * the 2.5 setup steps use 'ols-y' | 'ols-x' | 'ols-params'.
+   */
+  panel?: TaskPanelKind
+}
+
+/** Panels a Process step can render inline (see components/project/ols/). */
+export type TaskPanelKind =
+  | 'ols-y' | 'ols-x' | 'ols-params' | 'quality-review' | 'stat-review' | 'anomaly-review'
+
+/**
+ * 2.3a anomaly review — the AI hypothesizes a cause per detected anomaly and
+ * proposes a handling; the human rules. Mirrors backend AnomalyHypothesis.
+ * An accepted handling reaches the fit (event dummy / response capping /
+ * caveat); pending and rejected cards do nothing.
+ */
+export type AnomalyHandling = 'event' | 'cap' | 'raw'
+export type AnomalyStatus = 'pending' | 'accepted' | 'rejected'
+export interface AnomalyHypothesis {
+  id: string
+  channel: string
+  year: string
+  growthPct: number
+  hypothesis: string
+  proposed: AnomalyHandling
+  rationale: string
+  tradeoff: string
+  status: AnomalyStatus
+  handling: AnomalyHandling
+  note: string
+  /** yyyymm, inclusive — the window the handling applies to. */
+  start: number
+  end: number
+}
+export interface AnomalyReview {
+  rows: AnomalyHypothesis[]
 }
 
 /** What this task needs from a person, if anything */
@@ -614,6 +978,17 @@ export interface FactorTree {
 // ── Data quality scorecard (S2 · per-metric, editable disposition) ──
 export type QualityDisposition = 'accept' | 'flag' | 'drop'
 
+/** One 2.11 subcheck under a dimension — the driver behind a dimension score. */
+export interface QualitySubScore {
+  key: string // e.g. "consistency.time"
+  dimension: string // consistency | accuracy | completeness | granularity
+  label: string
+  score: number // 0 / 0.5 / 1
+  note: string
+  computed: boolean // false = advisory default (needs external reference)
+  blocking: boolean // whether it can drag the dimension score down
+}
+
 export interface QualityRow {
   id: string
   l1: string
@@ -622,15 +997,17 @@ export interface QualityRow {
   l4: string
   indicator: string
   consistency: number
-  accuracy: number // 真实性 (accuracy / authenticity)
+  accuracy: number // authenticity / numeric+business accuracy
   completeness: number
   granularity: number
-  // Per-dimension 情况 narratives (Excel 2.12 "...情况" columns), AI-written.
+  // Per-dimension narratives (Excel 2.12 "...情况" columns), AI-written.
   consistencyNote?: string
   accuracyNote?: string
   completenessNote?: string
   granularityNote?: string
-  total: number // final verdict score: weakest of the four dimensions
+  // The 10-subcheck breakdown behind the four dimension scores.
+  subScores?: QualitySubScore[]
+  total: number // Excel 2.12 Total = product of the four dimensions
   autoVerdict: string // pass | borderline | unusable
   disposition: QualityDisposition
   note: string
@@ -640,19 +1017,30 @@ export interface QualityScorecard {
   rows: QualityRow[]
 }
 
-// ── Client Q&A tracker (S2 · editable data/indicator questions) ──
-export type ClientQAStatus = 'open' | 'answered' | 'closed'
+// ── Statistical score (S2 · 2.4 · per-indicator CV/Pearson/VIF) ──
+export type StatDisposition = 'include' | 'review' | 'drop'
 
-export interface ClientQARow {
+export interface StatScoreRow {
   id: string
-  question: string
-  owner: string
-  response: string
-  status: ClientQAStatus
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  cv: number // reference CV (scaled variance / mean)
+  pearson: number // Pearson r vs KPI (signed)
+  vif: number // variance inflation factor
+  cvScore: number // 0 / 0.5 / 1 / 2
+  pearsonScore: number
+  vifScore: number
+  total: number // cvScore + pearsonScore + vifScore
+  autoVerdict: string // Good | Acceptable | unconsiderable
+  disposition: StatDisposition
+  note: string
 }
 
-export interface ClientQA {
-  rows: ClientQARow[]
+export interface StatScorecard {
+  rows: StatScoreRow[]
 }
 
 /* ── Knowledge packs (per-industry, editable) ───────────── */
@@ -678,6 +1066,10 @@ export interface FactorTreeRow {
   l3: string
   l4: string
   indicator: string
+  /** Expected post-OLS ROI band, e.g. "0.8~1.3" or "/" (N/A). Matched against the fitted ROI. */
+  roiRange: string
+  /** Expected yearly contribution band, e.g. "-5%~5%". Matched against the fitted contribution. */
+  contributionRange: string
 }
 
 export interface InterviewQuestion {
@@ -754,6 +1146,8 @@ export interface FieldProfile {
   nullRatio: number
   distinct: number
   sampleValues: string[]
+  /** full distinct values for low-cardinality text fields (enum candidates) */
+  enumValues: string[]
   min?: number | null
   max?: number | null
   mean?: number | null
@@ -768,12 +1162,25 @@ export interface FieldProfile {
 }
 
 /** Quick-review output: per-field profiles + charts (reuse ReviewChart renderer). */
+/** Review of ONE raw table — its own fields, charts, time axis, warnings. */
+export interface TableReview {
+  name: string
+  rowCount: number
+  columnCount: number
+  fields: FieldProfile[]
+  charts: ReviewChart[]
+  timeField?: string | null
+  timeGranularity?: string | null
+  warnings: string[]
+}
+
 export interface ReviewReport {
   rowCount: number
   columnCount: number
   tables: RawTable[]
   fields: FieldProfile[]
-  charts: ReviewChart[]
+  tableReviews: TableReview[]
+  charts: ReviewChart[] // deprecated global charts; use tableReviews[].charts
   timeField?: string | null
   timeGranularity?: string | null
   warnings: string[]
@@ -822,6 +1229,52 @@ export interface DataAssetVersion {
   producedAt: string
 }
 
+/** One dbt node result (model / seed / test) from the last build. */
+export interface DbtNode {
+  uniqueId: string
+  resourceType: string // model | seed | test
+  name: string
+  layer: string // staging | intermediate | marts (models only)
+  status: string // success | error | pass | fail | skipped
+  executionTime: number
+  message: string
+  failures?: number | null
+  relation: string
+}
+
+export interface EnumViolation {
+  column: string
+  values: string[]
+}
+
+/** Strict field + enum mapping of the mart against the target schema. */
+export interface SchemaConformance {
+  ok: boolean
+  checked: boolean
+  missingRequired: string[]
+  extra: string[]
+  enumViolations: EnumViolation[]
+  unenforcedDimensions: string[]
+}
+
+/** Summary of an asset's last `dbt build` — the dbt-workspace transform path. */
+export interface DbtSummary {
+  ok: boolean
+  ranAt: string
+  command: string
+  error: string
+  mart: string
+  models: number
+  tests: number
+  passed: number
+  failed: number
+  aiRounds: number
+  nodes: DbtNode[]
+  /** pipeline step id → compiled dbt model name (per-step status + preview) */
+  stepModels: Record<string, string>
+  conformance?: SchemaConformance | null
+}
+
 /** A project-scoped data asset — mirrors backend DataAsset. */
 export interface DataAsset {
   id: string
@@ -833,11 +1286,182 @@ export interface DataAsset {
   review?: ReviewReport | null
   cleaningSpec?: CleaningSpec | null
   sqlDraft?: SqlDraft | null
+  pipeline?: TransformPipeline | null
+  dbt?: DbtSummary | null
   versions: DataAssetVersion[]
   latestVersion: number
   lineage: string[]
   createdAt: string
   updatedAt: string
+}
+
+export interface DbtModelFile {
+  layer: string
+  name: string
+  sql: string
+  description: string
+}
+
+export interface DbtSeed {
+  name: string
+  columns: string[]
+  csv: string
+}
+
+export interface DbtWorkspaceInfo {
+  available: boolean
+  message: string
+  models: DbtModelFile[]
+  sources: string[]
+  seeds: DbtSeed[]
+}
+
+export interface DbtPreview {
+  columns: string[]
+  rows: string[][]
+  rowCount: number
+}
+
+// ── Transform pipeline (Data Engine) ──
+export type StepKind =
+  | 'field_map' | 'enum_map' | 'join' | 'union'
+  | 'aggregate' | 'filter' | 'derive' | 'custom_sql'
+
+export interface FieldMapEntry {
+  source: string
+  target: string
+  cast: string // '' | integer | double | date | text
+  expr: string
+}
+
+export interface EnumMapEntry {
+  raw: string
+  canonical: string
+  confidence: number
+  by: 'ai' | 'human'
+}
+
+export interface JoinConfig {
+  how: 'left' | 'inner'
+  leftOn: string[]
+  rightOn: string[]
+  rightColumns: string[]
+}
+
+export interface AggSpec {
+  column: string
+  func: 'sum' | 'avg' | 'min' | 'max' | 'count'
+  alias: string
+}
+
+export interface DeriveSpec {
+  name: string
+  expr: string
+}
+
+export interface TransformStep {
+  id: string
+  kind: StepKind
+  name: string
+  note: string
+  inputs: string[] // 'source:<table>' or step ids
+  fieldMap: FieldMapEntry[]
+  enumField: string
+  enumMap: EnumMapEntry[]
+  join?: JoinConfig | null
+  groupBy: string[]
+  aggs: AggSpec[]
+  filterExpr: string
+  derive: DeriveSpec[]
+  sql: string
+}
+
+export interface TransformPipeline {
+  steps: TransformStep[]
+  outputStep: string
+  note: string
+}
+
+export type TargetColumnKind = 'dimension' | 'time' | 'factor' | 'metric' | 'value'
+
+export interface TargetColumn {
+  name: string
+  label: string
+  definition: string
+  kind: TargetColumnKind
+  required: boolean
+  standardValues: string[]
+}
+
+export interface Indicator {
+  id: string
+  metric: string
+  metricType: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  unit: string
+  assetId: string
+  assetName: string
+  coverageStart: string
+  coverageEnd: string
+  rows: number
+  /** matched a Business-Understanding factor-tree row */
+  treeGrounded: boolean
+  treeRowId: string
+}
+
+/** One active factor-tree row's mapping status against the published data assets. */
+export type FactorMapStatus = 'mapped' | 'ignored' | 'pending'
+
+/**
+ * An AI-proposed indicator for a pending factor row (2.1). The score is
+ * deterministic (name overlap · path proximity · unit · coverage); only the
+ * reason is AI-written. Accepting one binds it via PUT /factor-map/bind.
+ */
+export interface FactorMapSuggestion {
+  indicatorId: string
+  metric: string
+  assetId: string
+  assetName: string
+  unit: string
+  coverageStart: string
+  coverageEnd: string
+  /** 0–1; higher is a closer match. */
+  score: number
+  reason: string
+}
+
+export interface FactorMapRow {
+  rowId: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  status: FactorMapStatus
+  assetId: string
+  assetName: string
+  metric: string
+  coverageStart: string
+  coverageEnd: string
+  ignoreNote: string
+  /** Ranked proposals, best first. Empty for mapped rows and for rows with no
+   *  candidate above the suggestion threshold. */
+  suggestions: FactorMapSuggestion[]
+}
+
+export interface FactorMap {
+  rows: FactorMapRow[]
+  total: number
+  mapped: number
+  ignored: number
+  pending: number
+  /** How many pending rows the AI could propose a match for. */
+  suggested: number
+  /** true when total > 0 and pending === 0 — the 2.1 gate is clearable. */
+  complete: boolean
 }
 
 export type MasterDataKind = 'product' | 'geo' | 'channel' | 'time'

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 An **AI-Native Marketing Mix Modeling (MMM) platform**: a Workflow-style multi-agent
-system (5 agents × 5 delivery stages) that runs the full MMM pipeline end-to-end on a
+system (5 agents × 4 delivery stages) that runs the full MMM pipeline end-to-end on a
 real client case (Danone China Mizone), with human-in-the-loop (HITL) quality gates.
 
 Two halves, one product:
@@ -100,10 +100,14 @@ Each task has a collaboration/execution class that determines who runs it:
   decisions and auto-submits uploads to drive the whole case end-to-end. In **either** mode the
   S1 upload gates (1.0a / 1.1a / 1.4a) carry `requiresUpload` and block until real parsed files
   exist in their Project-Folder category (no reference fallback) — autopilot skips them rather
-  than fabricating input. The S2 data gate (2.0a) carries `requiresUpload` **and**
-  `requiresManifest`: it blocks until the data-request manifest reports every L3 slot validated
-  (per-L3 coverage against the factor tree, not just any file). When no manifest exists (no factor
-  tree) it degrades to the `requiresUpload` file-presence check.
+  than fabricating input. The S2 data gate (2.1 Data Processing) carries `requiresMapping` **and**
+  `requiresManifest`: it clears when the **FactorTree↔DataAssets mapping** is fully resolved —
+  every active factor row is either mapped by a published Data-Engine indicator or explicitly
+  **ignored** (`ProjectState.factor_map_ignores`, rowId→note) — **OR** the legacy per-L3 manifest
+  validates (slot-upload projects). `app/dataeng/mapping.py::resolve_factor_map` / `mapping_complete`
+  derive per-row status (mapped/ignored/pending) from the published indicators; `engine.data_intake_ready`
+  combines the two paths. When no factor tree exists it degrades to the `requiresUpload` file-presence
+  check. Endpoints: `GET /factor-map`, `PUT /factor-map/ignore` (re-renders `a-data-processing`).
 
 ### Backend execution flow
 
@@ -165,11 +169,57 @@ so the seeded demo and any project without uploads keep working. The cache is pe
 invalidated on data upload (`invalidate_project`). All S2–S5 data/model handlers take `st` and
 resolve via `model_df(st)` / `model_objects(st)`.
 
-**S2 is artifact-driven** (segments delimited by their output artifact): 2.1 Validation (2.11
-validation standard → 2.12 quality score), 2.2 Process (2.21 wide-table schema → 2.22 processing
-logic → 2.23 data dictionary → 2.24 master dataset), 2.3 Cross-Validation (2.31 business rules &
-drill → 2.32 data review + client Q&A → 2.33 statistical screening → 2.34 indicator selection).
-Each Input-standard and Output-deliverable is its own task/artifact; see `docs/agent-design/02-data-agent.md`.
+**S2 · Data Intake & Validation** (merged former "Data Intake & Quality" + "Validation &
+Hypotheses"; stage ids are now s1, s2, s4, s5). Six artifacts, **fifteen tasks** — every artifact
+is an AI-proposes → human-reviews → gate Process, not a single step:
+
+```
+2.1  Data Processing    (H)  a-data-processing  AI proposes a published indicator per unmatched
+                                                factor; you accept / remap / ignore
+2.2  Data Quality Score (A)  a-quality-scorecard  10 subchecks + AI 4-dimension scoring
+2.2d Review verdicts    (H)  panel:quality-review   → d-2.2
+2.3  Business Validation(C)  a-business-validation  per-L3 charts vs sell-out
+2.3a Explain anomalies  (A)  panel:anomaly-review   AI hypothesis + handling per anomaly
+2.3s Client sign-off    (H)                         → d-2.3
+2.4  Statistical Score  (A)  a-stat-tests           CV/Pearson/VIF + AI per-row case
+2.4d Review verdicts    (H)  panel:stat-review      → d-2.4
+2.5  Propose setup      (A)  a-ols-test             Y/X candidates + params
+2.5y/2.5x/2.5p          (H)  panel:ols-*            → d-2.5y / d-2.5x / d-2.5p
+2.5r Fit & review       (M)  a-ols-test             → d-2.5 (ROI/contribution vs KB ranges)
+2.6  Assemble master    (M)  a-master-data          adopted indicators → feature wide table
+2.6d Lock master data   (H)                         → d-2.6   (`3.1` depends on `2.6d`)
+```
+
+**The indicator lifecycle ledger (`app/agents/ledger.py`) is S2's spine.** Six layers rule in
+order — mapping (2.1) → quality (2.2d) → signoff (2.3) → statistical (2.4d) → selection (2.5x)
+→ range (2.5r) — and **a rejection at any layer is inherited by every later one**: the indicator
+is not re-scored, not re-offered, and never reaches the model. The ledger stores nothing; it
+*derives* each indicator's fate from the layers' own records (the two scorecards, the sign-offs,
+`ols_config`, the `d-2.5` resolution), so it cannot disagree with them. Two rules matter:
+
+- `model_selection(st) -> ModelSelection{exclude, include, y, params}` is the **one** resolved
+  selection every downstream fit must use — `2.5r`, `2.6` **and `3.2` training**. Re-deriving it
+  at a call site is exactly how S4 came to train on unfiltered data.
+- `drops_before(st, layer)` gives a layer everything earlier layers rejected — never hand-union
+  drop sets (a layer must inherit every earlier verdict and never its own).
+
+Indicator keys are `(norm_l4, norm_metric)` — `build_model_frame`'s own key space. Verdicts that
+later steps depend on are **frozen when made**, not re-derived: `d-2.5`'s drops are pinned onto
+its resolution by an engine decision-effect (`register_decision`), because a re-fit excludes them
+and so stops flagging them.
+
+`2.3a` handlings actually bite (`ledger.anomaly_effects`): accepted `event` → a dummy control over
+the window, `cap` → the response is winsorized there, `raw` → a caveat only. Pending/rejected
+cards do nothing. (This replaced `ai-2.3`, which recorded a choice nothing ever read.)
+
+`a-master-data` is format `masterData`: the artifact carries the funnel + dimensions + every
+indicator's verdict chain; the wide table itself is queried live per product × channel × region
+(`POST /master-data/table`, `app/agents/master_data.py`) against the 2.24 long-table schema.
+Endpoints: `GET /indicator-ledger`, `PUT /anomaly-review`, `PUT /factor-map/bind`.
+
+The per-factor industry ROI/contribution ranges are meant to be maintained in Knowledge; today
+they load from the reference rule library (`data_rules.match_factor_range`). See
+`docs/agent-design/02-data-agent.md` for the original design (pre-merge task ids 2.0a–2.34).
 
 **Per-project modeling (Y/X tagging).** `data_binding._metric_type` tags each bound metric:
 `Y` (本品销量/KPI — the response), `spending` (花费/spend — ROI-eligible X), else `X`. The OLS

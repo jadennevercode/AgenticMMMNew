@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.agents.common import agent_system, artifact_text, llm_body
 from app.agents.dataset_cache import model_df, model_objects
+from app.agents.ledger import model_selection
 from app.agents.result_charts import diagnostics_review
 from app.domain.models import EvidenceRef, TaskFinding
 from app.mmm import make_candidates
@@ -15,7 +16,7 @@ _CAND_LABELS = ["A", "B", "C"]
 
 async def register_priors(eng: Engine, st: ProjectState, task: dict) -> None:
     anomalies = st.analysis.get("anomalies", [])
-    ctx = artifact_text(st, ["a-knowledge-package", "a-trend-review", "a-model-input"])
+    ctx = artifact_text(st, ["a-knowledge-package", "a-business-validation", "a-master-data"])
     anom_text = "; ".join(f"{a['channel']} {a['year']} {a['growth_pct']:+}%" for a in anomalies) or "none"
     body = await llm_body(
         SYS,
@@ -30,11 +31,20 @@ async def register_priors(eng: Engine, st: ProjectState, task: dict) -> None:
 
 async def train_models(eng: Engine, st: ProjectState, task: dict) -> None:
     objects = model_objects(st)
+    # Train on exactly what S2 locked: the adopted indicators, the response
+    # confirmed at 2.5y, the variables ticked at 2.5x, the controls set at 2.5p.
+    # Without this the candidates silently re-pick their own drivers and the whole
+    # S2 filter chain — quality, sign-off, statistics, the human's own selection —
+    # never reaches the model it was supposed to shape.
+    sel = model_selection(st)
+    df = model_df(st)
     candidates: dict[str, list[dict]] = {}
     conv_rows: list[list[str]] = []
     for obj in objects:
         try:
-            cands = make_candidates(model_df(st), obj, n=3)
+            cands = make_candidates(df, obj, n=3, exclude=sel.exclude,
+                                    y_metric=sel.y_for(obj), include=sel.include,
+                                    params=sel.params)
             candidates[obj] = [c.to_dict() for c in cands]
             conv_rows.append([obj, f"{len(cands)} candidates", "converged"])
         except Exception as e:  # noqa: BLE001

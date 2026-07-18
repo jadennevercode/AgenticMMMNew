@@ -25,7 +25,16 @@ from app.mmm.engine import (
     run_mmm,
 )
 from app.mmm.ols import OLSResult, fit_ols
-from app.mmm.pivot import CN_TO_EN, LONG_COLUMNS, ModelFrame, build_model_frame
+from app.mmm.pivot import (
+    CN_TO_EN,
+    LONG_COLUMNS,
+    ModelFrame,
+    build_model_frame,
+    driver_candidates,
+    is_money_metric,
+    is_volume_metric_type,
+    y_candidates,
+)
 from app.mmm.transforms import adstock_geometric, hill_saturation, standardize
 
 __all__ = [
@@ -35,6 +44,7 @@ __all__ = [
     "fit_ols", "OLSResult",
     # pivot
     "build_model_frame", "ModelFrame", "LONG_COLUMNS", "CN_TO_EN",
+    "y_candidates", "driver_candidates", "is_money_metric", "is_volume_metric_type",
     # engine
     "run_mmm", "run_all_objects", "make_candidates", "MmmModelResult",
 ]

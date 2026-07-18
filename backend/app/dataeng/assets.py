@@ -1,11 +1,10 @@
-"""Data-asset lifecycle service.
+"""Data-asset lifecycle service (registry + parquet persistence + versioning).
 
 Assets live on ``ProjectState.data_assets`` (persisted with the project JSON), but
 their **cleaned output** is too large for state JSON, so each published version is
 materialised to parquet under ``data/projects/{id}/assets/{asset_id}/v{n}.parquet``.
-Publishing re-runs the asset's validated SQL through the sandbox kernel, writes the
-parquet, appends a version, and invalidates the model-dataset cache so the project
-workflow picks up the new data on the next compute.
+Publishing itself is owned by the dbt pipeline path (``app.dataeng.dbt.service``);
+this module keeps the shared registry, version read-back and cache invalidation.
 """
 from __future__ import annotations
 
@@ -18,13 +17,11 @@ from typing import Optional
 import pandas as pd
 
 from app.config import get_settings
-from app.dataeng.duck import run_clean_sql
-from app.dataeng.sources import asset_tables
 from app.domain.models import DataAsset, DataAssetVersion
 
 
 class PublishError(Exception):
-    """Raised when an asset cannot be published (no SQL, bad SQL, empty output)."""
+    """Raised when an asset cannot be published."""
 
 
 def _now_iso() -> str:
@@ -63,37 +60,6 @@ def delete_asset(project_id: str, st, asset_id: str) -> bool:
     shutil.rmtree(_asset_dir(project_id, asset_id), ignore_errors=True)
     _invalidate(project_id)
     return True
-
-
-def publish_asset(project_id: str, st, asset: DataAsset) -> DataAssetVersion:
-    """Materialise the asset's cleaning SQL to parquet and register a new version."""
-    draft = asset.sql_draft
-    if draft is None or not draft.sql.strip():
-        raise PublishError("没有可发布的清洗 SQL — 先生成并预览。")
-    tables = asset_tables(project_id, asset)
-    res = run_clean_sql(draft.sql, tables, materialize=True)
-    if not res.ok:
-        raise PublishError(f"清洗 SQL 执行失败: {res.error}")
-    if res.df is None or res.df.empty:
-        raise PublishError("清洗结果为空,无法发布。")
-
-    version = asset.latest_version + 1
-    out_dir = _asset_dir(project_id, asset.id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    rel_path = f"projects/{project_id}/assets/{asset.id}/v{version}.parquet"
-    abs_path = get_settings().data_path / rel_path
-    res.df.to_parquet(abs_path, index=False)
-
-    ver = DataAssetVersion(
-        version=version, parquetPath=rel_path, rowCount=int(len(res.df)),
-        columns=[str(c) for c in res.df.columns], sql=draft.sql, producedAt=_now_iso(),
-    )
-    asset.versions.append(ver)
-    asset.latest_version = version
-    asset.status = "published"
-    touch(asset)
-    _invalidate(project_id)
-    return ver
 
 
 def read_version(project_id: str, version: DataAssetVersion) -> Optional[pd.DataFrame]:

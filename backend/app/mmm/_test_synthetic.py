@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from app.mmm.ols import fit_ols
+from app.mmm.ols import fit_ols, t_pvalue
 from app.mmm.transforms import adstock_geometric, hill_saturation, standardize
 
 
@@ -114,6 +114,34 @@ def test_dw_autocorrelated() -> bool:
     return _check("DW detects autocorrelation (<1.5)", ok, f"DW={res.durbin_watson:.3f}")
 
 
+def test_t_pvalue() -> bool:
+    import math
+    # Known critical values (two-sided): t=2.086 @ dof=20 → p≈0.05; t=2.845 → p≈0.01.
+    ok = math.isclose(t_pvalue(0.0, 20), 1.0, abs_tol=1e-9)
+    ok &= math.isclose(t_pvalue(2.086, 20), 0.05, abs_tol=1e-3)
+    ok &= math.isclose(t_pvalue(2.845, 20), 0.01, abs_tol=1e-3)
+    # Monotone decreasing in |t|; symmetric in sign; nan for non-positive dof / nan t.
+    ok &= t_pvalue(1.0, 20) > t_pvalue(2.0, 20) > t_pvalue(3.0, 20)
+    ok &= math.isclose(t_pvalue(2.0, 20), t_pvalue(-2.0, 20), abs_tol=1e-12)
+    ok &= math.isnan(t_pvalue(2.0, 0)) and math.isnan(t_pvalue(float("nan"), 20))
+    return _check("t_pvalue matches known critical values + monotone", ok,
+                  f"p(2.086,20)={t_pvalue(2.086, 20):.4f}")
+
+
+def test_ols_pvalues_present() -> bool:
+    rng = np.random.default_rng(7)
+    n = 60
+    x1 = rng.normal(0, 1, n)
+    x2 = rng.normal(0, 1, n)
+    y = 3.0 * x1 + 0.0 * x2 + rng.normal(0, 1, n)
+    res = fit_ols(pd.DataFrame({"x1": x1, "x2": x2}), y)
+    # pvalues keyed like coef; the strong signal x1 is significant, the null x2 is not.
+    ok = set(res.pvalues) == set(res.coef)
+    ok &= res.pvalues["x1"] < 0.01 and res.pvalues["x2"] > 0.1
+    return _check("fit_ols returns pvalues keyed like coef", ok,
+                  f"p(x1)={res.pvalues['x1']:.4f} p(x2)={res.pvalues['x2']:.3f}")
+
+
 def main() -> int:
     print("=== SYNTHETIC TESTS (transforms + OLS) ===")
     results = [
@@ -124,6 +152,8 @@ def main() -> int:
         test_ols_noise_and_mape(),
         test_vif_collinearity(),
         test_dw_autocorrelated(),
+        test_t_pvalue(),
+        test_ols_pvalues_present(),
     ]
     passed = sum(results)
     print(f"\n{passed}/{len(results)} passed")

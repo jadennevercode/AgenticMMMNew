@@ -20,7 +20,8 @@ ArtifactType = Literal[
     "document", "master-data", "dataset", "scorecard", "workflow", "model", "report"
 ]
 ArtifactState = Literal["draft", "proposed", "confirmed", "frozen"]
-ArtifactFormat = Literal["sheet", "slides", "doc", "markdown", "review"]
+ArtifactFormat = Literal[
+    "sheet", "slides", "doc", "markdown", "review", "validation", "olsTree", "masterData"]
 
 DecisionKind = Literal["approval", "choice", "signoff"]
 DecisionStatus = Literal["idle", "open", "resolved"]
@@ -362,6 +363,17 @@ class FactorTree(CamelModel):
 QualityDisposition = Literal["accept", "flag", "drop"]
 
 
+class QualitySubScore(CamelModel):
+    """One 2.11 subcheck under a dimension (the driver behind a dimension score)."""
+    key: str                       # e.g. "consistency.time"
+    dimension: str                 # consistency | accuracy | completeness | granularity
+    label: str = ""
+    score: float = 0.0             # 0 / 0.5 / 1
+    note: str = ""                 # English, evidence-grounded
+    computed: bool = True          # False = advisory default (needs external ref)
+    blocking: bool = True          # whether it can drag the dimension score down
+
+
 class QualityRow(CamelModel):
     """One factor×metric quality score (2.11) with its human disposition."""
     id: str
@@ -374,12 +386,14 @@ class QualityRow(CamelModel):
     accuracy: float = 0.0          # 真实性 (accuracy / authenticity)
     completeness: float = 0.0
     granularity: float = 0.0
-    # Per-dimension 情况 narratives (the Excel 2.12 "...情况" columns), AI-written.
+    # Per-dimension narratives (the Excel 2.12 "...情况" columns), AI-written.
     consistency_note: str = Field(default="", alias="consistencyNote")
     accuracy_note: str = Field(default="", alias="accuracyNote")
     completeness_note: str = Field(default="", alias="completenessNote")
     granularity_note: str = Field(default="", alias="granularityNote")
-    total: float = 0.0             # final verdict score: min of the four dimensions
+    # The 10 subcheck breakdown behind the four dimension scores (transparency).
+    sub_scores: list[QualitySubScore] = Field(default_factory=list, alias="subScores")
+    total: float = 0.0             # Excel 2.12 Total = product of the four dimensions
     auto_verdict: str = Field(default="", alias="autoVerdict")  # pass | borderline | unusable
     disposition: QualityDisposition = "accept"
     note: str = ""
@@ -389,20 +403,176 @@ class QualityScorecard(CamelModel):
     rows: list[QualityRow] = []
 
 
-# ── Client Q&A tracker (S2 · editable data/indicator questions) ─
-ClientQAStatus = Literal["open", "answered", "closed"]
+# ── Statistical score (S2 · 2.4 · per-indicator CV/Pearson/VIF, editable) ─
+StatDisposition = Literal["include", "review", "drop"]
 
 
-class ClientQARow(CamelModel):
+class StatScoreRow(CamelModel):
+    """One factor-tree indicator scored on the 2.33 statistical tests.
+
+    Raw stats (cv/pearson/vif) plus their 0/0.5/1/2 band scores; Total = sum.
+    Verdict follows the KB thresholds; disposition is the human's keep decision.
+    """
     id: str
-    question: str = ""
-    owner: str = ""
-    response: str = ""
-    status: ClientQAStatus = "open"
+    l1: str = ""
+    l2: str = ""
+    l3: str = ""
+    l4: str = ""
+    indicator: str = ""
+    cv: float = 0.0                # reference CV (scaled variance / mean)
+    pearson: float = 0.0           # Pearson r vs KPI (signed)
+    vif: float = 1.0               # variance inflation factor
+    cv_score: float = Field(default=0.0, alias="cvScore")
+    pearson_score: float = Field(default=0.0, alias="pearsonScore")
+    vif_score: float = Field(default=0.0, alias="vifScore")
+    total: float = 0.0             # cv_score + pearson_score + vif_score
+    auto_verdict: str = Field(default="", alias="autoVerdict")  # Good|Acceptable|unconsiderable
+    disposition: StatDisposition = "include"
+    # The AI's case for or against this indicator, grounded in the stats above —
+    # what turns a bare score into a reviewable recommendation at 2.4d.
+    rationale: str = ""
+    note: str = ""
 
 
-class ClientQA(CamelModel):
-    rows: list[ClientQARow] = []
+class StatScorecard(CamelModel):
+    rows: list[StatScoreRow] = []
+
+
+# ── OLS setup (S2 · 2.5 · AI-proposed, human-reviewed model configuration) ─
+# The 2.5 Process asks the human to confirm the response (Y), review the model
+# variables (X) and set the transform/control parameters before the fit runs.
+# This config is the single source of truth for the OLS — `build_ols_review`
+# reads it, and editing it re-fits synchronously (see agents/artifact_edit.py).
+OlsSaturation = Literal["hill", "none"]
+OlsTrend = Literal["linear", "none"]
+OlsSeasonality = Literal["fourier", "dummies", "none"]
+
+
+class OlsYCandidate(CamelModel):
+    """One selectable response variable for a model object."""
+    object: str = ""
+    metric: str = ""
+    metric_type: str = Field(default="", alias="metricType")
+    months: int = 0                 # month coverage (selection evidence)
+    is_money: bool = Field(default=False, alias="isMoney")  # RMB/value/GMV → money ROI
+    recommended: bool = False
+    rationale: str = ""
+
+
+class OlsYChoice(CamelModel):
+    """The confirmed response variable for one model object."""
+    object: str = ""
+    metric: str = ""
+    metric_type: str = Field(default="", alias="metricType")
+    is_money: bool = Field(default=False, alias="isMoney")
+
+
+class OlsXCandidate(CamelModel):
+    """One candidate model variable, with the 2.4 statistics behind the advice."""
+    key: str = ""                   # f"{norm(l4)}|{norm(metric)}"
+    l1: str = ""
+    l2: str = ""
+    l3: str = ""
+    l4: str = ""
+    indicator: str = ""
+    metric: str = ""                # long-table metric label
+    is_spend: bool = Field(default=False, alias="isSpend")
+    pearson: float = 0.0
+    vif: float = 1.0
+    cv: float = 0.0
+    stat_verdict: str = Field(default="", alias="statVerdict")
+    recommended: bool = False
+    selected: bool = False          # the human's keep decision
+    # An earlier S2 layer already rejected this indicator: it is shown (so the
+    # human can see where it went) but can never be ticked back in. `lockedBy`
+    # is the ledger layer id that rejected it.
+    locked: bool = False
+    locked_by: str = Field(default="", alias="lockedBy")
+    rationale: str = ""
+
+
+class OlsEvent(CamelModel):
+    """A structural-event window entering the design matrix as a dummy control.
+
+    This is how a 2.3 anomaly the human explained as a business event stops being
+    mis-attributed to marketing: the dummy absorbs the window, so the paid
+    variables do not have to explain a spike they did not cause.
+    """
+    id: str = ""
+    label: str = ""
+    start: int = 0   # yyyymm, inclusive
+    end: int = 0     # yyyymm, inclusive
+
+
+class OlsCapWindow(CamelModel):
+    """A window where the response is winsorized (2.3 'outlier capping')."""
+    id: str = ""
+    label: str = ""
+    start: int = 0   # yyyymm, inclusive
+    end: int = 0     # yyyymm, inclusive
+
+
+class OlsParams(CamelModel):
+    """Transform + control settings for the fit."""
+    adstock: float = 0.5
+    saturation: OlsSaturation = "hill"
+    hill_half: float = Field(default=1.0, alias="hillHalf")
+    # Derived from the 2.3 anomaly review, never hand-edited here: `events` become
+    # dummy controls, `caps` winsorize the response over their window. They are
+    # resolved at fit time from `ProjectState.anomaly_review` so a stale params
+    # draft can never drop a handling decision the human made at 2.3.
+    events: list[OlsEvent] = Field(default_factory=list)
+    caps: list[OlsCapWindow] = Field(default_factory=list)
+    # Controls enter the design matrix raw (never adstocked/saturated) and fold
+    # into the baseline — they absorb trend/seasonality so the paid drivers do not.
+    trend: OlsTrend = "linear"
+    seasonality: OlsSeasonality = "fourier"
+    fourier_k: int = Field(default=2, alias="fourierK")
+    # Optional unit price: converts an incremental *volume* Y into revenue so ROI
+    # becomes a real 增量Revenue/Spend. None → ROI stays volume-per-spend.
+    price_per_unit: Optional[float] = Field(default=None, alias="pricePerUnit")
+
+
+# ── 2.3 anomaly review (AI hypothesizes, the human rules) ─
+# Each detected YoY anomaly becomes a card: the AI states a causal hypothesis and
+# proposes a handling; the human accepts, edits or rejects it. The accepted
+# handling is what actually reaches the model (see `ledger.model_selection`) —
+# this replaces the old `ai-2.3` option set, which was chosen and then ignored.
+AnomalyHandling = Literal["event", "cap", "raw"]
+AnomalyStatus = Literal["pending", "accepted", "rejected"]
+
+
+class AnomalyHypothesis(CamelModel):
+    id: str = ""
+    channel: str = ""
+    year: str = ""
+    growth_pct: float = Field(default=0.0, alias="growthPct")
+    # AI's reading of the anomaly, grounded in the computed move + interviews.
+    hypothesis: str = ""
+    proposed: AnomalyHandling = "event"
+    rationale: str = ""
+    tradeoff: str = ""
+    # The human's ruling. `handling` only bites once status == "accepted".
+    status: AnomalyStatus = "pending"
+    handling: AnomalyHandling = "event"
+    note: str = ""
+    # The window the handling applies to (yyyymm, inclusive). Defaults to the
+    # anomaly's own year; the human narrows it once the client confirms dates.
+    start: int = 0
+    end: int = 0
+
+
+class AnomalyReview(CamelModel):
+    rows: list[AnomalyHypothesis] = []
+
+
+class OlsConfig(CamelModel):
+    data_source: str = Field(default="", alias="dataSource")  # "project" | "reference"
+    y_candidates: list[OlsYCandidate] = Field(default_factory=list, alias="yCandidates")
+    y: list[OlsYChoice] = Field(default_factory=list)
+    x_candidates: list[OlsXCandidate] = Field(default_factory=list, alias="xCandidates")
+    params: OlsParams = Field(default_factory=OlsParams)
+    proposed_at: str = Field(default="", alias="proposedAt")
 
 
 # ── Knowledge packs (per-industry, editable) ─────────────
@@ -427,6 +597,10 @@ class FactorTreeRow(CamelModel):
     l3: str = ""
     l4: str = ""
     indicator: str = ""
+    # Expected post-OLS bands for this factor, used for fast range-match validation
+    # (see agents/data_rules.match_factor_range). Free text, e.g. "0.8~1.3" / "/".
+    roi_range: str = Field(default="", alias="roiRange")
+    contribution_range: str = Field(default="", alias="contributionRange")
 
 
 class InterviewQuestion(CamelModel):
@@ -552,6 +726,8 @@ class FieldProfile(CamelModel):
     null_ratio: float = Field(default=0.0, alias="nullRatio")
     distinct: int = 0
     sample_values: list[str] = Field(default_factory=list, alias="sampleValues")
+    # Full distinct values for low-cardinality text fields (enum candidates).
+    enum_values: list[str] = Field(default_factory=list, alias="enumValues")
     # numeric stats (None for non-numeric fields)
     minimum: Optional[float] = Field(default=None, alias="min")
     maximum: Optional[float] = Field(default=None, alias="max")
@@ -567,15 +743,29 @@ class FieldProfile(CamelModel):
     note: str = ""
 
 
+class TableReview(CamelModel):
+    """The review of ONE raw table — its own fields, charts, time axis and warnings.
+    Every quality and chart is scoped to this single dataset (no cross-table merge)."""
+    name: str
+    row_count: int = Field(default=0, alias="rowCount")
+    column_count: int = Field(default=0, alias="columnCount")
+    fields: list[FieldProfile] = []
+    charts: list[dict] = []  # ReviewChart[] built from THIS table only
+    time_field: Optional[str] = Field(default=None, alias="timeField")
+    time_granularity: Optional[str] = Field(default=None, alias="timeGranularity")
+    warnings: list[str] = []
+
+
 class ReviewReport(CamelModel):
-    """The quick-review output for a registered source: per-field profiles + charts
-    (the chart shape mirrors ``ReviewChart`` in the frontend so it reuses the same
-    recharts renderer)."""
+    """Quick-review output for a registered source. Reviews are PER TABLE: the AI /
+    UI look at one dataset at a time. ``fields`` is the flattened union (kept for the
+    long-table grounding + back-compat); ``table_reviews`` is the per-dataset view."""
     row_count: int = Field(default=0, alias="rowCount")
     column_count: int = Field(default=0, alias="columnCount")
     tables: list[RawTable] = []
     fields: list[FieldProfile] = []
-    charts: list[dict] = []  # ReviewChart[] (serialized) — continuity / volatility / distribution
+    table_reviews: list[TableReview] = Field(default_factory=list, alias="tableReviews")
+    charts: list[dict] = []  # deprecated global charts (empty); use table_reviews[].charts
     time_field: Optional[str] = Field(default=None, alias="timeField")
     time_granularity: Optional[str] = Field(default=None, alias="timeGranularity")
     warnings: list[str] = []
@@ -626,6 +816,163 @@ class DataAssetVersion(CamelModel):
     produced_at: str = Field(default="", alias="producedAt")
 
 
+class DbtNode(CamelModel):
+    """One dbt node result (model / seed / test) from the last build, for the UI."""
+    unique_id: str = Field(default="", alias="uniqueId")
+    resource_type: str = Field(default="", alias="resourceType")  # model|seed|test
+    name: str = ""
+    layer: str = ""             # staging|intermediate|marts (models only)
+    status: str = ""            # success|error|pass|fail|skipped
+    execution_time: float = Field(default=0.0, alias="executionTime")
+    message: str = ""
+    failures: Optional[int] = None  # failing-row count for tests
+    relation: str = ""
+
+
+class EnumViolation(CamelModel):
+    """A mart column carrying values outside its target column's standard-value set."""
+    column: str
+    values: list[str] = []      # offending (out-of-vocabulary) values, capped
+
+
+class SchemaConformance(CamelModel):
+    """Strict field + enum mapping of the mart against the target schema. The publish
+    gate requires ``ok`` — a data asset may not enter the long table half-mapped."""
+    ok: bool = False
+    checked: bool = False        # False when the mart could not be read (e.g. no build)
+    missing_required: list[str] = Field(default_factory=list, alias="missingRequired")
+    extra: list[str] = []        # mart columns not in the schema (period_date excluded)
+    enum_violations: list[EnumViolation] = Field(default_factory=list, alias="enumViolations")
+    unenforced_dimensions: list[str] = Field(default_factory=list, alias="unenforcedDimensions")
+
+
+class DbtSummary(CamelModel):
+    """Summary of the asset's last ``dbt build`` — the dbt-workspace transform path."""
+    ok: bool = False
+    ran_at: str = Field(default="", alias="ranAt")
+    command: str = ""
+    error: str = ""
+    mart: str = ""              # the mart model name (published relation)
+    models: int = 0
+    tests: int = 0
+    passed: int = 0
+    failed: int = 0
+    ai_rounds: int = Field(default=0, alias="aiRounds")  # repair rounds if AI-generated
+    nodes: list[DbtNode] = []
+    # pipeline step id → compiled dbt model name (drives per-step status/preview in the UI)
+    step_models: dict[str, str] = Field(default_factory=dict, alias="stepModels")
+    conformance: Optional[SchemaConformance] = None
+
+
+# ── Transform pipeline (Data Engine) ─────────────────────
+# Typed, human-reviewable transform steps. The AI proposes step parameters; the
+# human edits each step in its own inspector; the compiler turns the step DAG
+# deterministically into dbt models — no opaque AI SQL on the main path.
+StepKind = Literal[
+    "field_map", "enum_map", "join", "union", "aggregate", "filter", "derive", "custom_sql"
+]
+
+
+class FieldMapEntry(CamelModel):
+    """Map one source column (or SQL expression) onto an output column."""
+    source: str = ""            # source column name ('' when expr is used)
+    target: str = ""            # output column name
+    cast: str = ""              # '' | integer | double | date | text
+    expr: str = ""              # optional SQL expression overriding source (e.g. a constant)
+
+
+class EnumMapEntry(CamelModel):
+    """Map one raw value to its canonical value (compiled into a dbt seed)."""
+    raw: str
+    canonical: str = ""
+    confidence: float = 1.0     # AI-suggestion confidence; 1.0 for human entries
+    by: Literal["ai", "human"] = "human"
+
+
+class JoinConfig(CamelModel):
+    how: Literal["left", "inner"] = "left"
+    left_on: list[str] = Field(default_factory=list, alias="leftOn")
+    right_on: list[str] = Field(default_factory=list, alias="rightOn")
+    # Right-side columns to carry into the output (left columns always pass through).
+    right_columns: list[str] = Field(default_factory=list, alias="rightColumns")
+
+
+class AggSpec(CamelModel):
+    column: str
+    func: Literal["sum", "avg", "min", "max", "count"] = "sum"
+    alias: str = ""
+
+
+class DeriveSpec(CamelModel):
+    name: str
+    expr: str                   # SQL expression over the input columns
+
+
+class TransformStep(CamelModel):
+    """One node of the transform pipeline. ``inputs`` reference upstream step ids
+    or raw sources as ``source:<table>``. Exactly the config for ``kind`` is used."""
+    id: str
+    kind: StepKind
+    name: str = ""              # display name; basis of the compiled model name
+    note: str = ""              # plain-English description (AI-filled, human-editable)
+    inputs: list[str] = Field(default_factory=list)
+    field_map: list[FieldMapEntry] = Field(default_factory=list, alias="fieldMap")
+    enum_field: str = Field(default="", alias="enumField")   # column the enum_map applies to
+    enum_map: list[EnumMapEntry] = Field(default_factory=list, alias="enumMap")
+    join: Optional[JoinConfig] = None
+    group_by: list[str] = Field(default_factory=list, alias="groupBy")
+    aggs: list[AggSpec] = Field(default_factory=list)
+    filter_expr: str = Field(default="", alias="filterExpr")
+    derive: list[DeriveSpec] = Field(default_factory=list)
+    sql: str = ""               # custom_sql body; inputs exposed as CTEs input_1..n
+    # aggregate only: collapse rows across their originating source file instead of
+    # keeping the compiler's default per-source granularity (see compiler provenance).
+    merge_sources: bool = Field(default=False, alias="mergeSources")
+
+
+class TransformPipeline(CamelModel):
+    steps: list[TransformStep] = []
+    output_step: str = Field(default="", alias="outputStep")  # step id that becomes the mart
+    note: str = ""
+
+
+TargetColumnKind = Literal["dimension", "time", "factor", "metric", "value"]
+
+
+class TargetColumn(CamelModel):
+    """One column of the project's target long-table schema — the shape every
+    published mart must emit. Seeded from reference/target-schema.xlsx, editable
+    per project, and used to ground the AI's dbt codegen."""
+    name: str                       # the mart column to emit (e.g. "brand")
+    label: str = ""                 # human label ("Brand")
+    definition: str = ""            # plain-English meaning
+    kind: TargetColumnKind = "dimension"
+    required: bool = True
+    standard_values: list[str] = Field(default_factory=list, alias="standardValues")
+
+
+class Indicator(CamelModel):
+    """A published, reusable indicator = one metric × factor-tree path, registered
+    when a data asset publishes. Data Intake references these instead of raw files."""
+    id: str
+    metric: str
+    metric_type: str = Field(default="", alias="metricType")
+    l1: str = ""
+    l2: str = ""
+    l3: str = ""
+    l4: str = ""
+    unit: str = ""
+    asset_id: str = Field(default="", alias="assetId")
+    asset_name: str = Field(default="", alias="assetName")
+    coverage_start: str = Field(default="", alias="coverageStart")
+    coverage_end: str = Field(default="", alias="coverageEnd")
+    rows: int = 0
+    # Grounding against the Business-Understanding factor tree: matched → the
+    # FactorRow id; unmatched → flagged for human review in the catalog.
+    tree_grounded: bool = Field(default=False, alias="treeGrounded")
+    tree_row_id: str = Field(default="", alias="treeRowId")
+
+
 class DataAsset(CamelModel):
     """A project-scoped data asset: raw source(s) → review → cleaning spec → SQL →
     published versions (parquet). Published assets feed the 2.21 long table."""
@@ -638,6 +985,8 @@ class DataAsset(CamelModel):
     review: Optional[ReviewReport] = None
     cleaning_spec: Optional[CleaningSpec] = Field(default=None, alias="cleaningSpec")
     sql_draft: Optional[SqlDraft] = Field(default=None, alias="sqlDraft")
+    pipeline: Optional[TransformPipeline] = None
+    dbt: Optional[DbtSummary] = None
     versions: list[DataAssetVersion] = []
     latest_version: int = Field(default=0, alias="latestVersion")
     lineage: list[str] = []

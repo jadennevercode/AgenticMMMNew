@@ -176,6 +176,71 @@ def _vif_band(vif: float) -> float:
     return 2.0
 
 
+def reference_cv(x: "np.ndarray") -> float:
+    """CV per the 2.33 rule: min-max scale the series to [0, 1], then variance/mean.
+
+    This is the workbook's explicit definition ("波动系数CV = 方差/均值，数据先缩放到0-1"),
+    not the textbook CV=std/mean. Returns 0.0 for empty/constant/degenerate series.
+    """
+    import numpy as np
+
+    v = x[~np.isnan(x)].astype(float) if x.size else x
+    if v.size == 0:
+        return 0.0
+    lo, hi = float(np.min(v)), float(np.max(v))
+    if hi <= lo:  # constant series → no volatility
+        return 0.0
+    scaled = (v - lo) / (hi - lo)
+    mean = float(np.mean(scaled))
+    if mean <= 0:
+        return 0.0
+    return float(np.var(scaled) / mean)
+
+
+VIF_MAX = 1000.0  # display/scoring cap — a VIF this high is already "severe"
+
+
+def vif_all(matrix: "np.ndarray") -> "np.ndarray":
+    """Per-column VIF for a (n_obs × n_cols) matrix, at column (indicator) granularity.
+
+    Two regimes, both returning one VIF per column (never a grouped/shared score):
+
+    * **Identified (n > p + 1):** the exact VIF_i = [inv(R)]_ii, where R is the
+      column correlation matrix — equivalent to 1/(1-R²) from regressing column i
+      on all the others. This is the case for real per-object modeling frames.
+    * **Under-determined (p ≥ n):** a full multivariate VIF is unidentifiable
+      (more indicators than observations), so we fall back to the pairwise-max
+      collinearity proxy VIF_i = 1/(1 - max_{j≠i} r_ij²) — still one value per
+      indicator, defined for any p, and interpretable as "how well the single most
+      collinear peer explains this indicator". This is the normal regime when
+      screening every FactorTree indicator before modeling.
+
+    Values are floored at 1.0 and capped at ``VIF_MAX``.
+    """
+    import numpy as np
+
+    n, p = matrix.shape
+    if p < 2:
+        return np.ones(p)
+    corr = np.corrcoef(matrix, rowvar=False)
+    corr = np.nan_to_num(corr, nan=0.0)  # constant columns → treat as uncorrelated
+    np.fill_diagonal(corr, 1.0)
+
+    if n > p + 1:
+        try:
+            inv = np.linalg.inv(corr + 1e-8 * np.eye(p))
+            diag = np.diag(inv)
+        except np.linalg.LinAlgError:
+            diag = np.diag(np.linalg.pinv(corr))
+    else:
+        # pairwise-max proxy: strongest |correlation| to any other column.
+        c2 = np.clip(corr ** 2, 0.0, 0.999999)
+        np.fill_diagonal(c2, 0.0)
+        r2_max = c2.max(axis=1)
+        diag = 1.0 / (1.0 - r2_max)
+    return np.clip(diag, 1.0, VIF_MAX).astype(float)
+
+
 def score_statistical(cv: float, pearson: float, vif: float) -> StatScore:
     """Score one variable on CV / Pearson / VIF per the KB bands.
 
@@ -266,3 +331,120 @@ def match_factor_range(l4_name: str) -> FactorRange | None:
 
 def in_range(value: float, rng: tuple[float, float] | None) -> bool:
     return rng is not None and rng[0] <= value <= rng[1]
+
+
+# ── Knowledge-first ROI / Contribution range resolver ───────────────────────
+#
+# The authoritative ranges are meant to be maintained in the Knowledge module as
+# the industry ``factor_tree`` template (per-indicator L1–L4 + roiRange +
+# contributionRange). This resolver prefers those, keyed at (L4, indicator)
+# granularity, and falls back to the reference ``factor-ranges.json`` library.
+
+
+def _norm(s: object) -> str:
+    return str(s).strip().lower() if s is not None else ""
+
+
+@dataclass(frozen=True)
+class RangeBenchmark:
+    """Expected ROI / Contribution bands for one indicator, with provenance."""
+    roi: tuple[float, float] | None
+    contribution: tuple[float, float] | None
+    roi_text: str            # original display string, e.g. "0.8~1.3" or "/"
+    contribution_text: str   # e.g. "0%~1.5%"
+    source: str              # "knowledge" | "reference"
+
+
+class RangeIndex:
+    """(L4, indicator)-keyed benchmark lookup.
+
+    Precedence: exact (L4, indicator) knowledge pair → L4-only knowledge (exact
+    then normalised substring) → reference ``factor-ranges.json`` via
+    :func:`match_factor_range`. Returns ``None`` when nothing matches.
+    """
+
+    def __init__(
+        self,
+        pair_index: dict[tuple[str, str], RangeBenchmark],
+        l4_index: dict[str, RangeBenchmark],
+    ) -> None:
+        self._pairs = pair_index
+        self._l4 = l4_index
+
+    def match(self, l4: str, indicator: str) -> RangeBenchmark | None:
+        l4n, indn = _norm(l4), _norm(indicator)
+        # 1) exact (L4, indicator) knowledge pair.
+        hit = self._pairs.get((l4n, indn))
+        if hit is not None:
+            return hit
+        # 2) L4-only knowledge — exact then normalised substring.
+        if l4n and l4n in self._l4:
+            return self._l4[l4n]
+        for key, val in self._l4.items():
+            if key and (key in l4n or l4n in key):
+                return val
+        # 3) reference fallback.
+        ref = match_factor_range(l4)
+        if ref is not None:
+            return RangeBenchmark(
+                roi=ref.roi,
+                contribution=ref.contribution,
+                roi_text=_fmt_range(ref.roi, is_pct=False),
+                contribution_text=_fmt_range(ref.contribution, is_pct=True),
+                source="reference",
+            )
+        return None
+
+
+def _fmt_range(rng: tuple[float, float] | None, *, is_pct: bool) -> str:
+    """Reconstruct a display string for a parsed reference range (best effort)."""
+    if rng is None:
+        return "/"
+    if is_pct:
+        return f"{rng[0]:g}%~{rng[1]:g}%"
+    return f"{rng[0]:g}~{rng[1]:g}"
+
+
+def build_range_index(industry_l1: str | None, industry_l2: str | None) -> RangeIndex:
+    """Build a :class:`RangeIndex` from the industry Knowledge factor-tree template.
+
+    Reads the ``factor_tree`` template for the project industry (l2 beats l1),
+    indexing every row that carries a parseable ROI or Contribution band. The
+    reference library is used per-lookup as the final fallback in
+    :meth:`RangeIndex.match`, so an empty template still yields reference ranges.
+    """
+    pair_index: dict[tuple[str, str], RangeBenchmark] = {}
+    l4_index: dict[str, RangeBenchmark] = {}
+    # Lazy import to avoid an import cycle (templates → domain.models → agents).
+    try:
+        from app.store.templates import get_templates
+    except Exception:
+        return RangeIndex(pair_index, l4_index)
+
+    tpl = None
+    if industry_l1:
+        try:
+            tpl = get_templates().best_match("factor_tree", industry_l1, industry_l2)
+        except Exception:
+            tpl = None
+    if tpl is None:
+        return RangeIndex(pair_index, l4_index)
+
+    for row in tpl.factor_rows:
+        roi_txt = str(getattr(row, "roi_range", "") or "")
+        con_txt = str(getattr(row, "contribution_range", "") or "")
+        roi = _parse_range(roi_txt)
+        con = _parse_range(con_txt)
+        if roi is None and con is None:
+            continue
+        bench = RangeBenchmark(
+            roi=roi, contribution=con,
+            roi_text=roi_txt or "/", contribution_text=con_txt or "/",
+            source="knowledge",
+        )
+        l4n, indn = _norm(row.l4), _norm(row.indicator)
+        if l4n and indn:
+            pair_index.setdefault((l4n, indn), bench)
+        if l4n:
+            l4_index.setdefault(l4n, bench)  # first-wins
+    return RangeIndex(pair_index, l4_index)

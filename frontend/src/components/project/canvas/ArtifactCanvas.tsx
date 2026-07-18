@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import { Plus } from 'lucide-react'
 import { useSimStore } from '../../../store/useSimStore'
-import { asDoc, asReview, asSheet, asSlides } from '../../../lib/artifact-format'
+import { asDoc, asMasterData, asOlsTree, asReview, asSheet, asSlides } from '../../../lib/artifact-format'
+import { BusinessValidationView } from '../validation/BusinessValidationView'
+import { MasterDataView } from './MasterDataView'
+import { OlsTreeView } from './OlsTreeView'
 import { MiniMarkdown } from '../../ui/primitives'
 import { cn } from '../../../lib/cn'
 import type { ArtifactInstance, DocData, SheetData, SlidesData } from '../../../lib/types'
@@ -351,6 +354,15 @@ export function ArtifactCanvas({ inst, editing }: { inst: ArtifactInstance; edit
       return <DocView inst={inst} editing={editing} />
     case 'review':
       return <ReviewView inst={inst} editing={editing} />
+    case 'validation':
+      return <BusinessValidationView inst={inst} editing={editing} />
+    case 'olsTree':
+      // Legacy projects saved a sheet body before the olsTree upgrade — fall back
+      // to the sheet grid until they re-run 2.5.
+      return asOlsTree(inst.body) ? <OlsTreeView inst={inst} /> : <SheetView inst={inst} editing={editing} />
+    case 'masterData':
+      // Same story: projects assembled before the funnel view still hold a sheet body.
+      return asMasterData(inst.body) ? <MasterDataView inst={inst} /> : <SheetView inst={inst} editing={editing} />
     default:
       return <MarkdownView inst={inst} editing={editing} />
   }

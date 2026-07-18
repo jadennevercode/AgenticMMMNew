@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Database, Plus } from 'lucide-react'
+import { BookMarked, Database, Plus, Table2 } from 'lucide-react'
 import type { DataAssetStatus } from '../../lib/types'
 import { useSimStore } from '../../store/useSimStore'
 import { Button } from '../ui/button'
 import { cn } from '../../lib/cn'
 import { AssetDetail } from './AssetDetail'
+import { TargetSchemaPanel } from './TargetSchemaPanel'
+import { IndicatorCatalogPanel } from './IndicatorCatalogPanel'
+
+type EngineView = 'assets' | 'schema' | 'indicators'
 
 const DOT: Record<DataAssetStatus, string> = {
   raw: 'bg-muted-foreground/40',
@@ -20,6 +24,7 @@ export default function DataEngineView() {
   const { loadDataAssets, loadFiles, createDataAsset, selectDataAsset } = useSimStore.getState()
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
+  const [view, setView] = useState<EngineView>('assets')
 
   useEffect(() => {
     void loadDataAssets()
@@ -44,11 +49,24 @@ export default function DataEngineView() {
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
             <Database className="size-4 text-primary" />
-            <h1 className="text-sm font-semibold">数据引擎</h1>
+            <h1 className="text-sm font-semibold">Data Engine</h1>
           </div>
           <Button size="icon" variant="ghost" onClick={() => setCreating((v) => !v)} aria-label="New asset">
             <Plus className="size-4" />
           </Button>
+        </div>
+
+        <div className="flex gap-1 border-b border-border p-2">
+          <button type="button" onClick={() => setView('schema')}
+            className={cn('flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors',
+              view === 'schema' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-accent')}>
+            <Table2 className="size-3.5" />Schema
+          </button>
+          <button type="button" onClick={() => setView('indicators')}
+            className={cn('flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors',
+              view === 'indicators' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-accent')}>
+            <BookMarked className="size-3.5" />Indicators
+          </button>
         </div>
 
         {creating && (
@@ -58,12 +76,12 @@ export default function DataEngineView() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') void create() }}
-              placeholder="资产名称,如 渠道销量"
+              placeholder="Asset name, e.g. Channel Sales"
               className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-[12px] outline-none focus:border-primary/60"
             />
             <div className="flex gap-2">
-              <Button size="sm" onClick={() => void create()} disabled={!name.trim()}>创建</Button>
-              <Button size="sm" variant="ghost" onClick={() => { setCreating(false); setName('') }}>取消</Button>
+              <Button size="sm" onClick={() => void create()} disabled={!name.trim()}>Create</Button>
+              <Button size="sm" variant="ghost" onClick={() => { setCreating(false); setName('') }}>Cancel</Button>
             </div>
           </div>
         )}
@@ -71,7 +89,7 @@ export default function DataEngineView() {
         <div className="min-h-0 flex-1 overflow-auto p-2">
           {assets.length === 0 ? (
             <p className="px-2 py-6 text-center text-[12px] text-muted-foreground">
-              还没有数据资产。点击 + 注册一个,把客户的原始数据清洗成可复用资产。
+              No data assets yet. Click + to register one and turn the client's raw data into a reusable asset.
             </p>
           ) : (
             <ul className="space-y-1">
@@ -79,10 +97,10 @@ export default function DataEngineView() {
                 <li key={a.id}>
                   <button
                     type="button"
-                    onClick={() => selectDataAsset(a.id)}
+                    onClick={() => { selectDataAsset(a.id); setView('assets') }}
                     className={cn(
                       'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[12px] transition-colors',
-                      a.id === selectedId ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                      a.id === selectedId && view === 'assets' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground',
                     )}
                   >
                     <span className={cn('size-2 shrink-0 rounded-full', DOT[a.status])} />
@@ -98,19 +116,23 @@ export default function DataEngineView() {
 
       {/* ── detail ── */}
       <main className="min-w-0 flex-1">
-        {selected ? (
+        {view === 'schema' ? (
+          <TargetSchemaPanel />
+        ) : view === 'indicators' ? (
+          <IndicatorCatalogPanel onOpenAsset={(id) => { selectDataAsset(id); setView('assets') }} />
+        ) : selected ? (
           <AssetDetail key={selected.id} asset={selected} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
             <Database className="size-10 opacity-30" />
             <div>
-              <p className="text-sm font-medium text-foreground">数据引擎</p>
+              <p className="text-sm font-medium text-foreground">Data Engine</p>
               <p className="mt-1 max-w-md text-[12px]">
-                注册原始数据 → 快速 Review(颗粒度 / 连续性 / 波动性)→ 纵向填写清洗要求 →
-                AI 生成 SQL → 发布为数据资产,供 project 工作流直接调用。
+                Register raw data → Review (completeness / granularity / volatility / consistency) →
+                AI drafts the dbt transform → you refine it → publish as a data asset the workflow can consume.
               </p>
             </div>
-            <Button onClick={() => setCreating(true)}><Plus className="size-4" />注册数据资产</Button>
+            <Button onClick={() => setCreating(true)}><Plus className="size-4" />Register data asset</Button>
           </div>
         )}
       </main>

@@ -50,7 +50,7 @@ def _scope_artifact() -> ArtifactInstance:
 
 def test_router_registers_model_backed() -> None:
     assert set(MODEL_BINDINGS) == {
-        "a-scope", "a-factor-tree", "a-quality-scorecard", "a-client-qa"
+        "a-scope", "a-factor-tree", "a-quality-scorecard", "a-stat-tests"
     }
 
 

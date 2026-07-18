@@ -15,11 +15,12 @@ from pydantic import BaseModel
 
 from app.agents.artifact_edit import (
     ArtifactEditError,
-    apply_client_qa,
     apply_factor_tree,
+    apply_ols_config,
     apply_profile,
     apply_proposal,
     apply_quality_scorecard,
+    apply_stat_scorecard,
     draft_edit,
 )
 from app.agents.common import agent_system, artifact_text
@@ -27,15 +28,18 @@ from app.agents.registry import build_engine
 from app.domain import blueprint as bp
 from app.domain import industries as ind
 from app.domain.models import (
+    AnomalyReview,
     ArtifactEditProposal,
-    CleaningSpec,
-    ClientQA,
     FactorTree,
     GlobalModelConfig,
     IndustryRef,
     KnowledgeTemplate,
+    OlsConfig,
     ProjectProfile,
     QualityScorecard,
+    StatScorecard,
+    TargetColumn,
+    TransformPipeline,
 )
 from app.llm.volcano import get_llm
 from app.orchestrator.runner import run_until_blocked
@@ -369,11 +373,20 @@ async def update_quality_scorecard(project_id: str, body: QualityScorecard) -> d
     return body.model_dump(by_alias=True)
 
 
-# ── client Q&A tracker (S2 · editable data/indicator questions) ─
-@app.put("/api/projects/{project_id}/client-qa")
-async def update_client_qa(project_id: str, body: ClientQA) -> dict:
+# ── statistical score (S2 · 2.4 · per-indicator disposition) ─
+@app.put("/api/projects/{project_id}/stat-scorecard")
+async def update_stat_scorecard(project_id: str, body: StatScorecard) -> dict:
     st = _require_state(project_id)
-    apply_client_qa(st, body)
+    apply_stat_scorecard(st, body)
+    get_store().save(project_id)
+    return body.model_dump(by_alias=True)
+
+
+# ── OLS setup (S2 · 2.5 · confirmed Y / X / params — re-fits on save) ─
+@app.put("/api/projects/{project_id}/ols-config")
+async def update_ols_config(project_id: str, body: OlsConfig) -> dict:
+    st = _require_state(project_id)
+    apply_ols_config(st, body)
     get_store().save(project_id)
     return body.model_dump(by_alias=True)
 
@@ -389,10 +402,6 @@ class UpdateAsset(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     sourceFileIds: Optional[list[str]] = None
-
-
-class RunSql(BaseModel):
-    sql: str
 
 
 def _require_asset(project_id: str, asset_id: str):
@@ -465,54 +474,359 @@ async def review_data_asset(project_id: str, asset_id: str) -> dict:
     return asset.model_dump(by_alias=True)
 
 
-@app.put("/api/projects/{project_id}/data-assets/{asset_id}/cleaning-spec")
-async def update_cleaning_spec(project_id: str, asset_id: str, body: CleaningSpec) -> dict:
-    from app.dataeng import assets as asset_svc
-    st, asset = _require_asset(project_id, asset_id)
-    asset.cleaning_spec = body
-    if asset.status in ("raw", "reviewed"):
-        asset.status = "spec"
-    asset_svc.touch(asset)
-    get_store().save(project_id)
-    return asset.model_dump(by_alias=True)
+# ── dbt workspace (the transform path: typed pipeline → dbt) ──────────
+@app.get("/api/projects/{project_id}/data-assets/{asset_id}/dbt/status")
+async def dbt_status(project_id: str, asset_id: str) -> dict:
+    """dbt binary availability + this asset's workspace model files."""
+    from app.dataeng.dbt import binary, service
+    _, asset = _require_asset(project_id, asset_id)
+    ok, msg = binary.available()
+    return {"available": ok, "message": msg, **service.list_models(project_id, asset)}
 
 
-@app.post("/api/projects/{project_id}/data-assets/{asset_id}/sql/generate")
-async def generate_asset_sql(project_id: str, asset_id: str) -> dict:
-    from app.dataeng import assets as asset_svc
-    from app.dataeng.sql_gen import generate_sql
-    st, asset = _require_asset(project_id, asset_id)
-    asset.sql_draft = await generate_sql(project_id, asset)
-    if asset.sql_draft.status == "ok" and asset.status in ("raw", "reviewed", "spec"):
-        asset.status = "cleaned"
-    asset_svc.touch(asset)
-    get_store().save(project_id)
-    return asset.model_dump(by_alias=True)
-
-
-@app.post("/api/projects/{project_id}/data-assets/{asset_id}/sql/run")
-async def run_asset_sql(project_id: str, asset_id: str, body: RunSql) -> dict:
-    from app.dataeng import assets as asset_svc
-    from app.dataeng.sql_gen import run_preview
-    st, asset = _require_asset(project_id, asset_id)
-    asset.sql_draft = run_preview(project_id, asset, body.sql)
-    if asset.sql_draft.status == "ok" and asset.status in ("raw", "reviewed", "spec"):
-        asset.status = "cleaned"
-    asset_svc.touch(asset)
-    get_store().save(project_id)
-    return asset.model_dump(by_alias=True)
-
-
-@app.post("/api/projects/{project_id}/data-assets/{asset_id}/publish")
-async def publish_data_asset(project_id: str, asset_id: str) -> dict:
-    from app.dataeng import assets as asset_svc
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/dbt/build")
+async def dbt_build(project_id: str, asset_id: str) -> dict:
+    from app.dataeng.dbt import service
     st, asset = _require_asset(project_id, asset_id)
     try:
-        asset_svc.publish_asset(project_id, st, asset)
-    except asset_svc.PublishError as e:
+        service.build(st, project_id, asset)
+    except service.DbtServiceError as e:
         raise HTTPException(409, str(e)) from e
     get_store().save(project_id)
     return asset.model_dump(by_alias=True)
+
+
+class GenerateBody(BaseModel):
+    instruction: str = ""
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/dbt/generate")
+async def dbt_generate(project_id: str, asset_id: str, body: GenerateBody | None = None) -> dict:
+    """AI-draft or adjust the asset's transform pipeline (structured steps)."""
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    try:
+        await service.ai_pipeline(st, project_id, asset, (body.instruction if body else ""))
+    except service.DbtServiceError as e:
+        raise HTTPException(409, str(e)) from e
+    get_store().save(project_id)
+    return asset.model_dump(by_alias=True)
+
+
+@app.get("/api/projects/{project_id}/data-assets/{asset_id}/pipeline")
+async def get_pipeline(project_id: str, asset_id: str) -> dict:
+    _, asset = _require_asset(project_id, asset_id)
+    pipe = asset.pipeline or TransformPipeline()
+    return pipe.model_dump(by_alias=True)
+
+
+@app.put("/api/projects/{project_id}/data-assets/{asset_id}/pipeline")
+async def put_pipeline(project_id: str, asset_id: str, body: TransformPipeline) -> dict:
+    st, asset = _require_asset(project_id, asset_id)
+    asset.pipeline = body
+    get_store().save(project_id)
+    return body.model_dump(by_alias=True)
+
+
+class SuggestEnumBody(BaseModel):
+    field: str
+    targetColumn: str
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/suggest-enum")
+async def pipeline_suggest_enum(project_id: str, asset_id: str, body: SuggestEnumBody) -> list[dict]:
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    entries = await service.suggest_enum_map(st, project_id, asset, body.field, body.targetColumn)
+    return [e.model_dump(by_alias=True) for e in entries]
+
+
+class WriteModel(BaseModel):
+    layer: str
+    name: str
+    sql: str
+
+
+@app.put("/api/projects/{project_id}/data-assets/{asset_id}/dbt/model")
+async def dbt_write_model(project_id: str, asset_id: str, body: WriteModel) -> dict:
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    service.write_model(project_id, asset, body.layer, body.name, body.sql)
+    get_store().save(project_id)
+    return service.list_models(project_id, asset)
+
+
+class WriteSeed(BaseModel):
+    name: str
+    csv: str
+
+
+@app.put("/api/projects/{project_id}/data-assets/{asset_id}/dbt/seed")
+async def dbt_write_seed(project_id: str, asset_id: str, body: WriteSeed) -> dict:
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    service.write_seed(project_id, asset, body.name, body.csv)
+    get_store().save(project_id)
+    return service.list_models(project_id, asset)
+
+
+@app.get("/api/projects/{project_id}/data-assets/{asset_id}/dbt/preview")
+async def dbt_preview(project_id: str, asset_id: str, model: str, limit: int = 50) -> dict:
+    from app.dataeng.dbt import service
+    _, asset = _require_asset(project_id, asset_id)
+    try:
+        return service.preview(project_id, asset, model, limit=limit)
+    except service.DbtServiceError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.get("/api/projects/{project_id}/data-assets/{asset_id}/raw-preview")
+async def raw_preview(project_id: str, asset_id: str, table: str, limit: int = 50) -> dict:
+    """Preview a raw source table (before any transform) straight from the files."""
+    from app.dataeng.sources import asset_tables
+    from app.dataeng.dbt.service import _df_payload
+    _, asset = _require_asset(project_id, asset_id)
+    tables = asset_tables(project_id, asset)
+    if table not in tables:
+        raise HTTPException(404, f"raw table {table!r} not found")
+    return _df_payload(tables[table], cap=limit)
+
+
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/dbt/publish")
+async def dbt_publish(project_id: str, asset_id: str) -> dict:
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    try:
+        service.publish(project_id, st, asset)
+    except service.DbtServiceError as e:
+        raise HTTPException(409, str(e)) from e
+    get_store().save(project_id)
+    return asset.model_dump(by_alias=True)
+
+
+# ── target schema + indicator catalog ────────────────────
+@app.get("/api/projects/{project_id}/target-schema")
+async def get_target_schema(project_id: str) -> list[dict]:
+    from app.dataeng.dbt import target_schema
+    st = _require_state(project_id)
+    return [c.model_dump(by_alias=True) for c in target_schema.schema_for(st)]
+
+
+@app.put("/api/projects/{project_id}/target-schema")
+async def put_target_schema(project_id: str, body: list[TargetColumn]) -> list[dict]:
+    st = _require_state(project_id)
+    st.target_schema = body
+    get_store().save(project_id)
+    return [c.model_dump(by_alias=True) for c in body]
+
+
+@app.get("/api/projects/{project_id}/indicators")
+async def get_indicators(project_id: str) -> list[dict]:
+    st = _require_state(project_id)
+    return [i.model_dump(by_alias=True) for i in st.indicators]
+
+
+# ── Business Validation live series (task 2.3) ───────────
+class ValidationSeriesQuery(BaseModel):
+    l3: str
+    l4: str = ""
+    indicators: list[str] = []
+    grain: str = "month"
+    sources: list[str] = []
+    brand: list[str] = []
+    channelType: list[str] = []
+    provinceGroup: list[str] = []
+
+
+@app.post("/api/projects/{project_id}/validation/series")
+async def post_validation_series(project_id: str, body: ValidationSeriesQuery) -> dict:
+    """KPI area + per-L3 overlay series + yearly/YoY table, computed live from the
+    modeling long table so the Business Validation filters resolve on real rows."""
+    from app.dataeng import validation_query
+    st = _require_state(project_id)
+    return validation_query.validation_series(
+        st, l3=body.l3, l4=body.l4 or None, indicators=body.indicators or None,
+        grain=body.grain, sources=body.sources or None, brand=body.brand or None,
+        channel_type=body.channelType or None, province_group=body.provinceGroup or None,
+    )
+
+
+# ── anomaly review (S2 · 2.3a · per-anomaly handling) ────
+@app.put("/api/projects/{project_id}/anomaly-review")
+async def update_anomaly_review(project_id: str, body: AnomalyReview) -> dict:
+    """Persist the human's ruling on each anomaly hypothesis.
+
+    The accepted handling is read back at fit time (`ledger.anomaly_effects`), so
+    saving here changes what the model is actually fitted on — an event dummy, a
+    winsorized window, or nothing but a caveat.
+    """
+    st = _require_state(project_id)
+    st.anomaly_review = body
+    get_store().save(project_id)
+    return body.model_dump(by_alias=True)
+
+
+# ── Master Data live slice (task 2.6) ────────────────────
+class MasterTableQuery(BaseModel):
+    brand: list[str] = []
+    provinceGroup: list[str] = []
+    channelType: list[str] = []
+    channel: list[str] = []
+    indicators: list[str] = []
+    grain: str = "month"
+
+
+@app.post("/api/projects/{project_id}/master-data/table")
+async def post_master_table(project_id: str, body: MasterTableQuery) -> dict:
+    """The adopted feature wide table for one product × channel × region slice.
+
+    Computed live: the artifact carries the funnel and the dimensions, not every
+    slice of the table (which would be enormous, and stale the moment a verdict
+    changes).
+    """
+    from app.agents import master_data
+    st = _require_state(project_id)
+    return master_data.master_table(
+        st, brand=body.brand or None, province_group=body.provinceGroup or None,
+        channel_type=body.channelType or None, channel=body.channel or None,
+        indicators=body.indicators or None, grain=body.grain,
+    )
+
+
+# ── Indicator lifecycle ledger (S2 · every layer's verdict) ─
+@app.get("/api/projects/{project_id}/indicator-ledger")
+async def get_indicator_ledger(project_id: str) -> dict:
+    """Where every indicator stands, and which layer rejected the ones that died.
+
+    Derived from the layers' own records — the ledger stores nothing itself, so
+    it can never disagree with the scorecards, the sign-offs or the OLS setup.
+    """
+    from app.agents import ledger
+    st = _require_state(project_id)
+    rows = ledger.indicator_ledger(st)
+    return {
+        "layers": [{"layer": lid, "task": task, "label": label}
+                   for lid, task, label in ledger.LAYERS],
+        "rows": [{
+            "l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4, "indicator": r.indicator,
+            "adopted": r.adopted, "rejectedAt": r.rejected_at, "reason": r.reason,
+            "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
+                          "status": v.status, "note": v.note} for v in r.verdicts],
+        } for r in rows],
+        "funnel": ledger.funnel(st),
+        "adopted": sum(1 for r in rows if r.adopted),
+        "rejected": sum(1 for r in rows if not r.adopted),
+    }
+
+
+# ── FactorTree ↔ DataAssets mapping (2.1 Data Processing gate) ────
+def _factor_map_payload(st) -> dict:
+    from app.dataeng.mapping import resolve_factor_map
+    from app.dataeng import mapping_suggest
+    fmap = resolve_factor_map(st)
+    # Pending rows carry ranked AI suggestions so the human reviews a proposal
+    # instead of hunting the whole indicator catalog by hand.
+    sugg = mapping_suggest.suggest_all(st)
+    return {
+        "rows": [{
+            "rowId": r.row_id, "l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
+            "indicator": r.indicator, "status": r.status,
+            "assetId": r.asset_id, "assetName": r.asset_name, "metric": r.metric,
+            "coverageStart": r.coverage_start, "coverageEnd": r.coverage_end,
+            "ignoreNote": r.ignore_note,
+            "suggestions": [{
+                "indicatorId": s.indicator_id, "metric": s.metric,
+                "assetId": s.asset_id, "assetName": s.asset_name, "unit": s.unit,
+                "coverageStart": s.coverage_start, "coverageEnd": s.coverage_end,
+                "score": s.score, "reason": s.reason,
+            } for s in sugg.get(r.row_id, [])],
+        } for r in fmap.rows],
+        "total": fmap.total, "mapped": fmap.mapped, "ignored": fmap.ignored,
+        "pending": fmap.pending, "complete": fmap.complete,
+        "suggested": sum(1 for r in fmap.rows if sugg.get(r.row_id)),
+    }
+
+
+@app.get("/api/projects/{project_id}/factor-map")
+async def get_factor_map(project_id: str) -> dict:
+    """Per active factor-tree row: mapped to a published asset, ignored, or pending."""
+    return _factor_map_payload(_require_state(project_id))
+
+
+class FactorMapIgnoreBody(BaseModel):
+    rowId: str
+    ignored: bool
+    note: str = ""
+
+
+@app.put("/api/projects/{project_id}/factor-map/ignore")
+async def put_factor_map_ignore(project_id: str, body: FactorMapIgnoreBody) -> dict:
+    """Mark a factor row ignored (no data source) or restore it to pending. A mapped
+    row cannot be ignored — the published indicator is authoritative."""
+    st = _require_state(project_id)
+    if body.ignored:
+        st.factor_map_ignores[body.rowId] = body.note
+    else:
+        st.factor_map_ignores.pop(body.rowId, None)
+    # Re-render a-data-processing if it already exists so the matrix stays live.
+    if st.artifact("a-data-processing") is not None:
+        await _engine.handlers["2.1"](_engine, st, bp.TASK_MAP["2.1"])
+    get_store().save(project_id)
+    return _factor_map_payload(st)
+
+
+class FactorMapBindBody(BaseModel):
+    rowId: str
+    """Empty releases whatever is bound to the row (remap / undo)."""
+    indicatorId: str = ""
+
+
+@app.put("/api/projects/{project_id}/factor-map/bind")
+async def put_factor_map_bind(project_id: str, body: FactorMapBindBody) -> dict:
+    """Accept an AI mapping suggestion (or release a row to remap it).
+
+    Binding sets the indicator's `treeRowId`, which the resolver already treats
+    as the strongest coverage signal — so this adds a way to *accept* a match,
+    not a second notion of what "mapped" means.
+    """
+    from app.dataeng import mapping_suggest
+    st = _require_state(project_id)
+    if body.indicatorId:
+        if not mapping_suggest.bind(st, body.rowId, body.indicatorId):
+            raise HTTPException(404, f"indicator {body.indicatorId} not found")
+    else:
+        mapping_suggest.unbind(st, body.rowId)
+    if st.artifact("a-data-processing") is not None:
+        await _engine.handlers["2.1"](_engine, st, bp.TASK_MAP["2.1"])
+    get_store().save(project_id)
+    return _factor_map_payload(st)
+
+
+@app.get("/api/projects/{project_id}/target-schema/collect")
+async def collect_schema_values(project_id: str, column: str, limit: int = 50) -> dict:
+    """Distinct values of a target column observed in this project's data — from
+    published asset parquets first, else raw uploads sharing the column name."""
+    from app.dataeng import assets as asset_svc
+    from app.dataeng.sources import asset_tables
+    st = _require_state(project_id)
+    values: list[str] = []
+
+    def take(series) -> None:
+        for v in series.dropna().astype(str).unique().tolist():
+            if v and v not in values:
+                values.append(v)
+
+    for df in asset_svc.published_frames(project_id, st):
+        if column in df.columns:
+            take(df[column])
+    if not values:
+        for asset in st.data_assets:
+            for _, df in asset_tables(project_id, asset).items():
+                if column in df.columns:
+                    take(df[column])
+    return {"column": column, "values": values[:limit]}
 
 
 # ── human actions ────────────────────────────────────────

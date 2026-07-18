@@ -4,13 +4,16 @@ import type {
   ArtifactEditProposal,
   ArtifactInstance,
   AssistantTurn,
-  CleaningSpec,
-  ClientQA,
   DataAsset,
+  TransformPipeline,
+  DbtPreview,
+  DbtWorkspaceInfo,
   DataRequestManifest,
   FactorTree,
   FileCategory,
   GlobalModelConfig,
+  AnomalyReview,
+  OlsConfig,
   ProjectFile,
   ProjectListItem,
   ProjectMeta,
@@ -18,6 +21,7 @@ import type {
   QualityScorecard,
   SimEvent,
   StageId,
+  StatScorecard,
   TaskFinding,
   TaskRuntime,
 } from '../lib/types'
@@ -119,7 +123,9 @@ interface BackendState {
   profile?: ProjectProfile | null
   factor_tree?: FactorTree | null
   quality_scorecard?: QualityScorecard | null
-  client_qa?: ClientQA | null
+  stat_scorecard?: StatScorecard | null
+  ols_config?: OlsConfig | null
+  anomaly_review?: AnomalyReview | null
   tick?: number
   tasks?: Record<string, Partial<TaskRuntime> & Record<string, unknown>>
   decisions?: Record<string, BackendDecision>
@@ -191,8 +197,11 @@ interface SimStore {
   factorTree: FactorTree | null
   /** S2 data quality scorecard with per-metric human disposition. */
   qualityScorecard: QualityScorecard | null
-  /** S2 client Q&A tracker (data/indicator questions). */
-  clientQa: ClientQA | null
+  /** S2 (2.4) statistical score with per-indicator human disposition. */
+  statScorecard: StatScorecard | null
+  olsConfig: OlsConfig | null
+  /** S2 (2.3a) anomaly hypotheses with the human's per-anomaly ruling. */
+  anomalyReview: AnomalyReview | null
 
   /** Data Engine: project-scoped data assets (raw → review → clean → publish). */
   dataAssets: DataAsset[]
@@ -250,8 +259,11 @@ interface SimStore {
   updateFactorTree: (tree: FactorTree) => Promise<void>
   /** Persist edits to the data quality scorecard (per-metric disposition). */
   updateQualityScorecard: (card: QualityScorecard) => Promise<void>
-  /** Persist edits to the client Q&A tracker. */
-  updateClientQA: (qa: ClientQA) => Promise<void>
+  /** Persist edits to the statistical score (per-indicator disposition). */
+  updateStatScorecard: (card: StatScorecard) => Promise<void>
+  updateOlsConfig: (cfg: OlsConfig) => Promise<void>
+  /** Persist the 2.3a anomaly rulings; accepted handlings reach the fit. */
+  updateAnomalyReview: (review: AnomalyReview) => Promise<void>
 
   /** Data Engine actions. */
   loadDataAssets: () => Promise<void>
@@ -259,10 +271,13 @@ interface SimStore {
   updateDataAsset: (id: string, patch: { name?: string; description?: string; sourceFileIds?: string[] }) => Promise<void>
   deleteDataAsset: (id: string) => Promise<void>
   reviewDataAsset: (id: string) => Promise<void>
-  updateCleaningSpec: (id: string, spec: CleaningSpec) => Promise<void>
-  generateAssetSql: (id: string) => Promise<void>
-  runAssetSql: (id: string, sql: string) => Promise<void>
-  publishDataAsset: (id: string) => Promise<void>
+  dbtBuild: (id: string) => Promise<void>
+  dbtGenerate: (id: string, instruction?: string) => Promise<void>
+  dbtPublish: (id: string) => Promise<void>
+  dbtStatus: (id: string) => Promise<DbtWorkspaceInfo | null>
+  dbtPreview: (id: string, model: string) => Promise<DbtPreview | null>
+  /** Persist a transform pipeline and keep the store asset's pipeline in sync. */
+  putPipeline: (id: string, pipe: TransformPipeline) => Promise<TransformPipeline | null>
   /** Upload a raw source file (category raw_data) and attach it to an asset. */
   uploadRawForAsset: (assetId: string, file: File) => Promise<void>
   selectDataAsset: (id: string | null) => void
@@ -328,7 +343,9 @@ function mapState(s: BackendState, currentChats: Record<string, AssistantTurn[]>
   if (s.profile !== undefined) patch.profile = s.profile ?? null
   if (s.factor_tree !== undefined) patch.factorTree = s.factor_tree ?? null
   if (s.quality_scorecard !== undefined) patch.qualityScorecard = s.quality_scorecard ?? null
-  if (s.client_qa !== undefined) patch.clientQa = s.client_qa ?? null
+  if (s.stat_scorecard !== undefined) patch.statScorecard = s.stat_scorecard ?? null
+  if (s.ols_config !== undefined) patch.olsConfig = s.ols_config ?? null
+  if (s.anomaly_review !== undefined) patch.anomalyReview = s.anomaly_review ?? null
   if (s.tasks) {
     patch.tasks = Object.fromEntries(
       Object.entries(s.tasks).map(([id, raw]) => [id, toTaskRuntime(raw)]),
@@ -379,7 +396,9 @@ function blankRuntime(): Partial<SimStore> {
     modelConfig: null,
     factorTree: null,
     qualityScorecard: null,
-    clientQa: null,
+    statScorecard: null,
+    olsConfig: null,
+    anomalyReview: null,
     dataAssets: [],
     dataAssetsLoading: false,
     selectedDataAssetId: null,
@@ -456,7 +475,9 @@ export const useSimStore = create<SimStore>((set, get) => {
     modelConfig: null,
     factorTree: null,
     qualityScorecard: null,
-    clientQa: null,
+    statScorecard: null,
+    olsConfig: null,
+    anomalyReview: null,
     dataAssets: [],
     dataAssetsLoading: false,
     selectedDataAssetId: null,
@@ -849,12 +870,40 @@ export const useSimStore = create<SimStore>((set, get) => {
       }
     },
 
-    updateClientQA: async (qa) => {
+    updateStatScorecard: async (card) => {
       const pid = get().activeProjectId
       if (!pid) return
-      set({ clientQa: qa })
+      // Optimistic; refresh re-syncs the re-rendered a-stat-tests artifact.
+      set({ statScorecard: card })
       try {
-        await api.updateClientQA(pid, qa)
+        await api.updateStatScorecard(pid, card)
+        await get().refresh()
+      } catch (e) {
+        set({ error: errorMessage(e) })
+      }
+    },
+
+    updateAnomalyReview: async (review) => {
+      const pid = get().activeProjectId
+      if (!pid) return
+      // Optimistic; the accepted handlings are read back at fit time, so this
+      // is what decides whether an event dummy or a cap reaches the model.
+      set({ anomalyReview: review })
+      try {
+        await api.updateAnomalyReview(pid, review)
+        await get().refresh()
+      } catch (e) {
+        set({ error: errorMessage(e) })
+      }
+    },
+
+    updateOlsConfig: async (cfg) => {
+      const pid = get().activeProjectId
+      if (!pid) return
+      // Optimistic; the PUT re-fits the OLS and refresh re-syncs a-ols-test.
+      set({ olsConfig: cfg })
+      try {
+        await api.updateOlsConfig(pid, cfg)
         await get().refresh()
       } catch (e) {
         set({ error: errorMessage(e) })
@@ -916,27 +965,55 @@ export const useSimStore = create<SimStore>((set, get) => {
       await runAssetOp(id, () => api.reviewDataAsset(get().activeProjectId!, id))
     },
 
-    updateCleaningSpec: async (id, spec) => {
+    dbtBuild: async (id) => {
+      await runAssetOp(id, () => api.dbtBuild(get().activeProjectId!, id))
+    },
+
+    dbtGenerate: async (id, instruction = '') => {
+      await runAssetOp(id, () => api.dbtGenerate(get().activeProjectId!, id, instruction))
+    },
+
+    dbtPublish: async (id) => {
+      await runAssetOp(id, () => api.dbtPublish(get().activeProjectId!, id))
+    },
+
+    dbtStatus: async (id) => {
       const pid = get().activeProjectId
-      if (!pid) return
+      if (!pid) return null
       try {
-        const updated = await api.updateCleaningSpec(pid, id, spec)
-        set((s) => ({ dataAssets: s.dataAssets.map((a) => (a.id === id ? updated : a)) }))
+        return await api.dbtStatus(pid, id)
       } catch (e) {
         set({ error: errorMessage(e) })
+        return null
       }
     },
 
-    generateAssetSql: async (id) => {
-      await runAssetOp(id, () => api.generateAssetSql(get().activeProjectId!, id))
+    putPipeline: async (id, pipe) => {
+      const pid = get().activeProjectId
+      if (!pid) return null
+      try {
+        const saved = await api.putPipeline(pid, id, pipe)
+        // Keep the store asset's pipeline in sync so the editor's reconcile logic
+        // sees its own save echoed back (never a stale server copy after saving).
+        set((s) => ({
+          dataAssets: s.dataAssets.map((a) => (a.id === id ? { ...a, pipeline: saved } : a)),
+        }))
+        return saved
+      } catch (e) {
+        set({ error: errorMessage(e) })
+        return null
+      }
     },
 
-    runAssetSql: async (id, sql) => {
-      await runAssetOp(id, () => api.runAssetSql(get().activeProjectId!, id, sql))
-    },
-
-    publishDataAsset: async (id) => {
-      await runAssetOp(id, () => api.publishDataAsset(get().activeProjectId!, id))
+    dbtPreview: async (id, model) => {
+      const pid = get().activeProjectId
+      if (!pid) return null
+      try {
+        return await api.dbtPreview(pid, id, model)
+      } catch (e) {
+        set({ error: errorMessage(e) })
+        return null
+      }
     },
 
     uploadRawForAsset: async (assetId, file) => {
@@ -983,6 +1060,11 @@ export const useSimStore = create<SimStore>((set, get) => {
     }
   }
 })
+
+// Dev-only handle for debugging / e2e (e.g. simulating a poll's dataAssets churn).
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  ;(window as unknown as { __sim?: typeof useSimStore }).__sim = useSimStore
+}
 
 /** Stage completion 0–100 */
 export function stageProgress(tasks: Record<string, TaskRuntime>, stageId: string): number {

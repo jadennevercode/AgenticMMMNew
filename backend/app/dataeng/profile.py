@@ -14,9 +14,10 @@ import numpy as np
 import pandas as pd
 
 from app.dataeng.sources import read_asset_frames
-from app.domain.models import FieldProfile, ReviewReport, RawTable
+from app.domain.models import FieldProfile, ReviewReport, RawTable, TableReview
 
 _SAMPLE = 5
+_ENUM_MAX = 50  # a text field with ≤ this many distinct values is an enum candidate
 _TIME_PARSE_MIN = 0.6  # ≥60% of cells must parse as dates to call a column a time axis
 
 # Granularity by median spacing (days) between consecutive distinct periods.
@@ -104,9 +105,15 @@ def _profile_field(table: str, name: str, series: pd.Series) -> FieldProfile:
     null_ratio = round(1 - (non_null / total), 4) if total else 1.0
     dtype = _infer_dtype(series)
     samples = [str(v) for v in series.dropna().unique()[:_SAMPLE]]
+    distinct = int(series.nunique(dropna=True))
+    # Low-cardinality text ⇒ enum candidate: keep the FULL value list so mappings
+    # can be reviewed against every raw spelling, not a 3-value sample.
+    enum_values: list[str] = []
+    if dtype == "text" and 0 < distinct <= _ENUM_MAX:
+        enum_values = sorted(str(v) for v in series.dropna().unique())
     fp = FieldProfile(
         name=name, table=table, dtype=dtype, nonNull=non_null, nullRatio=null_ratio,
-        distinct=int(series.nunique(dropna=True)), sampleValues=samples,
+        distinct=distinct, sampleValues=samples, enumValues=enum_values,
     )
     if dtype in ("number", "integer"):
         numeric = pd.to_numeric(series, errors="coerce").dropna()
@@ -147,46 +154,57 @@ def _pick_time_field(fields: list[FieldProfile]) -> FieldProfile | None:
     return sorted(times, key=lambda f: (f.continuity or 0, f.distinct), reverse=True)[0]
 
 
-def _build_charts(frames: list[tuple[RawTable, pd.DataFrame]],
-                  fields: list[FieldProfile], time_field: FieldProfile | None) -> list[dict]:
+def _build_charts(df: pd.DataFrame, fields: list[FieldProfile],
+                  time_field: FieldProfile | None) -> list[dict]:
+    """Charts for ONE table, built only from that table's frame + fields."""
     charts: list[dict] = []
     # ── volatility bar (CV per numeric field) ────────────
     numerics = [f for f in fields if f.cv is not None]
     if numerics:
         numerics = sorted(numerics, key=lambda f: f.cv or 0, reverse=True)[:12]
         charts.append({
-            "id": "volatility", "type": "bar", "title": "字段波动性 (CV)",
+            "id": "volatility", "type": "bar", "title": "Field volatility (CV)",
             "x": [f"{f.name}" for f in numerics],
             "series": [{"name": "CV", "data": [round(f.cv or 0, 3) for f in numerics],
                         "color": _CHART_COLORS[1]}],
-            "interpretation": "CV<0.05 近似常数(建议剔除);≥0.2 波动充分,利于建模。",
+            "interpretation": "CV<0.05 is near-constant (consider dropping); ≥0.2 varies enough to model.",
         })
     # ── continuity line (records per period on the time axis) ─
-    if time_field is not None:
-        df = _frame_for(frames, time_field.table)
-        if df is not None and time_field.name in df.columns:
-            dts = _to_datetime(df[time_field.name])
-            gran = time_field.time_granularity or "month"
-            grp = (dts.dropna().dt.to_period(_period_freq(gran))
-                   .value_counts().sort_index())
-            if not grp.empty:
-                charts.append({
-                    "id": "continuity", "type": "line", "title": "时间连续性 (每期记录数)",
-                    "x": [str(p) for p in grp.index.tolist()],
-                    "series": [{"name": "records", "data": [int(v) for v in grp.tolist()],
-                                "color": _CHART_COLORS[0]}],
-                    "unit": gran,
-                    "interpretation": f"{gran} 粒度,连续性 {(time_field.continuity or 0):.0%}"
-                                      + (f",有 {time_field.gap_count} 处缺口。" if time_field.gap_count else "。"),
-                })
+    if time_field is not None and time_field.name in df.columns:
+        dts = _to_datetime(df[time_field.name])
+        gran = time_field.time_granularity or "month"
+        grp = (dts.dropna().dt.to_period(_period_freq(gran))
+               .value_counts().sort_index())
+        if not grp.empty:
+            charts.append({
+                "id": "continuity", "type": "line", "title": "Time continuity (records per period)",
+                "x": [str(p) for p in grp.index.tolist()],
+                "series": [{"name": "records", "data": [int(v) for v in grp.tolist()],
+                            "color": _CHART_COLORS[0]}],
+                "unit": gran,
+                "interpretation": f"{gran} grain, {(time_field.continuity or 0):.0%} continuity"
+                                  + (f", {time_field.gap_count} gap(s)." if time_field.gap_count else "."),
+            })
     return charts
 
 
-def _frame_for(frames: list[tuple[RawTable, pd.DataFrame]], table: str) -> pd.DataFrame | None:
-    for meta, df in frames:
-        if meta.name == table:
-            return df
-    return None
+def _review_table(meta: RawTable, df: pd.DataFrame) -> TableReview:
+    """Profile a single table into a self-contained TableReview."""
+    fields = [_profile_field(meta.name, str(col), df[col]) for col in df.columns]
+    time_field = _pick_time_field(fields)
+    warnings: list[str] = []
+    if time_field is None:
+        warnings.append("No time axis detected — modeling needs monthly-or-finer granularity.")
+    elif (time_field.continuity or 1) < 0.9:
+        warnings.append(f"Time axis “{time_field.name}” has low continuity "
+                        f"({(time_field.continuity or 0):.0%}) — there are gaps.")
+    return TableReview(
+        name=meta.name, rowCount=int(len(df)), columnCount=len(fields), fields=fields,
+        charts=_build_charts(df, fields, time_field),
+        timeField=(time_field.name if time_field else None),
+        timeGranularity=(time_field.time_granularity if time_field else None),
+        warnings=warnings,
+    )
 
 
 def build_review_report(project_id: str, asset) -> ReviewReport:
@@ -195,28 +213,22 @@ def build_review_report(project_id: str, asset) -> ReviewReport:
 
 
 def report_from_frames(frames: list[tuple[RawTable, pd.DataFrame]]) -> ReviewReport:
-    """Assemble a ReviewReport from already-read (RawTable, DataFrame) pairs.
-    Split out from build_review_report so it is unit-testable without the file store."""
+    """Assemble a ReviewReport from already-read (RawTable, DataFrame) pairs. Each
+    table is reviewed independently (per-dataset qualities + charts); ``fields`` is the
+    flattened union kept for long-table grounding. Split out so it is unit-testable."""
     tables = [meta for meta, _ in frames]
-    fields: list[FieldProfile] = []
+    table_reviews = [_review_table(meta, df) for meta, df in frames]
+    fields = [f for tr in table_reviews for f in tr.fields]
     warnings: list[str] = []
-    total_rows = 0
-    for meta, df in frames:
-        total_rows += len(df)
-        for col in df.columns:
-            fields.append(_profile_field(meta.name, str(col), df[col]))
     if not frames:
-        warnings.append("无可解析的原始表(仅支持 .xlsx/.xlsm/.csv)。")
-    time_field = _pick_time_field(fields)
-    if time_field is None and frames:
-        warnings.append("未检测到时间轴 — 建模需要月度及以上的时间粒度。")
-    elif time_field is not None and (time_field.continuity or 1) < 0.9:
-        warnings.append(f"时间轴 “{time_field.name}” 连续性偏低({(time_field.continuity or 0):.0%}),存在缺口。")
-    charts = _build_charts(frames, fields, time_field)
+        warnings.append("No parseable raw tables (only .xlsx/.xlsm/.csv are supported).")
+    # Report-level time axis = the first table's, for the legacy badge only.
+    first = table_reviews[0] if table_reviews else None
     return ReviewReport(
-        rowCount=total_rows, columnCount=len(fields), tables=tables, fields=fields,
-        charts=charts,
-        timeField=(time_field.name if time_field else None),
-        timeGranularity=(time_field.time_granularity if time_field else None),
+        rowCount=sum(tr.row_count for tr in table_reviews),
+        columnCount=len(fields), tables=tables, fields=fields,
+        tableReviews=table_reviews, charts=[],
+        timeField=(first.time_field if first else None),
+        timeGranularity=(first.time_granularity if first else None),
         warnings=warnings, generatedAt=_now_iso(),
     )

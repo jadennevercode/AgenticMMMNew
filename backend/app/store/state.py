@@ -25,22 +25,26 @@ from app.config import get_settings
 from app.domain import blueprint as bp
 from app.domain.models import (
     AiOptionSet,
+    AnomalyReview,
     ArtifactInstance,
     AssignmentRuntime,
     AssistantTurn,
-    ClientQA,
     DataAsset,
     DecisionRuntime,
     FactorTree,
+    Indicator,
     IndustryRef,
     Insight,
     LedgerEntry,
     MasterDataMap,
+    OlsConfig,
     ProjectMeta,
+    TargetColumn,
     ProjectProfile,
     Proposal,
     QualityScorecard,
     SimEvent,
+    StatScorecard,
     TaskFinding,
     TaskRuntime,
 )
@@ -76,11 +80,32 @@ class ProjectState(BaseModel):
     # Picked at the 1.1a gate; read by derive_factor_tree (1.21).
     factor_tree_source: str = Field(default="template", alias="factorTreeSource")
     quality_scorecard: Optional[QualityScorecard] = None  # S2 · editable per-metric dispositions
-    client_qa: Optional[ClientQA] = None                  # S2 · editable data/indicator Q&A
+    stat_scorecard: Optional[StatScorecard] = None        # S2 · 2.4 editable per-indicator stat scores
+    # S2 · 2.3a: one card per detected anomaly — the AI's causal hypothesis and
+    # proposed handling, and the human's ruling. The accepted handling is what
+    # reaches the fit (event dummy / response capping / caveat), resolved at fit
+    # time by `ledger.model_selection`. Source of truth → survives heal_state.
+    anomaly_review: Optional[AnomalyReview] = None
+    # S2 · 2.5 OLS setup: AI-proposed Y/X/params, confirmed by the human through
+    # the 2.5y/2.5x/2.5p Process steps. Source of truth for the fit; editing it
+    # re-fits synchronously (apply_ols_config). Survives heal_state.
+    # No alias, unlike the models inside it: ProjectState's own fields serialize
+    # snake_case (it is a plain BaseModel), and an aliased field here emits a
+    # camelCase key the frontend's snake_case reader silently misses.
+    ols_config: Optional[OlsConfig] = None
+    # 2.1 Data Processing: factor rows the user explicitly ignores in the
+    # FactorTree↔DataAssets mapping (rowId → note). A row is resolved when it is
+    # either mapped by a published indicator or listed here; the 2.1 gate blocks
+    # while any active row is still unresolved. Not blueprint-derived → persists.
+    factor_map_ignores: dict[str, str] = Field(default_factory=dict, alias="factorMapIgnores")
     # Data Engine: project-scoped data assets + master-data maps (not blueprint-derived,
     # so they persist across heal_state like artifacts).
     data_assets: list[DataAsset] = Field(default_factory=list, alias="dataAssets")
     master_data: list[MasterDataMap] = Field(default_factory=list, alias="masterData")
+    # Data Engine: the target long-table schema (None → the default) and the
+    # indicators registered when assets publish.
+    target_schema: Optional[list[TargetColumn]] = Field(default=None, alias="targetSchema")
+    indicators: list[Indicator] = Field(default_factory=list, alias="indicators")
     tick: int = 0
     event_seq: int = 0
     tasks: dict[str, TaskRuntime] = {}

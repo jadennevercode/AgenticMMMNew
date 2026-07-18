@@ -1,4 +1,4 @@
-"""Workflow blueprint — the 27-task DAG and 21 artifact definitions.
+"""Workflow blueprint — the task DAG and artifact definitions.
 
 This is the PRODUCT DESIGN (the fixed MMM workflow), ported from
 frontend/src/lib/scenario.ts + artifacts-data.ts. It is configuration, not
@@ -41,6 +41,7 @@ class AssignmentDef(TypedDict, total=False):
     category: str          # Project-Folder category this upload feeds
     requiresUpload: bool   # block submit until real parsed files exist
     requiresManifest: bool # block submit until the data-request manifest validates
+    requiresMapping: bool  # block submit until every factor row is mapped or ignored
     choicePrompt: str      # optional source-choice gate prompt (e.g. factor-tree origin)
     choiceOptions: list[dict]      # [{id,label,detail,recommended}] the user picks from
     choiceUploadCategory: str      # category required only when the upload-option is chosen
@@ -68,6 +69,10 @@ class TaskDef(TypedDict, total=False):
     decision: DecisionDef
     assignment: AssignmentDef
     ai_options: AiOptionSetDef
+    # Optional structured input panel rendered inside this Process step (mirrors
+    # how `decision`/`assignment` are declared). The frontend maps the id to a
+    # component — e.g. "ols-y" | "ols-x" | "ols-params" for the 2.5 setup steps.
+    panel: str
 
 
 class ArtifactDef(TypedDict, total=False):
@@ -100,23 +105,16 @@ ARTIFACTS: list[ArtifactDef] = [
     {"id": "a-interview", "name": "Interview", "task_ref": "1.3", "type": "document", "stage": "s1", "lineage": ["a-factor-tree", "a-scope", "a-source-materials", "a-knowledge-package"], "format": "sheet", "exportable": True},
     {"id": "a-data-request", "name": "Data Request", "task_ref": "1.5", "type": "document", "stage": "s1", "lineage": ["a-factor-tree"], "format": "sheet", "exportable": True},
     {"id": "a-bu-summary", "name": "Business Understanding Summary", "task_ref": "1.7", "type": "report", "stage": "s1", "lineage": ["a-scope", "a-factor-tree", "a-interview", "a-data-request"], "format": "doc", "exportable": True},
-    {"id": "a-data-files", "name": "Collected Client Data (provided)", "task_ref": "2.0a", "type": "dataset", "stage": "s2", "lineage": ["a-data-request"], "format": "sheet", "internal": True},
-    # 2.1 Data Validation — Input standard (2.11) → Output score (2.12)
-    {"id": "a-validation-standard", "name": "Data Validation Standard", "task_ref": "2.11", "type": "document", "stage": "s2", "lineage": ["a-data-files"], "format": "sheet", "internal": True},
-    {"id": "a-quality-scorecard", "name": "Data Quality Score", "task_ref": "2.12", "type": "scorecard", "stage": "s2", "lineage": ["a-validation-standard", "a-data-files"], "format": "sheet", "exportable": True},
-    # 2.2 Data Process — schema (2.21) → processing (2.22) → dictionary (2.23) → dataset (2.24)
-    {"id": "a-schema", "name": "Wide-table Schema", "task_ref": "2.21", "type": "master-data", "stage": "s2", "lineage": ["a-factor-tree", "a-quality-scorecard"], "format": "sheet", "internal": True},
-    {"id": "a-data-dictionary", "name": "Data Processing (TaskLog)", "task_ref": "2.22", "type": "document", "stage": "s2", "lineage": ["a-schema", "a-quality-scorecard"], "format": "sheet"},
-    {"id": "a-data-warehouse", "name": "Data Dictionary", "task_ref": "2.23", "type": "master-data", "stage": "s2", "lineage": ["a-data-dictionary"], "format": "sheet", "internal": True},
-    {"id": "a-dataset", "name": "Master Dataset", "task_ref": "2.24", "type": "dataset", "stage": "s2", "lineage": ["a-data-warehouse", "a-schema"], "format": "sheet"},
-    # 2.3 Data Cross-Validation — biz rules (2.31) → display+signoff (2.32) → tech (2.33) → selection (2.34)
-    {"id": "a-drill-framework", "name": "Business Validation Rules & Drill-down Framework", "task_ref": "2.31", "type": "document", "stage": "s3", "lineage": ["a-dataset"], "format": "sheet", "internal": True},
-    {"id": "a-trend-review", "name": "Data Review Deck", "task_ref": "2.32", "type": "report", "stage": "s3", "lineage": ["a-dataset", "a-drill-framework"], "format": "review"},
-    {"id": "a-client-qa", "name": "Client Q&A Tracker", "task_ref": "2.32", "type": "workflow", "stage": "s3", "lineage": ["a-factor-tree", "a-drill-framework"], "format": "sheet"},
-    {"id": "a-stat-tests", "name": "Statistical Screening Results", "task_ref": "2.33", "type": "scorecard", "stage": "s3", "lineage": ["a-dataset", "a-trend-review"], "format": "sheet"},
-    {"id": "a-model-input", "name": "Model Input", "task_ref": "2.34", "type": "dataset", "stage": "s3", "lineage": ["a-dataset", "a-stat-tests"], "format": "sheet"},
-    {"id": "a-prior-register", "name": "Prior Setting Rules", "task_ref": "3.1", "type": "document", "stage": "s4", "lineage": ["a-knowledge-package", "a-trend-review", "a-model-input"], "format": "sheet"},
-    {"id": "a-model-candidates", "name": "Model Candidates", "task_ref": "3.2", "type": "model", "stage": "s4", "lineage": ["a-model-input", "a-prior-register"], "format": "sheet"},
+    # ── S2 · Data Intake & Validation — six artifacts, each a filter layer:
+    #    Processing → Quality → Business → Statistical → OLS test → Master data
+    {"id": "a-data-processing", "name": "Data Processing", "task_ref": "2.1", "type": "dataset", "stage": "s2", "lineage": ["a-data-request", "a-factor-tree"], "format": "sheet", "exportable": True},
+    {"id": "a-quality-scorecard", "name": "Data Quality Score", "task_ref": "2.2", "type": "scorecard", "stage": "s2", "lineage": ["a-data-processing"], "format": "sheet", "exportable": True},
+    {"id": "a-business-validation", "name": "Business Validation", "task_ref": "2.3", "type": "report", "stage": "s2", "lineage": ["a-data-processing", "a-quality-scorecard"], "format": "validation"},
+    {"id": "a-stat-tests", "name": "Statistical Score", "task_ref": "2.4", "type": "scorecard", "stage": "s2", "lineage": ["a-data-processing", "a-business-validation"], "format": "sheet"},
+    {"id": "a-ols-test", "name": "OLS Regression Test", "task_ref": "2.5", "type": "report", "stage": "s2", "lineage": ["a-stat-tests", "a-factor-tree", "a-knowledge-package"], "format": "olsTree"},
+    {"id": "a-master-data", "name": "Master Data", "task_ref": "2.6", "type": "dataset", "stage": "s2", "lineage": ["a-data-processing", "a-quality-scorecard", "a-business-validation", "a-stat-tests", "a-ols-test"], "format": "masterData", "exportable": True},
+    {"id": "a-prior-register", "name": "Prior Setting Rules", "task_ref": "3.1", "type": "document", "stage": "s4", "lineage": ["a-knowledge-package", "a-business-validation", "a-master-data"], "format": "sheet"},
+    {"id": "a-model-candidates", "name": "Model Candidates", "task_ref": "3.2", "type": "model", "stage": "s4", "lineage": ["a-master-data", "a-prior-register"], "format": "sheet"},
     {"id": "a-tech-review", "name": "Technical Review", "task_ref": "3.3", "type": "report", "stage": "s4", "lineage": ["a-model-candidates"], "format": "sheet"},
     {"id": "a-model-diagnostics", "name": "Model Diagnostics", "task_ref": "3.3", "type": "report", "stage": "s4", "lineage": ["a-model-candidates"], "format": "review"},
     {"id": "a-decomp-results", "name": "Model Interpretation (5D)", "task_ref": "4.1a", "type": "report", "stage": "s5", "lineage": ["a-tech-review"], "format": "sheet"},
@@ -126,10 +124,9 @@ ARTIFACTS: list[ArtifactDef] = [
 
 STAGES = [
     {"id": "s1", "index": 1, "name": "Business Understanding", "goal": "Frame the project and lock factors, interviews and the data request.", "milestone": "Data request confirmed"},
-    {"id": "s2", "index": 2, "name": "Data Intake & Quality", "goal": "Collect, score and integrate the master dataset.", "milestone": "Master dataset integrated"},
-    {"id": "s3", "index": 3, "name": "Validation & Hypotheses", "goal": "Sense-check, screen and pre-fit the data.", "milestone": "Model input confirmed"},
-    {"id": "s4", "index": 4, "name": "Modeling", "goal": "Set assumptions, train and pick the model.", "milestone": "Final model picked"},
-    {"id": "s5", "index": 5, "name": "Reporting", "goal": "Decompose, narrate and deliver.", "milestone": "Report released"},
+    {"id": "s2", "index": 2, "name": "Data Intake & Validation", "goal": "Reference the prepared data assets, validate them layer by layer, and lock the master feature table.", "milestone": "Master data locked"},
+    {"id": "s4", "index": 3, "name": "Modeling", "goal": "Set assumptions, train and pick the model.", "milestone": "Final model picked"},
+    {"id": "s5", "index": 4, "name": "Reporting", "goal": "Decompose, narrate and deliver.", "milestone": "Report released"},
 ]
 
 AGENTS = [
@@ -140,7 +137,7 @@ AGENTS = [
     {"id": "report", "name": "Report Agent", "role": "Decomposition, narrative, delivery", "capabilities": ["decomposition", "roi", "narrative"]},
 ]
 
-# The 27-task DAG. Decision/assignment/ai_options ported from scenario.ts.
+# The task DAG. Decision/assignment/ai_options kept in sync with scenario.ts.
 TASKS: list[TaskDef] = [
     # ── S1 ──
     {"id": "1.0a", "name": "Provide SOW & brief", "agent": "business", "stage": "s1", "klass": "H",
@@ -269,127 +266,166 @@ TASKS: list[TaskDef] = [
      "how": "AI assembles the BU summary from the confirmed S1 deliverables.",
      "basis_note": "All confirmed S1 deliverables.", "work_note": "BU summary assembled.",
      "depends_on": ["1.5d"], "duration": 1, "produces": ["a-bu-summary"]},
-    # ── S2 · Data Intake & Quality (2.1 Validation + 2.2 Process) ──
-    {"id": "2.0a", "name": "Collect client data", "agent": "data", "stage": "s2", "klass": "H",
-     "summary": "Provide the filled data-request workbooks returned by the client teams — one workbook per L3 slot.",
-     "how": "You upload each L3 workbook to the Project Folder (Data); the gate clears once every required L3 slot validates against the factor tree.",
-     "basis_note": "客户回填的数据需求工作簿（按 L3 slot）。", "work_note": "Waiting for the data files. Per-L3 coverage is validated before intake closes.",
-     "depends_on": ["1.7"], "duration": 1, "produces": ["a-data-files"],
-     "assignment": {"id": "in-2.0a", "kind": "upload", "title": "Collect client data (per-L3 slot)",
-                    "prompt": "按数据需求清单逐个 L3 上传客户回填工作簿到 Project Folder (Data)。系统按因子树校验每个 L3 的 L4/指标覆盖度，全部覆盖后方可进入数据校验。",
-                    "items": ["Media_spend.xlsx", "Nielsen_offtake.xlsx", "+35 more"], "submit_label": "Submit data files",
-                    "category": "data", "requiresUpload": True, "requiresManifest": True}},
-    # 2.1 Data Validation — standard (loaded) → AI score → human review
-    {"id": "2.11", "name": "Data validation standard", "agent": "data", "stage": "s2", "klass": "M",
-     "summary": "Load the EXISTING general validation standard: the four-rule compliance principles and the 0 / 0.5 / 1 scoring rubric (not AI-authored).",
-     "how": "The standard is loaded verbatim from the reference rule library (the two 2.11 sheets); it grounds the AI scoring that follows.",
-     "basis_note": "数据通用校验标准 + 打分规则（reference 2.11 sheets）。", "work_note": "四大校验规则 + 0/0.5/1 打分细则已载入。",
-     "depends_on": ["2.0a"], "duration": 1, "produces": ["a-validation-standard"]},
-    {"id": "2.12", "name": "AI scores data quality", "agent": "data", "stage": "s2", "klass": "A",
-     "summary": "The AI scores every L1×L2×L3×L4×metric on the four dimensions (一致性/完整性/颗粒度/真实性, each 0 / 0.5 / 1) with a 情况 note, grounded in the rubric + computed evidence.",
-     "how": "AI applies the loaded rubric to the computed data evidence, assigning each dimension 0 / 0.5 / 1 and writing the 情况; the verdict (weakest dimension) is reviewed by a human next.",
-     "basis_note": "校验标准 + 回填数据证据。", "work_note": "AI 逐指标四维评分 + 情况；Total = 最弱维度。",
-     "depends_on": ["2.11"], "duration": 3, "produces": ["a-quality-scorecard"]},
-    {"id": "2.13", "name": "Review data quality verdicts", "agent": "data", "stage": "s2", "klass": "H",
-     "summary": "Human reviews the AI scores; Final = 完整性+颗粒度+真实性+一致性 → 1 验收 · 0 不可用 · 0.5 人决策 (re-collect / drop / accept-with-caveat).",
-     "how": "You review the scorecard: accept the 1s, drop the 0s (alert if a factor's only metrics all fail), and decide each 0.5.",
+    # ── S2 · Data Intake & Validation (2.1 Processing → 2.2 Quality → 2.3 Business →
+    #        2.4 Statistical → 2.5 OLS test → 2.6 Master data) ──
+    {"id": "2.1", "name": "Data Processing", "agent": "data", "stage": "s2", "klass": "H",
+     "summary": "Resolve the FactorTree↔DataAssets mapping: the AI proposes a published indicator for every unmatched factor, and you accept, remap or ignore each one.",
+     "how": "In the Data Engine, each unresolved factor carries a ranked AI proposal — scored on name, factor path, unit and coverage — for you to accept, swap for another candidate, or ignore when no data exists. The gate clears once nothing is left unresolved; the mapped assets are then unioned into the modeling long table and the intake preview shows what each source actually contributed.",
+     "basis_note": "Data Engine 已发布数据资产 + 确认版因子树映射。", "work_note": "Waiting for the FactorTree↔DataAssets mapping to be resolved (every indicator mapped or ignored).",
+     "depends_on": ["1.7"], "duration": 2, "produces": ["a-data-processing"],
+     "assignment": {"id": "in-2.1", "kind": "upload", "title": "Resolve the FactorTree↔DataAssets mapping",
+                    "prompt": "In the Data Engine, review the AI's proposed indicator for each unmatched factor — accept it, pick another candidate, or mark the factor ignored. Data Intake & Validation starts once no indicator is left unresolved. (Projects using slot uploads instead clear the gate by per-L3 coverage.)",
+                    "items": ["Mapped indicators", "Ignored indicators"], "submit_label": "Reference mapping",
+                    "category": "data", "requiresUpload": True, "requiresManifest": True, "requiresMapping": True}},
+    {"id": "2.2", "name": "Data Quality Score", "agent": "data", "stage": "s2", "klass": "A",
+     "summary": "Every L1×L2×L3×L4×metric is scored on the four 2.11 dimensions (consistency / completeness / granularity / accuracy, each 0 / 0.5 / 1). A deterministic subcheck scorer computes the 10 subchecks from the real data; the AI reviews the four dimension scores and writes a note per dimension.",
+     "how": "The subcheck scorer derives each dimension from the computed evidence; the AI confirms/adjusts the four dimension scores against the rubric. Total = product of the four dimensions (Excel 2.12); the verdict is reviewed by a human next.",
+     "basis_note": "校验标准 + 数据资产证据。", "work_note": "AI 逐指标四维评分；Total = 最弱维度。",
+     "depends_on": ["2.1"], "duration": 3, "produces": ["a-quality-scorecard"]},
+    {"id": "2.2d", "name": "Review data quality verdicts", "agent": "data", "stage": "s2", "klass": "H",
+     "panel": "quality-review",
+     "summary": "Human reviews the AI scores; 1 = accept · 0 = unusable · 0.5 = human call (re-collect / drop / accept-with-caveat).",
+     "how": "You review the scorecard right here: accept the 1s, drop the 0s (alert if a factor's only metrics all fail), and decide each 0.5. A drop is inherited by every later layer — the indicator is not re-scored at 2.4, not offered as a model variable at 2.5, and never reaches the master table.",
      "basis_note": "AI 质量评分 + 验收标准。", "work_note": "Awaiting human review of the data-quality verdicts.",
-     "depends_on": ["2.12"], "duration": 1, "produces": [],
-     "decision": {"id": "d-2.13", "kind": "choice", "title": "Review data-quality verdicts",
+     "depends_on": ["2.2"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.2", "kind": "choice", "title": "Review data-quality verdicts",
                   "question": "Some metrics scored 0.5 (borderline). Review the verdicts and decide how to handle them.",
-                  "evidence": [{"artifactId": "a-quality-scorecard", "note": "Per-metric scores & verdicts"}, {"artifactId": "a-validation-standard", "note": "Acceptance standard"}],
+                  "evidence": [{"artifactId": "a-quality-scorecard", "note": "Per-metric scores & verdicts"}, {"artifactId": "a-data-processing", "note": "Referenced data assets"}],
                   "options": [
-                      {"id": "accept", "label": "Accept the verdicts", "detail": "Keep the 1s, drop the 0s, 0.5 enter flagged", "consequence": "Schema & processing start on the accepted metrics", "recommended": True},
-                      {"id": "recollect", "label": "Re-collect 0.5 data", "detail": "Ask the client to re-upload the borderline metrics", "consequence": "Intake reopens for the flagged L3s; timeline slips"},
+                      {"id": "accept", "label": "Accept the verdicts", "detail": "Keep the 1s, drop the 0s, 0.5 enter flagged", "consequence": "Business validation starts on the accepted metrics", "recommended": True},
+                      {"id": "recollect", "label": "Re-collect 0.5 data", "detail": "Re-prepare the borderline assets in the Data Engine", "consequence": "Intake reopens for the flagged assets; timeline slips"},
                       {"id": "drop", "label": "Drop the 0.5 metrics", "detail": "Exclude borderline metrics from this model", "consequence": "Leaner model; those factors enter via aggregate metrics only"}],
-                  "rework_task_id": "2.0a", "rework_option_id": "recollect"}},
-    # 2.2 Data Process
-    {"id": "2.21", "name": "Define wide-table schema", "agent": "data", "stage": "s2", "klass": "C",
-     "summary": "Define the unified long-table schema from the factor tree: model + time granularity, factor L1–L4, deep-dive L5–L8, metric type / unit.",
-     "how": "AI derives the long-table column contract from the confirmed factor tree (因子树即数据 Schema); every data task outputs to this shape.",
-     "basis_note": "因子树 L1–L8 + 模型/时间颗粒度 + 指标类型。", "work_note": "统一长表 Schema 成形（L1–L8 → 列）。",
-     "depends_on": ["2.13"], "duration": 2, "produces": ["a-schema"]},
-    {"id": "2.22", "name": "Confirm processing logic per source", "agent": "data", "stage": "s2", "klass": "A",
-     "summary": "AI drafts mapping/transform logic for each data task (TaskLog); owners check before the pipeline runs.",
-     "how": "AI drafts the column-level mapping/transform logic for each source task; two owners cross-check.",
-     "basis_note": "宽表 Schema + 回填数据。", "work_note": "Processing logic drafted; two-person cross-check logged.",
-     "depends_on": ["2.21"], "duration": 3, "produces": ["a-data-dictionary"],
-     "decision": {"id": "d-2.22", "kind": "approval", "title": "Confirm processing logic",
-                  "question": "AI drafted the column-level mapping/transform logic per source and two owners cross-checked. Confirm before the integration pipeline runs?",
-                  "evidence": [{"artifactId": "a-data-dictionary", "note": "Per-source processing logic"}, {"artifactId": "a-schema", "note": "Target schema"}],
-                  "recommendation": "Two-person cross-check logged with no open issues — safe to confirm and run the pipeline.",
+                  "rework_task_id": "2.1", "rework_option_id": "recollect"}},
+    {"id": "2.3", "name": "Business Validation", "agent": "data", "stage": "s2", "klass": "C",
+     "summary": "Visualized business review of the accepted data — each factor charted against sell-out, with its own reading.",
+     "how": "AI charts every factor (L3) against the sell-out backdrop and writes its reading; you filter by source, sub-factor, indicator, time grain and model dimension to interrogate it.",
+     "basis_note": "质量验收后的数据 + 因子树 + 行业基准。", "work_note": "Business-validation deck built.",
+     "depends_on": ["2.2d"], "duration": 3, "produces": ["a-business-validation"]},
+    {"id": "2.3a", "name": "Explain the anomalies", "agent": "data", "stage": "s2", "klass": "A",
+     "panel": "anomaly-review",
+     "summary": "One card per detected anomaly: the AI's causal hypothesis and a proposed handling; you accept, edit or reject each.",
+     "how": "For every year-on-year move past ±40% the AI states the most likely business cause and proposes how to handle it. Your ruling reaches the model directly: a structural event becomes a dummy control over its window, capping winsorizes the response, raw leaves the data alone and carries a caveat into the report.",
+     "basis_note": "计算出的 YoY 异常 + 访谈证据。", "work_note": "Anomaly hypothesis cards drafted for review.",
+     "depends_on": ["2.3"], "duration": 2, "produces": []},
+    {"id": "2.3s", "name": "Record client sign-off", "agent": "data", "stage": "s2", "klass": "H",
+     "summary": "Per-factor client sign-off on the validated data — an unsigned factor cannot enter modeling.",
+     "how": "You sign off each factor with the client on the chart page. Marking a factor not-signed-off excludes it and every one of its indicators from the model, inherited all the way to the master table.",
+     "basis_note": "业务校验图表 + 异常处理裁决。", "work_note": "Awaiting client sign-off.",
+     "depends_on": ["2.3a"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.3", "kind": "signoff", "title": "Record client sign-off on data",
+                  "question": "Did the client sign off the business validation? Any factor you mark not-signed-off is excluded from modeling, along with all of its indicators.",
+                  "evidence": [{"artifactId": "a-business-validation"}],
                   "options": [
-                      {"id": "approve", "label": "Confirm logic", "detail": "Owners signed off", "consequence": "Data dictionary is registered, then the pipeline integrates", "recommended": True},
-                      {"id": "rework", "label": "Request changes", "detail": "A source's mapping/transform needs fixing", "consequence": "Processing logic is redrafted"}],
-                  "rework_task_id": "2.22", "rework_option_id": "rework"}},
-    {"id": "2.23", "name": "Register data dictionary", "agent": "data", "stage": "s2", "klass": "C",
-     "summary": "Register the ODS→DW metadata: per source table, column-level ETL (Hardcode / Mapping / Transform / Calculation), and the master-data mappings.",
-     "how": "AI registers the confirmed processing logic into the data dictionary that the integration pipeline reads.",
-     "basis_note": "确认版处理逻辑 + 主数据 mapping。", "work_note": "数据字典登记完成（列级 ETL 四类）。",
-     "depends_on": ["2.22"], "duration": 2, "produces": ["a-data-warehouse"]},
-    {"id": "2.24", "name": "Integrate the master dataset", "agent": "data", "stage": "s2", "klass": "M",
-     "summary": "Run the pipeline: one long table on the 2.21 schema, keyed by brand × region × channel × month × factor levels.",
-     "how": "The pipeline cleans master data and integrates everything into one long table on the unified schema.",
-     "basis_note": "数据字典 + 宽表 Schema。", "work_note": "Rows integrated on the unified schema; master-data cleaning applied.",
-     "depends_on": ["2.23"], "duration": 3, "produces": ["a-dataset"]},
-    # ── S3 · Validation & Hypotheses (2.3 Data Cross-Validation) ──
-    {"id": "2.31", "name": "Business validation rules & drill-down", "agent": "data", "stage": "s3", "klass": "C",
-     "summary": "Lay out the six-step business-validation rules and the L5–L8 drill-down map that anomaly localization runs on.",
-     "how": "AI assembles the business-validation rules (六步法) and the per-L4 drill-down configuration grounded in the factor tree.",
-     "basis_note": "宽表数据集 + 行业基准 + 因子下钻维度。", "work_note": "业务校验规则 + L5–L8 下钻框架成形。",
-     "depends_on": ["2.24"], "duration": 2, "produces": ["a-drill-framework"],
-     "ai_options": {"id": "ai-2.31", "prompt": "异常怎么处理？", "options": [
-         {"id": "event", "label": "Structural-event marker", "rationale": "与访谈一致，避免误归因到营销", "tradeoff": "需客户确认事件时段", "recommended": True},
-         {"id": "cap", "label": "Outlier capping", "rationale": "快速稳健", "tradeoff": "可能抹掉真实业务增长"},
-         {"id": "raw", "label": "Leave raw + caveat", "rationale": "保留真实数据", "tradeoff": "模型可能高估线上营销 ROI"}]}},
-    {"id": "2.32", "name": "Data review & client sign-off", "agent": "data", "stage": "s3", "klass": "C",
-     "summary": "Charting + trend interpretation deck (per-page Y/N sign-off) plus the data & metric Q&A tracker; every chart needs sign-off before modeling.",
-     "how": "AI runs the six-step review into a deck and a client Q&A tracker; you walk the client through it and record their sign-off.",
-     "basis_note": "业务校验规则 + 宽表数据集。", "work_note": "Review deck + Q&A built. Awaiting client sign-off.",
-     "depends_on": ["2.31"], "duration": 3, "produces": ["a-trend-review", "a-client-qa"],
-     "decision": {"id": "d-2.32", "kind": "signoff", "title": "Record client sign-off on data",
-                  "question": "Did the client sign off the data review? Unsigned charts cannot enter modeling.",
-                  "evidence": [{"artifactId": "a-trend-review"}, {"artifactId": "a-client-qa", "note": "Open questions"}],
-                  "options": [
-                      {"id": "approve", "label": "Signed off", "detail": "Client confirmed", "consequence": "Data is locked for modeling", "recommended": True},
+                      {"id": "approve", "label": "Signed off", "detail": "Client confirmed", "consequence": "Data is locked for statistical scoring", "recommended": True},
                       {"id": "rework", "label": "Not signed off", "detail": "Client raised blocking issues", "consequence": "Review is revisited"}],
-                  "rework_task_id": "2.32", "rework_option_id": "rework"}},
-    {"id": "2.33", "name": "Statistical screening", "agent": "data", "stage": "s3", "klass": "M",
-     "summary": "Variability, correlation and collinearity tests per metric; combined score decides model entry.",
-     "how": "CV, Pearson and VIF are computed per metric and combined into an entry score.",
-     "basis_note": "统计筛选规则。", "work_note": "CV / Pearson / VIF computed.",
-     "depends_on": ["2.32"], "duration": 2, "produces": ["a-stat-tests"],
-     "decision": {"id": "d-2.33", "kind": "choice", "title": "Borderline metrics into the model",
+                  "rework_task_id": "2.3", "rework_option_id": "rework"}},
+    # The old `ai-2.3` set asked "how should anomalies be handled?" once, stored
+    # the answer in `ai_choices` and never read it. 2.3a replaces it with a card
+    # per anomaly whose handling actually reaches the fit.
+    {"id": "2.4", "name": "Statistical Score", "agent": "data", "stage": "s2", "klass": "A",
+     "summary": "Variability, correlation and collinearity tests per indicator (CV / Pearson / VIF); the combined score decides model entry. Indicators already rejected at 2.2 or 2.3 are not scored — that call is settled.",
+     "how": "CV, Pearson and VIF are computed per indicator still in play and combined into an entry score; the AI then writes the case for or against each borderline indicator. Excluding the already-rejected ones is not bookkeeping — VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.",
+     "basis_note": "统计筛选规则 + 上游裁决（2.2 质量 / 2.3 签核）。", "work_note": "CV / Pearson / VIF computed on the indicators still in play.",
+     "depends_on": ["2.3s"], "duration": 2, "produces": ["a-stat-tests"]},
+    {"id": "2.4d", "name": "Review statistical verdicts", "agent": "data", "stage": "s2", "klass": "H",
+     "panel": "stat-review",
+     "summary": "Human reviews the statistical scores and decides which borderline indicators enter the model.",
+     "how": "You review the scorecard here: keep the Good band, decide each Acceptable, drop the Unconsiderable. What you drop is inherited — 2.5 will not offer it back as a model variable.",
+     "basis_note": "统计得分 + AI 逐行入模建议。", "work_note": "Awaiting human review of the statistical verdicts.",
+     "depends_on": ["2.4"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.4", "kind": "choice", "title": "Borderline metrics into the model",
                   "question": "Some metrics scored Acceptable (1.5–3) — neither clearly in nor out. How should they enter the model?",
                   "evidence": [{"artifactId": "a-stat-tests", "note": "Acceptable-band (1.5–3) rows"}, {"artifactId": "a-quality-scorecard", "note": "Upstream quality dispositions"}],
-                  "recommendation": "Keep the Acceptable-band metrics alongside the Good ones; the pre-fit (2.34) then checks each against its contribution/ROI range.",
+                  "recommendation": "Keep the Acceptable-band metrics alongside the Good ones; the OLS regression test (2.5) then checks each against its ROI / contribution range.",
                   "options": [
-                      {"id": "keep", "label": "Keep acceptable metrics", "detail": "Enter with the Good-band metrics", "consequence": "Pre-fit checks their contribution range", "recommended": True},
+                      {"id": "keep", "label": "Keep acceptable metrics", "detail": "Enter with the Good-band metrics", "consequence": "The OLS test checks their contribution range", "recommended": True},
                       {"id": "drop", "label": "Drop the weakest", "detail": "Keep only Good-band metrics", "consequence": "Leaner model; some factors lose a metric"},
-                      {"id": "review", "label": "Review case-by-case", "detail": "Open the scorecard to decide per metric", "consequence": "Manual selection before pre-fit"}]}},
-    {"id": "2.34", "name": "Quick pre-fit check", "agent": "data", "stage": "s3", "klass": "C",
-     "summary": "Fast linear fit to verify each factor lands in a believable contribution and ROI range before full modeling.",
-     "how": "A fast OLS fit checks each factor lands in a believable range before the full model is built.",
-     "basis_note": "行业弹性范围 + 业务校验假设。", "work_note": "Pre-fit run; ranges checked.",
-     "depends_on": ["2.33"], "duration": 2, "produces": ["a-model-input"],
-     "decision": {"id": "d-2.34", "kind": "choice", "title": "Confirm metric selection",
-                  "question": "Pre-fit checked each L4 factor's selected metric against its contribution / ROI range. Confirm the selection, or revisit the business hypotheses?",
-                  "evidence": [{"artifactId": "a-model-input", "note": "指标筛选 sheet"}, {"artifactId": "a-trend-review", "note": "Business hypotheses"}],
-                  "recommendation": "Selected metrics fall within their expected ranges — confirm and proceed to modeling.",
+                      {"id": "review", "label": "Review case-by-case", "detail": "Open the scorecard to decide per metric", "consequence": "Manual selection before the OLS test"}]}},
+    # ── 2.5 OLS Regression Test — a five-step Process on one deliverable:
+    #    propose → confirm Y → review X → confirm settings → fit & review.
+    #    The AI proposes everything it can; the human confirms each input in turn.
+    #    2.5y/2.5x/2.5p are human gates (no handler — the engine blocks on the
+    #    decision, like 2.2d); the panels edit `ols_config`, which re-fits on save.
+    {"id": "2.5", "name": "Propose model setup", "agent": "data", "stage": "s2", "klass": "A",
+     "summary": "Propose the OLS setup from real data: a response candidate per model object, model variables scored on their 2.4 statistics, and default transform / control settings.",
+     "how": "AI proposes the response (Y) for each model object, ranks the candidate model variables (X) on their 2.4 CV / Pearson / VIF, and pre-fills the transform and trend/seasonality settings — all for you to confirm in the next steps.",
+     "basis_note": "2.4 统计得分 + 数据可用性（覆盖月数、单位）。", "work_note": "Model setup proposed for review.",
+     "depends_on": ["2.4d"], "duration": 1, "produces": ["a-ols-test"]},
+    {"id": "2.5y", "name": "Confirm response variable", "agent": "data", "stage": "s2", "klass": "H",
+     "panel": "ols-y",
+     "summary": "Pick the response (Y) each model object is fitted against — the KPI volume metric is recommended.",
+     "how": "You pick the response for each model object. The KPI volume metric is recommended; choosing a money metric (or setting a unit price later) makes ROI a true incremental-revenue / spend ratio.",
+     "basis_note": "各模型对象的 KPI 候选（单位 + 覆盖月数）。", "work_note": "Awaiting the response-variable confirmation.",
+     "depends_on": ["2.5"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.5y", "kind": "approval", "title": "Confirm the response variable",
+                  "question": "The KPI volume metric is proposed as the response for each model object. Confirm it, or pick a different response above.",
+                  "evidence": [{"artifactId": "a-ols-test", "note": "Response candidates per model object"}],
+                  "recommendation": "The KPI volume response keeps coefficients in sales units — confirm to continue.",
                   "options": [
-                      {"id": "confirm", "label": "Confirm selection", "detail": "Selected metrics enter the model", "consequence": "Model Input is locked for training", "recommended": True},
-                      {"id": "rework", "label": "Revisit hypotheses", "detail": "Out-of-range factors need rethinking", "consequence": "Business sense-check is revisited"}],
-                  "rework_task_id": "2.31", "rework_option_id": "rework"},
-     "ai_options": {"id": "ai-2.34", "prompt": "预拟合里季节性怎么建模？", "options": [
-         {"id": "prophet", "label": "Prophet seasonality", "rationale": "自动捕捉年节与旺季", "tradeoff": "可解释性略低", "recommended": True},
-         {"id": "dummies", "label": "Monthly dummies", "rationale": "透明可控", "tradeoff": "自由度消耗多"},
-         {"id": "none", "label": "None", "rationale": "最简", "tradeoff": "旺季信号会漏入媒体项"}]}},
+                      {"id": "confirm", "label": "Confirm response", "detail": "Fit against the selected response", "consequence": "Model variables are reviewed next", "recommended": True}]}},
+    {"id": "2.5x", "name": "Review model variables", "agent": "data", "stage": "s2", "klass": "H",
+     "panel": "ols-x",
+     "summary": "Review the AI-proposed model variables (X) — each with its correlation, collinearity and 2.4 verdict — and tick the ones that enter the regression.",
+     "how": "You tick the variables that enter the regression. Each carries its Pearson r vs the KPI, its VIF, its CV and its 2.4 verdict, plus the remaining degrees of freedom — this is where you drive the screening.",
+     "basis_note": "2.4 统计得分 + 共线性/自由度约束。", "work_note": "Awaiting the model-variable selection.",
+     "depends_on": ["2.5y"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.5x", "kind": "approval", "title": "Confirm the model variables",
+                  "question": "These variables will enter the regression. Confirm the selection, or tick / untick above.",
+                  "evidence": [{"artifactId": "a-ols-test", "note": "Candidate variables with their 2.4 statistics"}, {"artifactId": "a-stat-tests", "note": "Statistical score"}],
+                  "recommendation": "The pre-ticked variables clear the correlation and collinearity gates — confirm to continue.",
+                  "options": [
+                      {"id": "confirm", "label": "Confirm variables", "detail": "These variables enter the regression", "consequence": "Model settings are confirmed next", "recommended": True}]}},
+    {"id": "2.5p", "name": "Confirm model settings", "agent": "data", "stage": "s2", "klass": "H",
+     "panel": "ols-params",
+     "summary": "Confirm the carryover / saturation transforms and the trend + seasonality controls that keep the paid coefficients honest.",
+     "how": "You set the adstock carryover, the saturation curve, and the trend / seasonality controls. The controls absorb the trend and seasonal swing so the paid variables do not — this is what keeps the baseline positive and the coefficients correctly signed.",
+     "basis_note": "变换与控制项设置（默认：adstock 0.5 · Hill · 线性趋势 · Fourier 季节性）。", "work_note": "Awaiting the model settings.",
+     "depends_on": ["2.5x"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.5p", "kind": "approval", "title": "Confirm the model settings",
+                  "question": "These transforms and controls will be used for the fit. Confirm them, or adjust above.",
+                  "evidence": [{"artifactId": "a-ols-test", "note": "Transform + control settings"}],
+                  "recommendation": "A linear trend plus Fourier seasonality is the cheapest control that keeps the paid coefficients honest — confirm to fit.",
+                  "options": [
+                      {"id": "confirm", "label": "Confirm settings", "detail": "Fit with these transforms and controls", "consequence": "The regression runs", "recommended": True}]}},
+    {"id": "2.5r", "name": "Run OLS & review fit", "agent": "data", "stage": "s2", "klass": "M",
+     "summary": "Fit the OLS on the confirmed setup and check each variable's ROI and contribution against the knowledge-base industry ranges — far-out variables are flagged for review.",
+     "how": "The regression runs on the setup you confirmed. Each variable's coefficient, t / p, ROI and contribution land on the factor tree; results outside the knowledge-base industry ranges are flagged for you to drop.",
+     "basis_note": "行业经验 ROI / 贡献区间（知识库维护）+ 业务校验假设。", "work_note": "OLS fitted; ranges checked.",
+     "depends_on": ["2.5p"], "duration": 2, "produces": ["a-ols-test"],
+     "decision": {"id": "d-2.5", "kind": "choice", "title": "Confirm indicator selection",
+                  "question": "The OLS test checked each factor's ROI / contribution against its knowledge-base range. Confirm the selection, drop the flagged indicators, or revisit the business hypotheses?",
+                  "evidence": [{"artifactId": "a-ols-test", "note": "Per-factor ROI / contribution vs knowledge ranges"}, {"artifactId": "a-business-validation", "note": "Business hypotheses"}],
+                  "recommendation": "Selected indicators fall within their expected ranges — confirm and assemble the master table.",
+                  "options": [
+                      {"id": "confirm", "label": "Confirm selection", "detail": "Selected indicators enter the master table", "consequence": "Master data is assembled for modeling", "recommended": True},
+                      {"id": "drop", "label": "Drop flagged indicators", "detail": "Remove the out-of-range indicators", "consequence": "Master data is assembled without them"},
+                      {"id": "rework", "label": "Revisit hypotheses", "detail": "Out-of-range factors need rethinking", "consequence": "Business validation is revisited"}],
+                  "rework_task_id": "2.3", "rework_option_id": "rework"}},
+    {"id": "2.6", "name": "Assemble master data", "agent": "data", "stage": "s2", "klass": "M",
+     "summary": "Assemble the indicators that survived every filter layer into the master feature wide table modeling consumes — sliceable by product × channel × region.",
+     "how": "The pipeline pivots the adopted indicators — the response you confirmed at 2.5y, the variables you ticked at 2.5x — into one feature wide table per model object. Every rejected indicator keeps the chain of verdicts that removed it, so the funnel is auditable end to end.",
+     "basis_note": "指标生命周期账本：映射/质量/业务签核/统计/选择/区间六层裁决。", "work_note": "Master feature table assembled from the adopted indicators.",
+     "depends_on": ["2.5r"], "duration": 2, "produces": ["a-master-data"]},
+    {"id": "2.6d", "name": "Lock master data", "agent": "data", "stage": "s2", "klass": "H",
+     "summary": "Review the assembled feature table and the filter funnel behind it, then lock it as the modeling input.",
+     "how": "You slice the table by product × channel × region, check the funnel accounts for every dropped indicator, and lock it. Locking is a human act — modeling should never start on a table nobody looked at.",
+     "basis_note": "Master feature 宽表 + 六层过滤漏斗。", "work_note": "Awaiting the master-data lock.",
+     "depends_on": ["2.6"], "duration": 1, "produces": [],
+     "decision": {"id": "d-2.6", "kind": "approval", "title": "Lock the master data",
+                  "question": "Review the assembled feature table and lock it as the modeling input?",
+                  "evidence": [{"artifactId": "a-master-data", "note": "Feature table + filter funnel"},
+                               {"artifactId": "a-ols-test", "note": "The fit it was assembled from"}],
+                  "recommendation": "The table carries only indicators that survived every filter layer — lock it to start modeling.",
+                  "options": [
+                      {"id": "lock", "label": "Lock master data", "detail": "Modeling trains on this table", "consequence": "Model assumptions are registered next", "recommended": True},
+                      {"id": "rework", "label": "Revisit the variables", "detail": "The selection needs another pass", "consequence": "The OLS setup is revisited"}],
+                  "rework_task_id": "2.5", "rework_option_id": "rework"}},
     # ── S4 ──
     {"id": "3.1", "name": "Register model assumptions", "agent": "model", "stage": "s4", "klass": "C",
      "summary": "Turn confirmed business judgments into bounded model constraints, each traced to its source.",
      "how": "AI turns each client-confirmed business judgment into a bounded model constraint, traced to source.",
      "basis_note": "知识包 + 业务校验假设。", "work_note": "Constraints registered.",
-     "depends_on": ["2.34"], "duration": 2, "produces": ["a-prior-register"],
+     "depends_on": ["2.6d"], "duration": 2, "produces": ["a-prior-register"],
      "decision": {"id": "d-3.1", "kind": "approval", "title": "Confirm model assumptions",
                   "question": "Each constraint traces to a client-confirmed judgment. Confirm the set before training?",
                   "evidence": [{"artifactId": "a-prior-register"}, {"artifactId": "a-knowledge-package", "note": "Source judgments"}],

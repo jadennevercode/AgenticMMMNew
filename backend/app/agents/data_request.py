@@ -122,6 +122,16 @@ def build_manifest(st: ProjectState) -> DataRequestManifest:
     gran = prof.time_granularity if prof else "Month"
     dims = [d.name for d in prof.model_scope.dimensions] if prof else []
 
+    # Data Engine: published indicators cover L3 slots without a slot upload — the
+    # transformed asset already carries the factor path, so per-L3 coverage counts
+    # indicators as first-class evidence alongside uploaded workbooks.
+    def _norm(s: str) -> str:
+        return "".join(str(s).lower().split())
+    indicator_l3 = {}
+    for ind in getattr(st, "indicators", []) or []:
+        if ind.l3:
+            indicator_l3.setdefault(_norm(ind.l3), []).append(ind)
+
     slots: list[DataRequestSlot] = []
     validated = 0
     for l3, l4s in by_l3.items():
@@ -138,6 +148,12 @@ def build_manifest(st: ProjectState) -> DataRequestManifest:
                 slot.status = "error"
             else:
                 _score_slot(slot, l4s, headers)
+        if slot.status != "validated" and _norm(l3) in indicator_l3:
+            covering = indicator_l3[_norm(l3)]
+            slot.status = "validated"
+            slot.covered_indicators = max(slot.covered_indicators, len(covering))
+            if not slot.filename:
+                slot.filename = f"(published indicators: {covering[0].asset_name})"
         if slot.status == "validated":
             validated += 1
         slots.append(slot)
@@ -149,7 +165,7 @@ def build_manifest(st: ProjectState) -> DataRequestManifest:
 def manifest_satisfied(st: ProjectState) -> bool:
     """True when the data-request manifest's per-L3 coverage is met.
 
-    Drives the 2.0a gate (``requiresManifest``): when a manifest exists (the factor
+    Drives the 2.1 gate (``requiresManifest``): when a manifest exists (the factor
     tree produced L3 slots), every slot must be ``validated``. When there is no
     manifest to validate against (no slots), the gate degrades to the upstream
     ``requiresUpload`` file-presence check — it does not hard-block."""

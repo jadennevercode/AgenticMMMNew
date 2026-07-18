@@ -79,3 +79,6 @@ def uses_project_data(st: object | None = None) -> bool:
 def invalidate_project(project_id: str) -> None:
     """Drop a project's cached long table (call after a data upload/delete)."""
     _PROJECT_CACHE.pop(project_id, None)
+    # The indicator universe is derived from that table, so it goes too.
+    from app.agents.ledger import invalidate_universe
+    invalidate_universe(project_id)

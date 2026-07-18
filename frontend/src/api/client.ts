@@ -5,11 +5,20 @@
  * VITE_API_BASE (defaults to the local backend).
  */
 import type {
+  AnomalyReview,
   ArtifactEditProposal,
   ArtifactInstance,
-  CleaningSpec,
-  ClientQA,
   DataAsset,
+  DbtPreview,
+  DbtWorkspaceInfo,
+  EnumMapEntry,
+  FactorMap,
+  Indicator,
+  IndicatorLedger,
+  MasterTable,
+  MasterTableQuery,
+  TargetColumn,
+  TransformPipeline,
   DataRequestManifest,
   FactorTree,
   FileCategory,
@@ -21,7 +30,11 @@ import type {
   ProjectMeta,
   ProjectProfile,
   QualityScorecard,
+  OlsConfig,
+  StatScorecard,
   TemplateKind,
+  ValidationSeriesRequest,
+  ValidationSeriesResponse,
 } from '../lib/types'
 
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8000'
@@ -155,8 +168,14 @@ export const api = {
     req<FactorTree>(`${p(projectId)}/factor-tree`, { method: 'PUT', body: JSON.stringify(tree) }),
   updateQualityScorecard: (projectId: string, card: QualityScorecard) =>
     req<QualityScorecard>(`${p(projectId)}/quality-scorecard`, { method: 'PUT', body: JSON.stringify(card) }),
-  updateClientQA: (projectId: string, qa: ClientQA) =>
-    req<ClientQA>(`${p(projectId)}/client-qa`, { method: 'PUT', body: JSON.stringify(qa) }),
+  updateStatScorecard: (projectId: string, card: StatScorecard) =>
+    req<StatScorecard>(`${p(projectId)}/stat-scorecard`, { method: 'PUT', body: JSON.stringify(card) }),
+  /** 2.5 OLS setup — saving re-fits the regression and re-renders a-ols-test. */
+  updateOlsConfig: (projectId: string, cfg: OlsConfig) =>
+    req<OlsConfig>(`${p(projectId)}/ols-config`, { method: 'PUT', body: JSON.stringify(cfg) }),
+  /** 2.3a anomaly rulings — accepted handlings reach the fit (event / cap / caveat). */
+  updateAnomalyReview: (projectId: string, review: AnomalyReview) =>
+    req<AnomalyReview>(`${p(projectId)}/anomaly-review`, { method: 'PUT', body: JSON.stringify(review) }),
 
   // ── data engine (raw → review → clean → publish data asset) ──
   listDataAssets: (projectId: string) =>
@@ -171,14 +190,63 @@ export const api = {
     req<{ ok: boolean }>(`${p(projectId)}/data-assets/${assetId}`, { method: 'DELETE' }),
   reviewDataAsset: (projectId: string, assetId: string) =>
     req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/review`, { method: 'POST' }),
-  updateCleaningSpec: (projectId: string, assetId: string, spec: CleaningSpec) =>
-    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/cleaning-spec`, { method: 'PUT', body: JSON.stringify(spec) }),
-  generateAssetSql: (projectId: string, assetId: string) =>
-    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/sql/generate`, { method: 'POST' }),
-  runAssetSql: (projectId: string, assetId: string, sql: string) =>
-    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/sql/run`, { method: 'POST', body: JSON.stringify({ sql }) }),
-  publishDataAsset: (projectId: string, assetId: string) =>
-    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/publish`, { method: 'POST' }),
+
+  // ── dbt workspace (transform path: typed pipeline → dbt) ──
+  dbtStatus: (projectId: string, assetId: string) =>
+    req<DbtWorkspaceInfo>(`${p(projectId)}/data-assets/${assetId}/dbt/status`),
+  dbtBuild: (projectId: string, assetId: string) =>
+    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/dbt/build`, { method: 'POST' }),
+  dbtGenerate: (projectId: string, assetId: string, instruction = '') =>
+    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/dbt/generate`, { method: 'POST', body: JSON.stringify({ instruction }) }),
+  dbtPreview: (projectId: string, assetId: string, model: string, limit = 50) =>
+    req<DbtPreview>(`${p(projectId)}/data-assets/${assetId}/dbt/preview?model=${encodeURIComponent(model)}&limit=${limit}`),
+  dbtPublish: (projectId: string, assetId: string) =>
+    req<DataAsset>(`${p(projectId)}/data-assets/${assetId}/dbt/publish`, { method: 'POST' }),
+
+  // ── transform pipeline ──
+  getPipeline: (projectId: string, assetId: string) =>
+    req<TransformPipeline>(`${p(projectId)}/data-assets/${assetId}/pipeline`),
+  putPipeline: (projectId: string, assetId: string, pipe: TransformPipeline) =>
+    req<TransformPipeline>(`${p(projectId)}/data-assets/${assetId}/pipeline`, { method: 'PUT', body: JSON.stringify(pipe) }),
+  suggestEnumMap: (projectId: string, assetId: string, field: string, targetColumn: string) =>
+    req<EnumMapEntry[]>(`${p(projectId)}/data-assets/${assetId}/pipeline/suggest-enum`, { method: 'POST', body: JSON.stringify({ field, targetColumn }) }),
+  rawPreview: (projectId: string, assetId: string, table: string, limit = 50) =>
+    req<DbtPreview>(`${p(projectId)}/data-assets/${assetId}/raw-preview?table=${encodeURIComponent(table)}&limit=${limit}`),
+
+  // ── target schema + indicator catalog (project-level) ──
+  getTargetSchema: (projectId: string) =>
+    req<TargetColumn[]>(`${p(projectId)}/target-schema`),
+  putTargetSchema: (projectId: string, cols: TargetColumn[]) =>
+    req<TargetColumn[]>(`${p(projectId)}/target-schema`, { method: 'PUT', body: JSON.stringify(cols) }),
+  getIndicators: (projectId: string) =>
+    req<Indicator[]>(`${p(projectId)}/indicators`),
+  validationSeries: (projectId: string, body: ValidationSeriesRequest) =>
+    req<ValidationSeriesResponse>(`${p(projectId)}/validation/series`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** 2.6 — one product × channel × region slice of the master feature table. */
+  masterTable: (projectId: string, body: MasterTableQuery) =>
+    req<MasterTable>(`${p(projectId)}/master-data/table`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** Where every indicator stands, and which S2 layer rejected the dead ones. */
+  indicatorLedger: (projectId: string) =>
+    req<IndicatorLedger>(`${p(projectId)}/indicator-ledger`),
+  getFactorMap: (projectId: string) =>
+    req<FactorMap>(`${p(projectId)}/factor-map`),
+  /** Accept an AI mapping suggestion; pass an empty indicatorId to release/remap. */
+  bindFactorMap: (projectId: string, rowId: string, indicatorId: string) =>
+    req<FactorMap>(`${p(projectId)}/factor-map/bind`, {
+      method: 'PUT', body: JSON.stringify({ rowId, indicatorId }),
+    }),
+  setFactorMapIgnore: (projectId: string, rowId: string, ignored: boolean, note = '') =>
+    req<FactorMap>(`${p(projectId)}/factor-map/ignore`, {
+      method: 'PUT', body: JSON.stringify({ rowId, ignored, note }),
+    }),
+  collectSchemaValues: (projectId: string, column: string, limit = 50) =>
+    req<{ column: string; values: string[] }>(`${p(projectId)}/target-schema/collect?column=${encodeURIComponent(column)}&limit=${limit}`),
 
   // ── knowledge templates (cross-project) ───────────────
   listTemplates: (kind?: TemplateKind, industryL1?: string) => {

@@ -5,9 +5,13 @@ Everything is computed from the input data; nothing is hardcoded.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:  # avoid a runtime import cycle (domain.models is not an mmm dep)
+    from app.domain.models import OlsParams
 
 from app.mmm.ols import OLSResult, fit_ols
 from app.mmm.pivot import ModelFrame, build_model_frame
@@ -102,36 +106,117 @@ def _transform_drivers(
     return pd.DataFrame(out, index=mf.frame.index), halves
 
 
-def _decomposition(mf: ModelFrame, X: pd.DataFrame, res: OLSResult) -> tuple[float, dict[str, float]]:
-    """Contribution share per driver + baseline, on the prediction scale.
+def _build_controls(mf: ModelFrame, params: "OlsParams | None") -> pd.DataFrame:
+    """Trend / seasonality control columns for one model frame.
 
-    Driver contribution = mean(coef * transformed_x). Baseline = intercept.
-    Shares are normalized by total predicted Y (sum of |components|-aware total).
+    Controls enter the design matrix **raw** — never adstocked or saturated — and
+    fold into the baseline in :func:`_decomposition`. Their job is to absorb the
+    trend and seasonal signal so the paid drivers do not, which is what keeps
+    driver coefficients correctly signed and contributions interpretable.
     """
+    idx = mf.frame.index
+    n = len(idx)
+    out: dict[str, np.ndarray] = {}
+    if params is None:
+        return pd.DataFrame(index=idx)
+
+    t = np.arange(n, dtype=float)
+    if getattr(params, "trend", "none") == "linear" and n > 1:
+        out["_trend"] = t / max(1.0, n - 1.0)
+
+    season = getattr(params, "seasonality", "none")
+    if season == "fourier":
+        k_max = max(1, int(getattr(params, "fourier_k", 2) or 1))
+        for k in range(1, k_max + 1):
+            out[f"_sin{k}"] = np.sin(2.0 * np.pi * k * t / 12.0)
+            out[f"_cos{k}"] = np.cos(2.0 * np.pi * k * t / 12.0)
+    elif season == "dummies":
+        # Month-of-year dummies, first level dropped to avoid collinearity with
+        # the intercept. Expensive in df on a short series — the panel warns.
+        # The index is yyyymm; guard against a non-conforming key rather than
+        # silently emitting one "month" level per period.
+        months = [int(m) % 100 for m in idx]
+        if all(1 <= m <= 12 for m in months):
+            for m in sorted(set(months))[1:]:
+                out[f"_m{m:02d}"] = np.array([1.0 if mm == m else 0.0 for mm in months])
+
+    # Structural-event dummies from the 2.3 anomaly review. A window the human
+    # explained as a business event gets its own column, so the paid variables
+    # are not left explaining a spike marketing did not cause.
+    for i, ev in enumerate(getattr(params, "events", None) or []):
+        start, end = int(getattr(ev, "start", 0)), int(getattr(ev, "end", 0))
+        if not start or not end:
+            continue
+        col = np.array([1.0 if start <= int(m) <= end else 0.0 for m in idx])
+        out[f"_ev{i}"] = col
+
+    ctrl = pd.DataFrame(out, index=idx)
+    # Drop constant controls (no variance → breaks the normal equations). An
+    # event window covering every period (or none) lands here.
+    keep = [c for c in ctrl.columns if float(np.std(ctrl[c].to_numpy(dtype=float))) > 0]
+    return ctrl[keep]
+
+
+def _decomposition(
+    mf: ModelFrame, X: pd.DataFrame, res: OLSResult, control_cols: list[str] | None = None
+) -> tuple[float, dict[str, float]]:
+    """Contribution share per driver + baseline, as a share of ACTUAL Y.
+
+    contribution_c = Σ_t(coef_c · transformed_x_c[t]) / Σ_t(actual Y[t])
+                   — the standard "share of sales" decomposition. Normalising by
+    actual Y (rather than by ``intercept + Σcomponents``) keeps the shares on a
+    stable, positive denominator.
+
+    Trend/seasonality controls are NOT drivers: their components fold into the
+    baseline, so only real marketing/commercial factors carry a contribution.
+    """
+    controls = set(control_cols or [])
     components: dict[str, float] = {}
     for c in mf.x_cols:
         components[c] = float(res.coef[c] * X[c].to_numpy(dtype=float).mean())
+
     baseline = float(res.intercept)
-    total = baseline + sum(components.values())
-    if total == 0:
+    for c in controls:
+        if c in res.coef and c in X.columns:
+            baseline += float(res.coef[c] * X[c].to_numpy(dtype=float).mean())
+
+    y_mean = float(np.mean(mf.frame[mf.y_col].to_numpy(dtype=float)))
+    total = y_mean if y_mean != 0 else (baseline + sum(components.values()))
+    if not total:
         total = sum(abs(v) for v in components.values()) + abs(baseline) or 1.0
     baseline_pct = 100.0 * baseline / total
     contribution = {c: 100.0 * v / total for c, v in components.items()}
     return baseline_pct, contribution
 
 
-def _roi(mf: ModelFrame, X: pd.DataFrame, res: OLSResult) -> dict[str, float]:
-    """ROI per paid channel = incremental sales / total spend.
+def _roi(
+    mf: ModelFrame, X: pd.DataFrame, res: OLSResult, price_per_unit: float | None = None
+) -> tuple[dict[str, float], str]:
+    """ROI per paid channel = incremental **revenue** / total spend.
 
-    Incremental sales = coef * sum(transformed spend); spend = sum(raw spend).
+    ``incremental = coef · Σ(transformed spend)`` is the counterfactual lift in Y
+    from zeroing that channel. Converting it to revenue depends on what Y is:
+
+    * Y is money (RMB / value / GMV)  → incremental is already revenue → true ROI.
+    * Y is volume + ``price_per_unit`` → incremental × price → true ROI.
+    * Y is volume, no price            → ROI stays volume-per-spend; the caller
+      must label the unit and must NOT compare it to money ROI benchmarks.
+
+    Returns ``(roi, unit)`` where unit is "revenue/spend" or "volume/spend".
     """
+    money = mf.y_is_money
+    price = None if money else (price_per_unit if (price_per_unit or 0) > 0 else None)
+    unit = "revenue/spend" if (money or price) else "volume/spend"
+
     roi: dict[str, float] = {}
     for c in mf.spend_cols:
         spend = float(mf.frame[c].to_numpy(dtype=float).sum())
         incremental = float(res.coef[c] * X[c].to_numpy(dtype=float).sum())
+        if price:
+            incremental *= float(price)
         if spend > 0:
             roi[c] = incremental / spend
-    return roi
+    return roi, unit
 
 
 def _response_curves(
@@ -182,7 +267,10 @@ def _red_flags(mf: ModelFrame, res: OLSResult, baseline_pct: float) -> list[str]
         flags.append(f"MAPE {res.mape:.1f}% outside {MAPE_TARGET[0]}-{MAPE_TARGET[1]}% benchmark")
     if np.isfinite(res.durbin_watson) and not (DW_TARGET[0] <= res.durbin_watson <= DW_TARGET[1]):
         flags.append(f"Durbin-Watson {res.durbin_watson:.2f} outside {DW_TARGET[0]}-{DW_TARGET[1]} (autocorrelation)")
-    high_vif = {c: v for c, v in res.vif.items() if np.isfinite(v) and v > 10}
+    # Only driver columns carry a metric label — trend/seasonality controls are
+    # expected to correlate with each other and are not a modelling defect.
+    high_vif = {c: v for c, v in res.vif.items()
+                if c in mf.meta and np.isfinite(v) and v > 10}
     if high_vif:
         worst = max(high_vif, key=high_vif.get)
         flags.append(f"High multicollinearity: VIF('{mf.meta[worst]['metric']}')={high_vif[worst]:.1f} > 10")
@@ -245,6 +333,10 @@ def run_mmm(
     *,
     adstock: float = 0.5,
     hill_half: float | None = None,
+    exclude: frozenset[tuple[str, str]] | None = None,
+    y_metric: str | None = None,
+    include: frozenset[str] | None = None,
+    params: "OlsParams | None" = None,
 ) -> MmmModelResult:
     """Full MMM pipeline for one model object.
 
@@ -254,14 +346,45 @@ def run_mmm(
         adstock: geometric carryover decay in [0, 1).
         hill_half: saturation half-point as a fraction of mean adstocked spend
             (e.g. 1.0 = half-saturation at the mean). ``None`` disables Hill.
+        exclude: driver ``(norm_l4, norm_metric)`` pairs to drop before fitting.
+        y_metric: explicit response metric (2.5y). ``None`` → auto-pick.
+        include: explicit driver metric names (2.5x). ``None`` → auto-select.
+        params: :class:`OlsParams` — transforms + trend/seasonality controls.
+            When given, its ``adstock``/``saturation``/``hill_half`` override the
+            positional args, and its controls enter the design matrix.
     """
-    mf = build_model_frame(long_df, model_object)
+    if params is not None:
+        adstock = float(getattr(params, "adstock", adstock))
+        hill_half = (float(getattr(params, "hill_half", 1.0))
+                     if getattr(params, "saturation", "hill") == "hill" else None)
+
+    mf = build_model_frame(long_df, model_object, exclude=exclude,
+                           y_metric=y_metric, include=include,
+                           caps=list(getattr(params, "caps", None) or []))
     X, halves = _transform_drivers(mf, adstock, hill_half)
     y = mf.frame[mf.y_col].to_numpy(dtype=float)
 
+    # Trend / seasonality controls ride alongside the drivers in the design
+    # matrix but are not drivers: no transform, no ROI, folded into baseline.
+    controls = _build_controls(mf, params)
+    control_cols = list(controls.columns)
+    if control_cols:
+        X = pd.concat([X, controls], axis=1)
+
+    # Degrees-of-freedom guard — a wide design on a short series is exactly how
+    # the old auto-fit produced offsetting coefficients and a negative baseline.
+    n_params = 1 + len(mf.x_cols) + len(control_cols)
+    if mf.n_obs <= n_params + 1:
+        raise ValueError(
+            f"'{model_object}': {mf.n_obs} months cannot identify {n_params} parameters "
+            f"({len(mf.x_cols)} variables + {len(control_cols)} controls + intercept). "
+            "Select fewer model variables or simpler controls."
+        )
+
     res = fit_ols(X, y)
-    baseline_pct, contribution = _decomposition(mf, X, res)
-    roi = _roi(mf, X, res)
+    baseline_pct, contribution = _decomposition(mf, X, res, control_cols)
+    price = getattr(params, "price_per_unit", None) if params is not None else None
+    roi, roi_unit = _roi(mf, X, res, price)
     curves = _response_curves(mf, res, adstock, halves)
     flags = _red_flags(mf, res, baseline_pct)
     periods = _period_labels(mf)
@@ -290,10 +413,16 @@ def run_mmm(
         adstock=adstock,
         hill_half_pct=hill_half,
         meta={
-            "y_metric": mf.meta and "Y",
+            "y_metric": mf.y_metric,
+            "y_metric_type": mf.y_metric_type,
+            "y_is_money": mf.y_is_money,
+            "roi_unit": roi_unit,
             "drivers_meta": mf.meta,
             "spend_cols": mf.spend_cols,
+            "control_cols": control_cols,
+            "df_remaining": int(mf.n_obs - n_params),
             "tvalues": res.tvalues,
+            "pvalues": res.pvalues,
         },
     )
 
@@ -319,11 +448,24 @@ def _error_result(model_object: str, msg: str) -> MmmModelResult:
     )
 
 
-def make_candidates(long_df: pd.DataFrame, model_object: str, n: int = 3) -> list[MmmModelResult]:
+def make_candidates(
+    long_df: pd.DataFrame,
+    model_object: str,
+    n: int = 3,
+    *,
+    exclude: frozenset[tuple[str, str]] | None = None,
+    y_metric: str | None = None,
+    include: frozenset[str] | None = None,
+    params: "OlsParams | None" = None,
+) -> list[MmmModelResult]:
     """Produce ``n`` candidate models by varying adstock + saturation.
 
     Candidates differ in carryover/saturation assumptions, giving distinct fit
-    and decomposition profiles for an analyst to compare.
+    and decomposition profiles for an analyst to compare. Everything *else* is
+    held fixed at what S2 resolved — the same response, the same variables, the
+    same controls the human confirmed — so the candidates differ only in the
+    assumption they are meant to probe. Training on a different variable set to
+    the one signed off at 2.5 would make the whole S2 review decorative.
     """
     presets = [
         (0.3, None),    # light carryover, linear
@@ -334,8 +476,16 @@ def make_candidates(long_df: pd.DataFrame, model_object: str, n: int = 3) -> lis
     ]
     out: list[MmmModelResult] = []
     for adstock, hill in presets[:max(1, n)]:
+        # The preset owns carryover/saturation; the confirmed params own the
+        # trend/seasonality controls and the ROI unit price.
+        p = None if params is None else params.model_copy(update={
+            "adstock": adstock,
+            "saturation": "hill" if hill is not None else "none",
+            "hill_half": hill if hill is not None else 1.0,
+        })
         try:
-            out.append(run_mmm(long_df, model_object, adstock=adstock, hill_half=hill))
+            out.append(run_mmm(long_df, model_object, adstock=adstock, hill_half=hill,
+                               exclude=exclude, y_metric=y_metric, include=include, params=p))
         except (ValueError, np.linalg.LinAlgError) as exc:
             out.append(_error_result(model_object, str(exc)))
         if len(out) >= n:

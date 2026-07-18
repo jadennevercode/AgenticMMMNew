@@ -63,9 +63,10 @@ function dropHeader(rows: string[][], headers: string[]): string[][] {
 
 const col = (row: string[], i: number): string => (row[i] ?? '').trim()
 
-// ── factor tree: L1 · L2 · L3 · L4 · Indicator (merged L1–L4 forward-filled) ──
+// ── factor tree: L1 · L2 · L3 · L4 · Indicator · ROI Range · Contribution Range ──
+// (merged L1–L4 forward-filled; the two range columns are per-row and optional)
 function toFactorRows(rows: string[][]): FactorTreeRow[] {
-  const body = dropHeader(rows, ['L1', 'L2', 'L3', 'L4', 'Indicator'])
+  const body = dropHeader(rows, ['L1', 'L2', 'L3', 'L4', 'Indicator', 'ROI Range', 'Contribution Range'])
   const carry = ['', '', '', '']
   const out: FactorTreeRow[] = []
   for (const row of body) {
@@ -79,7 +80,10 @@ function toFactorRows(rows: string[][]): FactorTreeRow[] {
     }
     const indicator = col(row, 4)
     if (!indicator && !carry[3]) continue
-    out.push({ l1: carry[0], l2: carry[1], l3: carry[2], l4: carry[3], indicator })
+    out.push({
+      l1: carry[0], l2: carry[1], l3: carry[2], l4: carry[3], indicator,
+      roiRange: col(row, 5), contributionRange: col(row, 6),
+    })
   }
   return out
 }
