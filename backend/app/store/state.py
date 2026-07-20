@@ -47,6 +47,7 @@ from app.domain.models import (
     StatScorecard,
     TaskFinding,
     TaskRuntime,
+    TimeWindow,
 )
 
 
@@ -102,6 +103,9 @@ class ProjectState(BaseModel):
     # so they persist across heal_state like artifacts).
     data_assets: list[DataAsset] = Field(default_factory=list, alias="dataAssets")
     master_data: list[MasterDataMap] = Field(default_factory=list, alias="masterData")
+    # FND-002: project-scoped time windows (comparable-period definitions), reused by
+    # Business Validation and Reporting. Not blueprint-derived → persists across heal.
+    time_windows: list[TimeWindow] = Field(default_factory=list, alias="timeWindows")
     # Data Engine: the target long-table schema (None → the default) and the
     # indicators registered when assets publish.
     target_schema: Optional[list[TargetColumn]] = Field(default=None, alias="targetSchema")
@@ -233,6 +237,32 @@ def heal_state(st: ProjectState) -> ProjectState:
             a.body = None
             a.state = "draft"
     st.findings = {tid: f for tid, f in st.findings.items() if tid in template.tasks}
+    # BIZ-001 migration: the model scope is now fixed to Brand × Channel × Geo. Relabel
+    # our own legacy default skeleton names on saved profiles ("Product" → "Brand",
+    # "Platform & Region" → "Geo"). This is a label-only rename of the shipped defaults;
+    # we deliberately do NOT remap dimensions that hold real platform values into "Geo"
+    # (that would silently mislabel Platform data as geography — the exact risk the client
+    # flagged). Projects with real inferred scope re-frame to Brand/Channel/Geo on re-run.
+    if st.profile is not None:
+        _LEGACY_DIM_RELABEL = {"Product": "Brand", "Platform & Region": "Geo"}
+        for d in st.profile.model_scope.dimensions:
+            if d.name.strip() in _LEGACY_DIM_RELABEL:
+                d.name = _LEGACY_DIM_RELABEL[d.name.strip()]
+    # FND-001 backfill: indicators published before the semantic classifier existed
+    # carry no ruleVersion — classify them now so their type/unit/aggregation/format
+    # are populated (the OLS role `metric_type` is left untouched).
+    if st.indicators:
+        from app.agents.indicator_metadata import (
+            INDICATOR_META_RULE_VERSION, classify_indicator)
+        for ind in st.indicators:
+            if not ind.rule_version:
+                meta = classify_indicator(ind.metric)
+                ind.semantic_type = meta.metric_type
+                ind.unit = ind.unit or meta.unit
+                ind.currency = meta.currency
+                ind.aggregation = meta.aggregation
+                ind.number_format = meta.fmt
+                ind.rule_version = INDICATOR_META_RULE_VERSION
     # Backfill the factor-tree Dimension column on saved projects: seed empty
     # dimensions from the profile's model scope, then re-render the artifact sheet
     # so the new column shows on already-persisted projects.

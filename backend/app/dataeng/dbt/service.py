@@ -16,6 +16,9 @@ from app.dataeng.dbt import compiler, executor, target_schema
 from app.dataeng.dbt.workspace import Workspace
 from app.dataeng.duck import sanitize_ident
 from app.dataeng.sources import asset_tables
+from app.agents.indicator_metadata import (
+    INDICATOR_META_RULE_VERSION, classify_indicator,
+)
 from app.domain.models import (
     DataAsset, DataAssetVersion, DbtNode, DbtSummary, EnumViolation, Indicator,
     SchemaConformance,
@@ -357,12 +360,19 @@ def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicato
         row = (by_path.get(_norm_path(vals.get("l1", ""), vals.get("l2", ""),
                                       vals.get("l3", ""), vals.get("l4", "")))
                or by_l3.get(_norm_path(vals.get("l3", ""))))
+        # FND-001: classify the indicator's semantic profile (type/unit/aggregation/
+        # format) from its metric name once, at publish, so downstream reads metadata
+        # rather than re-guessing. The OLS role (`metricType`) is left as-is.
+        meta = classify_indicator(str(vals.get("metric", "")))
         ind = Indicator(
             id=f"ind-{asset.id}-{len(new)}",
             metric=str(vals.get("metric", "")),
             metricType=str(vals.get("metric_type", "")),
             l1=str(vals.get("l1", "")), l2=str(vals.get("l2", "")),
             l3=str(vals.get("l3", "")), l4=str(vals.get("l4", "")),
+            semanticType=meta.metric_type, unit=meta.unit, currency=meta.currency,
+            aggregation=meta.aggregation, numberFormat=meta.fmt, source="data_upload",
+            ruleVersion=INDICATOR_META_RULE_VERSION,
             assetId=asset.id, assetName=asset.name,
             coverageStart=cov_start, coverageEnd=cov_end, rows=int(len(grp)),
             treeGrounded=row is not None, treeRowId=(row.id if row is not None else ""),

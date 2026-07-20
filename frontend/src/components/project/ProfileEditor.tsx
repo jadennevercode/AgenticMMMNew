@@ -82,7 +82,8 @@ function emptyProfile(): ProjectProfile {
   return {
     projectIntro: '',
     timeGranularity: 'Month',
-    modelScope: { dimensions: [{ name: 'Product', values: [] }, { name: 'Channel', values: [] }, { name: 'Platform & Region', values: [] }], rows: [] },
+    // BIZ-001: model scope fixed to Brand × Channel × Geo (Platform must not replace Geo).
+    modelScope: { dimensions: [{ name: 'Brand', values: [] }, { name: 'Channel', values: [] }, { name: 'Geo', values: [] }], rows: [] },
     sourceOrigin: '',
   }
 }

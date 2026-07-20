@@ -951,17 +951,43 @@ class TargetColumn(CamelModel):
     standard_values: list[str] = Field(default_factory=list, alias="standardValues")
 
 
+# FND-001 · Unified indicator metadata.
+# `metric_type` (below) stays the OLS **model role** — "Y" | "spending" | "X" — the
+# engine has always used. The SEMANTIC type (what kind of number it is) is the new
+# `semantic_type` enum, which drives display/format/aggregation/OLS-eligibility and
+# is the one the client asked to see (DATA-008). The two are kept consistent by
+# `app/agents/indicator_metadata.py` (model_role derives the role from the semantic).
+MetricType = Literal[
+    "kpi_volume", "kpi_value", "spending", "count", "rate", "index", "other"]
+Aggregation = Literal[
+    "sum", "count", "average", "min", "max", "distinct_count", "weighted_average"]
+IndicatorSource = Literal[
+    "project_material", "interview", "uploaded_tree", "template", "ai", "data_upload"]
+
+
 class Indicator(CamelModel):
     """A published, reusable indicator = one metric × factor-tree path, registered
     when a data asset publishes. Data Intake references these instead of raw files."""
     id: str
     metric: str
-    metric_type: str = Field(default="", alias="metricType")
+    metric_type: str = Field(default="", alias="metricType")  # OLS role: Y | spending | X
     l1: str = ""
     l2: str = ""
     l3: str = ""
     l4: str = ""
+    # Full factor path (FND-001): L5–L8 complete the L1–L8 lineage for L4–L8 drilldown.
+    l5: str = ""
+    l6: str = ""
+    l7: str = ""
+    l8: str = ""
     unit: str = ""
+    # FND-001 semantic metadata (see indicator_metadata.classify_indicator).
+    semantic_type: MetricType = Field(default="other", alias="semanticType")
+    currency: Optional[str] = None
+    aggregation: Aggregation = "sum"
+    number_format: str = Field(default="number", alias="numberFormat")  # money|percent|index|integer|number
+    source: IndicatorSource = "data_upload"
+    rule_version: str = Field(default="", alias="ruleVersion")
     asset_id: str = Field(default="", alias="assetId")
     asset_name: str = Field(default="", alias="assetName")
     coverage_start: str = Field(default="", alias="coverageStart")
@@ -1009,3 +1035,27 @@ class MasterDataMap(CamelModel):
     kind: MasterDataKind
     name: str
     rows: list[MasterDataMapRow] = []
+
+
+# FND-002 · Time window (comparable-period definition), maintained per project and
+# reused by Business Validation and Reporting via its id (DATA-005 consumes it — it
+# generalises the period engine to half-year / quarter / YTD / rolling / custom and
+# enforces equal-length, same-season comparison windows).
+TimeWindowPeriod = Literal[
+    "year", "half_year", "quarter", "month", "ytd", "rolling", "custom"]
+TimeComparison = Literal["none", "yoy", "pop", "custom"]  # yoy=same window prior year
+
+
+class TimeWindow(CamelModel):
+    id: str
+    name: str
+    period_type: TimeWindowPeriod = Field(default="custom", alias="periodType")
+    # Inclusive month bounds as 'YYYY-MM' (empty until set).
+    current_start: str = Field(default="", alias="currentStart")
+    current_end: str = Field(default="", alias="currentEnd")
+    comparison_type: TimeComparison = Field(default="none", alias="comparisonType")
+    comparison_start: str = Field(default="", alias="comparisonStart")
+    comparison_end: str = Field(default="", alias="comparisonEnd")
+    # For period_type == 'rolling': window length in months (e.g. 12 = last 12 months).
+    rolling_months: int = Field(default=0, alias="rollingMonths")
+    version: int = 1

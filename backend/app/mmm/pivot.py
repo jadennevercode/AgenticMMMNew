@@ -145,15 +145,28 @@ def is_money_metric(metric_type: object) -> bool:
 
 def _pick_y_metric(ydf: pd.DataFrame) -> str:
     """Among Y candidates pick the metric with the best month coverage,
-    preferring volume (箱数/volume) over value to keep units interpretable.
+    preferring **volume** over value so the default Y stays a unit count (the client
+    requires the OLS default Y to be KPI-Volume; DATA-009/012).
 
     This is only the *default* — 2.5 lets the human choose Y explicitly
     (``build_model_frame(y_metric=...)``); this fallback keeps legacy callers
     and un-configured projects working.
     """
+    from app.agents.indicator_metadata import classify_indicator
+
     cov = ydf.groupby("metric")["month"].nunique()
     mtypes = ydf.groupby("metric")["metric_type"].first().str.lower()
-    vol_pref = mtypes.apply(lambda t: 0 if any(k in t for k in ("箱", "volume", "unit")) else 1)
+
+    def _is_volume(metric: str) -> bool:
+        # Legacy taxonomy tags volume in the metric_type; a per-project upload only
+        # carries the "Y" role, so fall back to the FND-001 semantic classifier which
+        # distinguishes 本品销量 (kpi_volume) from 本品销售额 (kpi_value).
+        mt = str(mtypes.get(metric, ""))
+        if any(k in mt for k in ("箱", "volume", "unit")):
+            return True
+        return classify_indicator(metric).metric_type == "kpi_volume"
+
+    vol_pref = pd.Series({m: 0 if _is_volume(m) else 1 for m in cov.index})
     ranked = pd.DataFrame({"cov": cov, "vol_pref": vol_pref})
     ranked = ranked.sort_values(["cov", "vol_pref"], ascending=[False, True])
     return str(ranked.index[0])

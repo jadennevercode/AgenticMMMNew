@@ -139,9 +139,16 @@ def master_table(
     if grain not in _available_grains(df):
         grain = "month" if "month" in _available_grains(df) else "year"
 
+    # The primary KPI (the response the wide table explains) — prefer the Volume KPI
+    # so it matches the OLS default Y (DATA-011/012), else the most frequent KPI.
     kpi_rows = df[_kpi_mask(df)]
-    kpi_metric = (str(kpi_rows["metric"].mode().iloc[0])
-                  if not kpi_rows.empty and not kpi_rows["metric"].mode().empty else "")
+    kpi_metric = ""
+    if not kpi_rows.empty:
+        from app.agents.indicator_metadata import classify_indicator
+        kpi_names = _distinct(kpi_rows, "metric")
+        volume = [m for m in kpi_names if classify_indicator(m).metric_type == "kpi_volume"]
+        kpi_metric = volume[0] if volume else (
+            str(kpi_rows["metric"].mode().iloc[0]) if not kpi_rows["metric"].mode().empty else "")
 
     if indicators:
         wanted = {_lower(i) for i in indicators} | {_lower(kpi_metric)}
@@ -157,7 +164,14 @@ def master_table(
         return {"columns": [], "rows": [], "kpi": kpi_metric, "truncated": False,
                 "rowCount": 0, "colCount": 0, "note": "No usable values in this slice."}
 
-    wide = frame.pivot_table(index="_k", columns="_m", values="_v", aggfunc="sum").sort_index()
+    # DATA-011/007: roll each indicator up to its period value with ITS OWN aggregation
+    # — a rate/coverage metric (NDWD) averaged across the sliced dimensions, spend and
+    # volume summed. A single pivot aggfunc would wrongly sum a rate over regions.
+    from app.dataeng.validation_query import _metric_agg, _pandas_agg
+    cols_data: dict[str, pd.Series] = {}
+    for m, g in frame.groupby("_m"):
+        cols_data[str(m)] = g.groupby("_k")["_v"].agg(_pandas_agg(_metric_agg(st, str(m))))
+    wide = pd.DataFrame(cols_data).sort_index()
 
     # KPI first — it is the response the rest of the table explains.
     cols = [c for c in wide.columns if _lower(c) == _lower(kpi_metric)]

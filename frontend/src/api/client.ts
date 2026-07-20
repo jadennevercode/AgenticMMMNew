@@ -33,6 +33,7 @@ import type {
   OlsConfig,
   StatScorecard,
   TemplateKind,
+  TimeWindow,
   ValidationSeriesRequest,
   ValidationSeriesResponse,
 } from '../lib/types'
@@ -224,6 +225,14 @@ export const api = {
     req<ValidationSeriesResponse>(`${p(projectId)}/validation/series`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  /** DATA-005 — project time windows (comparable-period definitions). */
+  getTimeWindows: (projectId: string) =>
+    req<TimeWindow[]>(`${p(projectId)}/time-windows`),
+  putTimeWindows: (projectId: string, windows: TimeWindow[]) =>
+    req<TimeWindow[]>(`${p(projectId)}/time-windows`, {
+      method: 'PUT',
+      body: JSON.stringify(windows),
     }),
   /** 2.6 — one product × channel × region slice of the master feature table. */
   masterTable: (projectId: string, body: MasterTableQuery) =>

@@ -40,7 +40,10 @@ from app.store.templates import get_templates
 
 SYS = agent_system("business")
 
-_SCOPE_DIMENSIONS = ["Product", "Channel", "Platform & Region"]
+# BIZ-001: the model scope is fixed to Brand × Channel × Geo. "Platform" must NOT
+# stand in for Geo, and Geo must be a clean geographic dimension (not merged with
+# platform). Client requirement (2026-07-16 shared table #1, 49:06–49:18).
+_SCOPE_DIMENSIONS = ["Brand", "Channel", "Geo"]
 
 _TIME_GRANULARITIES = {"year": "Year", "month": "Month", "week": "Week"}
 
@@ -84,8 +87,10 @@ async def _profile_from_materials(materials: str, origin: str) -> ProjectProfile
             "- intro: a 2-3 sentence project introduction (objective, brand/category, what the "
             "model should answer)\n"
             "- timeGranularity: one of Year / Month / Week (the modeling time grain)\n"
-            "- dimensions: the model-scope dimensions, each {name, values:[...]}. Typical "
-            "dimensions for an MMM are Product, Channel, Platform & Region.\n"
+            "- dimensions: the model-scope dimensions, each {name, values:[...]}. The model "
+            "scope is fixed to exactly three dimensions: Brand, Channel, Geo. Geo is a clean "
+            "geographic dimension (region/province) — do NOT use Platform in place of Geo, and "
+            "do NOT merge Platform into Geo.\n"
             "- rows: the IN-SCOPE combinations as a list of rows; each row is a list of values "
             "aligned to the dimensions order (only the combinations the SOW lists as in scope).\n"
             'Return JSON: {"intro":str,"timeGranularity":str,'

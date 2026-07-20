@@ -150,25 +150,38 @@ export interface ValidationReviewData {
 export interface ValidationSeriesRequest {
   l3: string
   l4?: string
+  l5?: string  // DATA-004: L4–L8 cascade drilldown
+  l6?: string
+  l7?: string
+  l8?: string
   indicators?: string[]
   grain?: string
   sources?: string[]
   brand?: string[]
   channelType?: string[]
   provinceGroup?: string[]
+  timeWindowId?: string  // DATA-005: scope + compare against a saved time window
+  kpiMetric?: string     // DATA-009: which KPI (Volume/Value) is the backdrop
 }
-export interface ValidationKpi {
+/** DATA-008: display metadata attached to a series/row so the UI formats it right. */
+export interface IndicatorDisplayMeta {
+  unit?: string
+  numberFormat?: string  // money | percent | index | integer | number
+  aggregation?: string   // DATA-007
+  semanticType?: string
+}
+export interface ValidationKpi extends IndicatorDisplayMeta {
   metric: string
   kind: 'area'
   data: number[]
 }
-export interface ValidationOverlay {
+export interface ValidationOverlay extends IndicatorDisplayMeta {
   metric: string
   metricType: string
   kind: 'bar' | 'line'
   data: (number | null)[]
 }
-export interface ValidationYearlyRow {
+export interface ValidationYearlyRow extends IndicatorDisplayMeta {
   metric: string
   values: (number | null)[]
   yoy: (number | null)[]
@@ -178,16 +191,48 @@ export interface ValidationIndicatorOption {
   metricType: string
   l4: string
 }
+export interface ValidationBreadcrumbStep {
+  level: string
+  value: string
+}
+/** DATA-005: current-window vs comparison-window totals for one indicator. */
+export interface ValidationComparisonRow extends IndicatorDisplayMeta {
+  metric: string
+  current: number
+  comparison: number | null
+  deltaPct: number | null
+}
+export interface ValidationComparison {
+  name: string
+  current: { start: string; end: string; label: string }
+  comparison: { start: string; end: string; label: string } | null
+  comparisonType: string
+  equalLength: boolean
+  rows: ValidationComparisonRow[]
+}
 export interface ValidationSeriesResponse {
   l3: string
   grain: string
   x: string[]
   kpi: ValidationKpi | null
+  /** DATA-009: the KPI metric currently used as the backdrop. */
+  kpiMetric?: string
   series: ValidationOverlay[]
   yearly: { years: number[]; rows: ValidationYearlyRow[] }
+  /** DATA-005: current vs comparison window totals (present when a window is applied). */
+  comparison?: ValidationComparison | null
+  /** DATA-004: resolved L3 → L4…L8 drill path, shared by chart/table/export. */
+  breadcrumb?: ValidationBreadcrumbStep[]
   options: {
     grains: string[]
+    /** DATA-009: KPI backdrop choices (Volume / Value) for the switcher. */
+    kpiMetrics: { metric: string; semanticType: string }[]
     l4: string[]
+    /** DATA-004: cascade options; empty list = level Not Available (hide it). */
+    l5: string[]
+    l6: string[]
+    l7: string[]
+    l8: string[]
     indicators: ValidationIndicatorOption[]
     sources: string[]
     brand: string[]
@@ -1393,15 +1438,36 @@ export interface TargetColumn {
   standardValues: string[]
 }
 
+/** FND-001 · semantic type of an indicator (what kind of number it is). */
+export type MetricType =
+  | 'kpi_volume' | 'kpi_value' | 'spending' | 'count' | 'rate' | 'index' | 'other'
+export type Aggregation =
+  | 'sum' | 'count' | 'average' | 'min' | 'max' | 'distinct_count' | 'weighted_average'
+export type IndicatorSource =
+  | 'project_material' | 'interview' | 'uploaded_tree' | 'template' | 'ai' | 'data_upload'
+
 export interface Indicator {
   id: string
   metric: string
+  /** OLS model role: 'Y' | 'spending' | 'X'. */
   metricType: string
   l1: string
   l2: string
   l3: string
   l4: string
+  /** FND-001 · full factor path (L5–L8 complete the L1–L8 lineage). */
+  l5?: string
+  l6?: string
+  l7?: string
+  l8?: string
   unit: string
+  /** FND-001 · semantic metadata. */
+  semanticType?: MetricType
+  currency?: string | null
+  aggregation?: Aggregation
+  numberFormat?: string
+  source?: IndicatorSource
+  ruleVersion?: string
   assetId: string
   assetName: string
   coverageStart: string
@@ -1476,4 +1542,23 @@ export interface MasterDataMap {
   kind: MasterDataKind
   name: string
   rows: MasterDataMapRow[]
+}
+
+/** FND-002 · a comparable-period definition, reused by Business Validation + Reporting. */
+export type TimeWindowPeriod =
+  | 'year' | 'half_year' | 'quarter' | 'month' | 'ytd' | 'rolling' | 'custom'
+export type TimeComparison = 'none' | 'yoy' | 'pop' | 'custom'
+
+export interface TimeWindow {
+  id: string
+  name: string
+  periodType: TimeWindowPeriod
+  /** inclusive 'YYYY-MM' bounds */
+  currentStart: string
+  currentEnd: string
+  comparisonType: TimeComparison
+  comparisonStart: string
+  comparisonEnd: string
+  rollingMonths: number
+  version: number
 }

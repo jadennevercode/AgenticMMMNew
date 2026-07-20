@@ -25,8 +25,9 @@ _MIN_ROWS = 12     # below this we don't trust the parse; fall back to reference
 _MIN_MONTHS = 6    # need a usable monthly time axis, else fall back to reference.
 
 # Header keyword → canonical dimension role. Matches the data-request export
-# template (Time (Month) · Product · Channel · Platform & Region · <indicators>)
-# AND a literal year/month/channel_type layout. Anything unmatched is an indicator.
+# template (Time (Month) · Brand · Channel · Geo · <indicators>) AND a literal
+# year/month/channel_type layout. Anything unmatched is an indicator. (The keyword
+# lists below still accept the legacy product/platform/region headers.)
 _ROLE_KEYWORDS = [
     ("year", ("year", "年")),
     ("month", ("month", "月份", "月")),
@@ -110,13 +111,13 @@ def _period_from_row(r: pd.Series, roles: dict) -> object:
 
 def _metric_type(metric: str) -> str:
     """Tag a metric's modeling role for the MMM engine: 'Y' (KPI / 本品销量),
-    'spending' (paid spend → ROI-eligible X), else 'X' (driver)."""
-    m = str(metric).lower()
-    if re.search(r"本品.*(销量|销售)|kpi|本品月度销量|offtake|本品.*volume", m):
-        return "Y"
-    if re.search(r"花费|费用|投放|金额|spend|promotion", m):
-        return "spending"
-    return "X"
+    'spending' (paid spend → ROI-eligible X), else 'X' (driver).
+
+    FND-001: the role is now derived from the unified semantic classifier so the
+    Y/X/spending tagging and the semantic metadata can never disagree (single source
+    of the keyword rules). Behaviour is preserved: KPI → Y, spend → spending, else X."""
+    from app.agents.indicator_metadata import classify_indicator, model_role
+    return model_role(classify_indicator(metric).metric_type)
 
 
 def _melt_sheet(df: pd.DataFrame, *, l1: str, l2: str, l3: str, l4: str,

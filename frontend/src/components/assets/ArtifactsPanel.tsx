@@ -212,7 +212,7 @@ export function AssetDetail({ asset, onBack, onPick }: { asset: ArtifactInstance
           <AssetStateBadge state={asset.state} />
         </div>
       </div>
-      <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="flex min-h-0 flex-1 flex-col">
+      <Tabs value={tab} onValueChange={(v: string) => setTab(v as Tab)} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="flex-wrap">
           <TabsTrigger value="content">Content</TabsTrigger>
           <TabsTrigger value="sources">Sources</TabsTrigger>

@@ -39,6 +39,7 @@ from app.domain.models import (
     QualityScorecard,
     StatScorecard,
     TargetColumn,
+    TimeWindow,
     TransformPipeline,
 )
 from app.llm.volcano import get_llm
@@ -323,6 +324,25 @@ async def update_profile(project_id: str, body: ProjectProfile) -> dict:
     apply_profile(st, body)
     get_store().save(project_id)
     return body.model_dump(by_alias=True)
+
+
+# ── time windows (FND-002: comparable-period definitions, reused by BV + Reporting) ──
+@app.get("/api/projects/{project_id}/time-windows")
+async def get_time_windows(project_id: str) -> list[dict]:
+    st = _require_state(project_id)
+    return [w.model_dump(by_alias=True) for w in st.time_windows]
+
+
+@app.put("/api/projects/{project_id}/time-windows")
+async def update_time_windows(project_id: str, body: list[TimeWindow]) -> list[dict]:
+    """Replace the project's time-window set. Each window's comparison bounds are
+    normalised (a yoy window gets its comparison window derived as the same months
+    one year earlier) so callers can save just the current window + type."""
+    from app.agents.time_windows import normalize_window
+    st = _require_state(project_id)
+    st.time_windows = [normalize_window(w) for w in body]
+    get_store().save(project_id)
+    return [w.model_dump(by_alias=True) for w in st.time_windows]
 
 
 # ── global model-service config (LLM + ASR, one for all projects) ──
@@ -632,24 +652,33 @@ async def get_indicators(project_id: str) -> list[dict]:
 class ValidationSeriesQuery(BaseModel):
     l3: str
     l4: str = ""
+    l5: str = ""   # DATA-004: L4–L8 cascade drilldown
+    l6: str = ""
+    l7: str = ""
+    l8: str = ""
     indicators: list[str] = []
     grain: str = "month"
     sources: list[str] = []
     brand: list[str] = []
     channelType: list[str] = []
     provinceGroup: list[str] = []
+    timeWindowId: str = ""   # DATA-005: scope + comparison against a saved time window
+    kpiMetric: str = ""      # DATA-009: which KPI (Volume/Value) is the backdrop
 
 
 @app.post("/api/projects/{project_id}/validation/series")
 async def post_validation_series(project_id: str, body: ValidationSeriesQuery) -> dict:
     """KPI area + per-L3 overlay series + yearly/YoY table, computed live from the
     modeling long table so the Business Validation filters resolve on real rows."""
+    from app.agents.time_windows import resolve_window
     from app.dataeng import validation_query
     st = _require_state(project_id)
     return validation_query.validation_series(
-        st, l3=body.l3, l4=body.l4 or None, indicators=body.indicators or None,
+        st, l3=body.l3, l4=body.l4 or None, l5=body.l5 or None, l6=body.l6 or None,
+        l7=body.l7 or None, l8=body.l8 or None, indicators=body.indicators or None,
         grain=body.grain, sources=body.sources or None, brand=body.brand or None,
         channel_type=body.channelType or None, province_group=body.provinceGroup or None,
+        window=resolve_window(st, body.timeWindowId), kpi_metric_req=body.kpiMetric or None,
     )
 
 

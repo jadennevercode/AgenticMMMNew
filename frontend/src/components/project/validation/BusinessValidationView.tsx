@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type {
   ArtifactInstance,
+  TimeWindow,
   ValidationGroup,
   ValidationSeriesResponse,
 } from '../../../lib/types'
@@ -10,8 +11,19 @@ import { asValidation } from '../../../lib/artifact-format'
 import { cn } from '../../../lib/cn'
 import { ValidationChart } from './ValidationChart'
 
-const GRAIN_LABELS: Record<string, string> = { year: 'Year', month: 'Month', day: 'Day' }
-const ALL_GRAINS = ['year', 'month', 'day']
+// DATA-005: the period grains the view can bucket on.
+const GRAIN_LABELS: Record<string, string> = {
+  year: 'Year', half_year: 'Half-year', quarter: 'Quarter', month: 'Month',
+}
+const ALL_GRAINS = ['year', 'half_year', 'quarter', 'month']
+
+// DATA-004: the L4–L8 drilldown levels, in cascade order, with their filter labels.
+const DRILL_LEVELS = ['l4', 'l5', 'l6', 'l7', 'l8'] as const
+type DrillLevel = (typeof DRILL_LEVELS)[number]
+const LEVEL_LABEL: Record<DrillLevel, string> = {
+  l4: 'Sub-factor (L4)', l5: 'Level 5', l6: 'Level 6', l7: 'Level 7', l8: 'Level 8',
+}
+const EMPTY_LEVELS: Record<DrillLevel, string> = { l4: '', l5: '', l6: '', l7: '', l8: '' }
 
 function fmt(n: number | null): string {
   if (n == null) return '—'
@@ -20,6 +32,21 @@ function fmt(n: number | null): string {
   if (a >= 1e4) return `${(n / 1e4).toFixed(1)}万`
   if (a >= 1e3) return `${(n / 1e3).toFixed(1)}k`
   return `${Math.round(n * 100) / 100}`
+}
+
+/** DATA-008: format a value per its indicator metadata — a percentage shows `%`
+ * (never a giant integer), money shows a currency mark, else a compact number. */
+function fmtMeta(n: number | null, numberFormat?: string, unit?: string): string {
+  if (n == null) return '—'
+  if (numberFormat === 'percent') return `${Math.round(n * 10) / 10}%`
+  const s = fmt(n)
+  if (numberFormat === 'money') return `${unit || '¥'}${s}`
+  return s
+}
+
+const AGG_LABEL: Record<string, string> = {
+  sum: 'Σ', average: 'avg', count: 'count', min: 'min', max: 'max',
+  distinct_count: 'distinct', weighted_average: 'w.avg',
 }
 
 /** A checkbox multi-select in a native <details> popover (empty selection = all). */
@@ -135,12 +162,19 @@ function YearlyTable({ res }: { res: ValidationSeriesResponse }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.metric} className="border-b border-border/50 last:border-0">
-              <td className="px-3 py-1.5 font-medium">{r.metric}</td>
+              <td className="px-3 py-1.5 font-medium">
+                {r.metric}
+                {r.aggregation && (
+                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground" title={`aggregation: ${r.aggregation}`}>
+                    {AGG_LABEL[r.aggregation] ?? r.aggregation}
+                  </span>
+                )}
+              </td>
               {r.values.map((v, i) => {
                 const yoy = r.yoy[i]
                 return (
                   <td key={i} className="px-3 py-1.5 text-right whitespace-nowrap tabular-nums">
-                    {fmt(v)}
+                    {fmtMeta(v, r.numberFormat, r.unit)}
                     {yoy != null && (
                       <span className={cn('ml-1.5 text-[10px]', yoy >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
                         {yoy >= 0 ? '+' : ''}{yoy}%
@@ -157,20 +191,90 @@ function YearlyTable({ res }: { res: ValidationSeriesResponse }) {
   )
 }
 
+/** DATA-005: current-window vs comparison-window totals per indicator. */
+function ComparisonBlock({ res }: { res: ValidationSeriesResponse }) {
+  const c = res.comparison
+  if (!c) return null
+  return (
+    <div className="mt-3 rounded-lg border border-primary/25 bg-primary/[0.03]">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary/15 px-3 py-1.5">
+        <span className="text-[11px] font-medium text-primary">
+          {c.name} · {c.current.label}
+          {c.comparison && <span className="text-muted-foreground"> vs {c.comparison.label}</span>}
+        </span>
+        {c.comparison && !c.equalLength && (
+          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-700">
+            ⚠ comparison windows are not equal length
+          </span>
+        )}
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-border/50 text-left text-muted-foreground">
+            <th className="px-3 py-1 font-medium">Indicator</th>
+            <th className="px-3 py-1 text-right font-medium">Current</th>
+            <th className="px-3 py-1 text-right font-medium">Comparison</th>
+            <th className="px-3 py-1 text-right font-medium">Δ</th>
+          </tr>
+        </thead>
+        <tbody>
+          {c.rows.map((r) => (
+            <tr key={r.metric} className="border-b border-border/40 last:border-0">
+              <td className="px-3 py-1 font-medium">
+                {r.metric}
+                {r.aggregation && (
+                  <span className="ml-1.5 text-[10px] font-normal text-muted-foreground" title={`aggregation: ${r.aggregation}`}>
+                    {AGG_LABEL[r.aggregation] ?? r.aggregation}
+                  </span>
+                )}
+              </td>
+              <td className="px-3 py-1 text-right tabular-nums">{fmtMeta(r.current, r.numberFormat, r.unit)}</td>
+              <td className="px-3 py-1 text-right tabular-nums text-muted-foreground">{fmtMeta(r.comparison, r.numberFormat, r.unit)}</td>
+              <td className="px-3 py-1 text-right tabular-nums">
+                {r.deltaPct == null ? (
+                  '—'
+                ) : (
+                  <span className={cn(r.deltaPct >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                    {r.deltaPct >= 0 ? '+' : ''}{r.deltaPct}%
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 interface FactorCardProps {
   group: ValidationGroup
   projectId: string
   editing: boolean
+  timeWindowId: string
   onSignoff: (l3: string, value: 'yes' | 'no') => void
 }
 
-function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
+function FactorCard({ group, projectId, editing, timeWindowId, onSignoff }: FactorCardProps) {
   const ref = useRef<HTMLElement>(null)
   const [inView, setInView] = useState(false)
   const [grain, setGrain] = useState('month')
   const [sources, setSources] = useState<string[]>([])
-  const [l4, setL4] = useState('')
+  const [kpiMetric, setKpiMetric] = useState('')  // DATA-009: KPI Volume/Value backdrop
+  const [levels, setLevels] = useState<Record<DrillLevel, string>>(EMPTY_LEVELS)
   const [indicators, setIndicators] = useState<string[]>(group.defaultIndicators)
+
+  // DATA-004: setting or clearing a level cascade-clears every deeper level, and the
+  // indicator selection resets (indicators are scoped to the drill path).
+  const setLevel = (lvl: DrillLevel, value: string) => {
+    setLevels((prev) => {
+      const next = { ...prev, [lvl]: value }
+      const idx = DRILL_LEVELS.indexOf(lvl)
+      for (let i = idx + 1; i < DRILL_LEVELS.length; i++) next[DRILL_LEVELS[i]] = ''
+      return next
+    })
+    setIndicators([])
+  }
   const [brand, setBrand] = useState<string[]>([])
   const [channelType, setChannelType] = useState<string[]>([])
   const [provinceGroup, setProvinceGroup] = useState<string[]>([])
@@ -198,7 +302,9 @@ function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
 
   const filterKey = [
     grain,
-    l4,
+    timeWindowId,
+    kpiMetric,
+    DRILL_LEVELS.map((l) => levels[l]).join('/'),
     indicators.join('|'),
     sources.join('|'),
     brand.join('|'),
@@ -214,13 +320,19 @@ function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
     api
       .validationSeries(projectId, {
         l3: group.l3,
-        l4: l4 || undefined,
+        l4: levels.l4 || undefined,
+        l5: levels.l5 || undefined,
+        l6: levels.l6 || undefined,
+        l7: levels.l7 || undefined,
+        l8: levels.l8 || undefined,
         indicators,
         grain,
         sources,
         brand,
         channelType,
         provinceGroup,
+        timeWindowId: timeWindowId || undefined,
+        kpiMetric: kpiMetric || undefined,
       })
       .then((r) => {
         if (!cancelled) setRes(r)
@@ -296,8 +408,46 @@ function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
             )
           })}
         </div>
+        {/* DATA-009: KPI Volume/Value switcher — only when the project has more than one
+            KPI. Switching only changes this chart's backdrop, never the OLS default Y. */}
+        {(opts?.kpiMetrics?.length ?? 0) > 1 && (
+          <div className="inline-flex overflow-hidden rounded-md border border-border" title="KPI backdrop">
+            {opts!.kpiMetrics.map((k) => {
+              const active = (res?.kpiMetric ?? '') === k.metric
+              const label = k.semanticType === 'kpi_value' ? 'Value' : k.semanticType === 'kpi_volume' ? 'Volume' : k.metric
+              return (
+                <button
+                  key={k.metric}
+                  type="button"
+                  onClick={() => setKpiMetric(k.metric)}
+                  title={k.metric}
+                  className={cn(
+                    'px-2.5 py-1 text-xs transition-colors',
+                    active ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        )}
         <MultiMenu label="Source" options={opts?.sources ?? []} value={sources} onChange={setSources} />
-        <SingleMenu label="Sub-factor" options={opts?.l4 ?? []} value={l4} onChange={setL4} />
+        {/* DATA-004: L4–L8 cascade. Each level shows only when it has options (or holds a
+            value); selecting one narrows the levels below it. */}
+        {DRILL_LEVELS.map((lvl) => {
+          const levelOptions = opts?.[lvl] ?? []
+          if (!levelOptions.length && !levels[lvl]) return null
+          return (
+            <SingleMenu
+              key={lvl}
+              label={LEVEL_LABEL[lvl]}
+              options={levelOptions}
+              value={levels[lvl]}
+              onChange={(v) => setLevel(lvl, v)}
+            />
+          )
+        })}
         <MultiMenu
           label="Indicator"
           options={(opts?.indicators ?? []).map((i) => i.metric)}
@@ -308,6 +458,13 @@ function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
         <MultiMenu label="Channel" options={opts?.channelType ?? []} value={channelType} onChange={setChannelType} />
         <MultiMenu label="Region" options={opts?.provinceGroup ?? []} value={provinceGroup} onChange={setProvinceGroup} />
       </div>
+
+      {/* DATA-004: current drill path, shared with chart, table and export. */}
+      {res?.breadcrumb && res.breadcrumb.length > 1 && (
+        <div className="mb-2 -mt-1 text-[11px] text-muted-foreground">
+          {res.breadcrumb.map((b) => `${b.level}: ${b.value}`).join('  ›  ')}
+        </div>
+      )}
 
       {/* chart */}
       {loading && !res ? (
@@ -324,6 +481,7 @@ function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
         </div>
       )}
 
+      {res && <ComparisonBlock res={res} />}
       {res && <YearlyTable res={res} />}
 
       {group.interpretation && (
@@ -333,9 +491,95 @@ function FactorCard({ group, projectId, editing, onSignoff }: FactorCardProps) {
   )
 }
 
+/** DATA-005: project-level time-window picker + inline "create window" form. The
+ * chosen window is applied across every factor card (one shared time口径). */
+function TimeWindowBar({
+  projectId,
+  value,
+  onChange,
+}: {
+  projectId: string
+  value: string
+  onChange: (id: string) => void
+}) {
+  const [windows, setWindows] = useState<TimeWindow[]>([])
+  const [creating, setCreating] = useState(false)
+  const [form, setForm] = useState({ name: '', currentStart: '', currentEnd: '', comparisonType: 'yoy' })
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    if (!projectId) return
+    api.getTimeWindows(projectId).then(setWindows).catch(() => undefined)
+  }, [projectId])
+
+  const save = async () => {
+    if (!form.name.trim() || !/^\d{4}-\d{2}$/.test(form.currentStart) || !/^\d{4}-\d{2}$/.test(form.currentEnd)) {
+      setErr('Enter a name and YYYY-MM start/end')
+      return
+    }
+    setSaving(true)
+    setErr('')
+    const next: TimeWindow = {
+      id: `tw-${Date.now()}`, name: form.name.trim(), periodType: 'custom',
+      currentStart: form.currentStart, currentEnd: form.currentEnd,
+      comparisonType: form.comparisonType as TimeWindow['comparisonType'],
+      comparisonStart: '', comparisonEnd: '', rollingMonths: 0, version: 1,
+    }
+    try {
+      const saved = await api.putTimeWindows(projectId, [...windows, next])
+      setWindows(saved)
+      onChange(next.id)
+      setCreating(false)
+      setForm({ name: '', currentStart: '', currentEnd: '', comparisonType: 'yoy' })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const inputCls = 'rounded border border-border bg-background px-2 py-1 text-xs'
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-2">
+      <span className="text-[11px] text-muted-foreground">Time window</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={inputCls}>
+        <option value="">Full range (no comparison)</option>
+        {windows.map((w) => (
+          <option key={w.id} value={w.id}>{w.name}</option>
+        ))}
+      </select>
+      <button
+        type="button"
+        onClick={() => setCreating((v) => !v)}
+        className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+      >
+        {creating ? 'Cancel' : '+ New'}
+      </button>
+      {creating && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={cn(inputCls, 'w-36')} />
+          <input placeholder="Start YYYY-MM" value={form.currentStart} onChange={(e) => setForm({ ...form, currentStart: e.target.value })} className={cn(inputCls, 'w-28')} />
+          <input placeholder="End YYYY-MM" value={form.currentEnd} onChange={(e) => setForm({ ...form, currentEnd: e.target.value })} className={cn(inputCls, 'w-28')} />
+          <select value={form.comparisonType} onChange={(e) => setForm({ ...form, comparisonType: e.target.value })} className={inputCls}>
+            <option value="yoy">YoY (same span, prior year)</option>
+            <option value="pop">Prev. period</option>
+            <option value="none">No comparison</option>
+          </select>
+          <button type="button" disabled={saving} onClick={save} className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-60">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      )}
+      {err && <span className="text-[11px] text-rose-600">{err}</span>}
+    </div>
+  )
+}
+
 export function BusinessValidationView({ inst, editing }: { inst: ArtifactInstance; editing: boolean }) {
   const editArtifact = useSimStore((s) => s.editArtifact)
   const projectId = useSimStore((s) => s.activeProjectId)
+  const [windowId, setWindowId] = useState('')  // DATA-005: shared across all cards
   const data = asValidation(inst.body)
 
   if (!data || !data.groups.length) {
@@ -377,11 +621,12 @@ export function BusinessValidationView({ inst, editing }: { inst: ArtifactInstan
             ))}
           </div>
         )}
+        {projectId && <TimeWindowBar projectId={projectId} value={windowId} onChange={setWindowId} />}
       </header>
 
       {projectId &&
         data.groups.map((g) => (
-          <FactorCard key={g.l3} group={g} projectId={projectId} editing={editing} onSignoff={setSignoff} />
+          <FactorCard key={g.l3} group={g} projectId={projectId} editing={editing} timeWindowId={windowId} onSignoff={setSignoff} />
         ))}
     </div>
   )
