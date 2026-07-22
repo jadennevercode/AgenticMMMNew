@@ -311,6 +311,10 @@ interface SimStore {
   selectAsset: (id: string | null) => void
   setViewedStage: (id: StageId | null) => void
   togglePanel: (which: 'activity' | 'assistant' | 'folder', open?: boolean) => void
+  /** Surface a failure from a mutation that manages its own local state (e.g. a
+   *  canvas with a component-local draft) onto the shared error banner, the same
+   *  slice every store-owned mutation reports to. */
+  reportError: (e: unknown) => void
 }
 
 const WELCOME: AssistantTurn = {
@@ -1082,6 +1086,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     setViewedStage: (id) => set({ viewedStageId: id }),
     togglePanel: (which, open) =>
       set((s) => ({ panels: { ...s.panels, [which]: open ?? !s.panels[which] } })),
+    reportError: (e) => set({ error: errorMessage(e) }),
   }
 
   /** Run an async asset op that returns the updated asset; manage busy + error + merge. */

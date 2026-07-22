@@ -5,6 +5,7 @@ import { useSimStore } from '../../../store/useSimStore'
 import { cn } from '../../../lib/cn'
 import { FactorTreeCanvas } from '../factor-tree/FactorTreeCanvas'
 import { indicatorKey } from '../factor-tree/keys'
+import { ledgerOnlyRows } from '../factor-tree/ledgerOnlyRows'
 import { blockedBefore, useLedgerIndex } from '../factor-tree/useLedgerIndex'
 import type { FactorCanvasRow, FactorCanvasTone } from '../factor-tree/types'
 
@@ -32,28 +33,28 @@ const TONE: Record<string, FactorCanvasTone> = { pass: 'ok', borderline: 'warn',
 export function QualityCanvas() {
   const card = useSimStore((s) => s.qualityScorecard)
   const update = useSimStore((s) => s.updateQualityScorecard)
-  const { index } = useLedgerIndex()
+  const { index, reload } = useLedgerIndex()
   const [selected, setSelected] = useState('')
 
   const cardRows = useMemo(() => card?.rows ?? [], [card])
 
-  const rows: FactorCanvasRow[] = useMemo(
-    () =>
-      cardRows.map((r) => ({
-        key: r.id,
-        l1: r.l1, l2: r.l2, l3: r.l3, l4: r.l4,
-        indicator: r.indicator,
-        tone: TONE[r.autoVerdict] ?? 'muted',
-        statusLabel: r.autoVerdict || '—',
-        cells: [
-          r.consistency.toString(), r.accuracy.toString(),
-          r.completeness.toString(), r.granularity.toString(),
-          r.total.toFixed(2),
-        ],
-        blockedBy: blockedBefore(index.get(indicatorKey(r.l4, r.indicator)), 'quality'),
-      })),
-    [cardRows, index],
-  )
+  const rows: FactorCanvasRow[] = useMemo(() => {
+    const scored = cardRows.map((r) => ({
+      key: r.id,
+      l1: r.l1, l2: r.l2, l3: r.l3, l4: r.l4,
+      indicator: r.indicator,
+      tone: TONE[r.autoVerdict] ?? 'muted',
+      statusLabel: r.autoVerdict || '—',
+      cells: [
+        r.consistency.toString(), r.accuracy.toString(),
+        r.completeness.toString(), r.granularity.toString(),
+        r.total.toFixed(2),
+      ],
+      blockedBy: blockedBefore(index.get(indicatorKey(r.l4, r.indicator)), 'quality'),
+    }))
+    const scoredKeys = new Set(cardRows.map((r) => indicatorKey(r.l4, r.indicator)))
+    return [...scored, ...ledgerOnlyRows(index, scoredKeys, 'quality')]
+  }, [cardRows, index])
 
   const current: QualityRow | undefined = useMemo(
     () => cardRows.find((r) => r.id === selected),
@@ -63,7 +64,10 @@ export function QualityCanvas() {
   if (!card) return null
 
   function setDisposition(id: string, disposition: QualityDisposition) {
-    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) })
+    // A drop here is a quality-layer verdict every later layer inherits — reload
+    // the ledger so the "Denied @ …" badges downstream reflect it immediately,
+    // not after some unrelated poll happens to bump the index.
+    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) }).then(reload)
   }
 
   const header = (

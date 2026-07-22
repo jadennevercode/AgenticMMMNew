@@ -133,8 +133,9 @@ export interface ValidationGroup {
   defaultIndicators: string[]
   interpretation: string
   signoff: string // '' | 'yes' | 'no'
-  /** The (l4, indicator) pairs this chart covers — the sign-off key space. */
-  pairs: { l4: string; indicator: string }[]
+  /** The (l4, indicator) pairs this chart covers — the sign-off key space.
+   *  Optional: legacy artifact bodies predate this field. */
+  pairs?: { l4: string; indicator: string }[]
 }
 export interface ValidationAnomaly {
   channel: string
@@ -1653,8 +1654,9 @@ export interface FactorMap {
   /** true when total > 0 and pending === 0 — the mapping path is resolved. */
   complete: boolean
   /** The gate verdict. `complete` only covers the mapping path; this also
-   *  accounts for the legacy manifest path and modeling readiness. */
-  intake: DataIntakeStatus
+   *  accounts for the legacy manifest path and modeling readiness. Optional:
+   *  legacy artifact bodies predate this field. */
+  intake?: DataIntakeStatus
 }
 
 export type MasterDataKind = 'product' | 'geo' | 'channel' | 'time'

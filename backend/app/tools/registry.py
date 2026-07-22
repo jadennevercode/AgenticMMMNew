@@ -361,7 +361,7 @@ _ENTRIES: list[_Entry] = [
                     "saturation on the drivers, then OLS against the chosen response.",
         inputSummary="Long table + model object, Y metric, selected X, transform/control params",
         outputSummary="R², adj. R², MAPE, Durbin-Watson, baseline %, per-driver contribution/ROI",
-        wraps="mmm.engine.run_mmm", usedBy=["2.5", "2.5r"],
+        wraps="mmm.engine.run_mmm", usedBy=["2.5r"],
         scenario=(
             "Called once PER MODEL OBJECT — so a five-object project records five invocations "
             "per run. Step 2.5 proposes the setup (Y / X / parameters) and 2.5r fits it once "

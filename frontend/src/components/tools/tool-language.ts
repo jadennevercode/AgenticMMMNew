@@ -28,7 +28,8 @@ export function formatDuration(ms: number | null | undefined): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
-/** Newest-first invocations for one task (the trace shown beside its artifact). */
+/** This task's invocations, in the order they were recorded (oldest-first) —
+ *  filtering never reorders `tool_invocations`, which is already append order. */
 export function invocationsForTask(all: ToolInvocation[], taskId: string): ToolInvocation[] {
   return all.filter((v) => v.taskId === taskId)
 }
@@ -40,11 +41,16 @@ export function invocationsForTask(all: ToolInvocation[], taskId: string): ToolI
  * whatever `tool_invocations` reports, so a step that calls something not listed
  * here still renders it, and a step that skips a listed tool just leaves it
  * queued until the run ends.
+ *
+ * `2.5` proposes the setup only (`build_ols_review(st, fit=False)`, no engine/task
+ * id) — `model.ols` is never traced there, only at `2.5r` which actually fits.
+ * Listing it under `2.5` would show a permanently queued/spinning "OLS MMM Fit"
+ * for the whole step, which is exactly the fabricated state this map exists to
+ * avoid.
  */
 export const EXPECTED_TOOLS: Record<string, string[]> = {
   '2.2': ['quality.consistency', 'quality.accuracy', 'quality.completeness', 'quality.granularity'],
   '2.4': ['stat.cv', 'stat.pearson', 'stat.vif'],
-  '2.5': ['model.ols'],
   '2.5r': ['model.ols'],
 }
 

@@ -1,3 +1,4 @@
+import { pairVerdict } from '../components/project/validation/signoff'
 import type {
   ArtifactBody,
   ArtifactFormat,
@@ -53,8 +54,19 @@ function fmtNum(v: number | null, digits = 2): string {
   return v === null || v === undefined ? '—' : v.toFixed(digits)
 }
 
-/** Render a body to markdown for previews / fallback display */
-export function bodyToMarkdown(format: ArtifactFormat, body: ArtifactBody | undefined, content: string): string {
+/** Render a body to markdown for previews / fallback display.
+ *
+ * `signoffs` is the per-indicator sign-off record (`ProjectState.signoffs`,
+ * store slice `s.signoffs`) — needed only for the `validation` format, whose
+ * artifact body carries each group's (l4, indicator) `pairs` but not their
+ * individual verdicts. Callers that render/export a validation artifact must
+ * pass it; every other format ignores the argument. */
+export function bodyToMarkdown(
+  format: ArtifactFormat,
+  body: ArtifactBody | undefined,
+  content: string,
+  signoffs: Record<string, string> = {},
+): string {
   if (format === 'markdown' || !body) return content
   const sheet = asSheet(body)
   if (sheet) {
@@ -100,8 +112,20 @@ export function bodyToMarkdown(format: ArtifactFormat, body: ArtifactBody | unde
     const header = `# Business Validation\nKPI: ${validation.kpiMetric || '—'}`
     const groups = validation.groups
       .map((g) => {
-        const sign = g.signoff === 'yes' ? '✓ signed off' : g.signoff === 'no' ? '✗ rejected' : 'pending'
-        return `## ${[g.l1, g.l2, g.l3].filter(Boolean).join(' › ')}\n${g.interpretation}\n> Indicators: ${g.defaultIndicators.join(', ') || '—'} · Sign-off: ${sign}`
+        const pairs = g.pairs ?? []
+        // Per-indicator, not the old per-L3 rollup: a factor with a mix of
+        // accepted and denied indicators collapsed to a blank "pending" before,
+        // silently dropping the denial from the export.
+        const verdicts = pairs.length
+          ? pairs
+              .map((p) => {
+                const v = pairVerdict(signoffs, p.l4, p.indicator)
+                const label = v === 'yes' ? '✓ signed off' : v === 'no' ? '✗ rejected' : 'pending'
+                return `- ${[p.l4, p.indicator].filter(Boolean).join(' · ') || '—'}: ${label}`
+              })
+              .join('\n')
+          : '- (no indicators)'
+        return `## ${[g.l1, g.l2, g.l3].filter(Boolean).join(' › ')}\n${g.interpretation}\n> Indicators: ${g.defaultIndicators.join(', ') || '—'}\n${verdicts}`
       })
       .join('\n\n')
     return `${header}\n\n${groups}`

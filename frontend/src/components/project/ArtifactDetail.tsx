@@ -33,7 +33,7 @@ function downloadArtifact(inst: ArtifactInstance) {
       return
     }
   }
-  void exportArtifact(inst)
+  void exportArtifact(inst, useSimStore.getState().signoffs)
 }
 
 /** Chip for an upstream / downstream artifact; click navigates to it */
@@ -330,9 +330,10 @@ function DiffPreview({ artifactId }: { artifactId: string }) {
   const proposal = useSimStore((s) => s.artifactProposals[artifactId])
   const apply = useSimStore((s) => s.applyArtifactProposal)
   const discard = useSimStore((s) => s.discardArtifactProposal)
+  const signoffs = useSimStore((s) => s.signoffs)
   if (!proposal || !inst) return null
-  const before = bodyToMarkdown(inst.format, inst.body, inst.content)
-  const after = bodyToMarkdown(proposal.format, proposal.body ?? undefined, proposal.content ?? '')
+  const before = bodyToMarkdown(inst.format, inst.body, inst.content, signoffs)
+  const after = bodyToMarkdown(proposal.format, proposal.body ?? undefined, proposal.content ?? '', signoffs)
   const rows = lineDiff(before, after).filter((r) => r.text.trim() !== '' || r.kind !== 'keep')
   const changed = rows.some((r) => r.kind !== 'keep')
   return (

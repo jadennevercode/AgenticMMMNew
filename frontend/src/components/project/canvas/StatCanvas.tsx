@@ -5,6 +5,7 @@ import { useSimStore } from '../../../store/useSimStore'
 import { cn } from '../../../lib/cn'
 import { FactorTreeCanvas } from '../factor-tree/FactorTreeCanvas'
 import { indicatorKey } from '../factor-tree/keys'
+import { ledgerOnlyRows } from '../factor-tree/ledgerOnlyRows'
 import { blockedBefore, useLedgerIndex } from '../factor-tree/useLedgerIndex'
 import type { FactorCanvasRow, FactorCanvasTone } from '../factor-tree/types'
 
@@ -29,29 +30,29 @@ const TONE: Record<string, FactorCanvasTone> = {
 export function StatCanvas() {
   const card = useSimStore((s) => s.statScorecard)
   const update = useSimStore((s) => s.updateStatScorecard)
-  const { index } = useLedgerIndex()
+  const { index, reload } = useLedgerIndex()
   const [selected, setSelected] = useState('')
 
   const cardRows = useMemo(() => card?.rows ?? [], [card])
 
-  const rows: FactorCanvasRow[] = useMemo(
-    () =>
-      cardRows.map((r) => ({
-        key: r.id,
-        l1: r.l1, l2: r.l2, l3: r.l3, l4: r.l4,
-        indicator: r.indicator,
-        tone: TONE[r.autoVerdict] ?? 'muted',
-        statusLabel: r.autoVerdict === 'unconsiderable' ? 'Unconsiderable' : r.autoVerdict || '—',
-        cells: [
-          `${r.cv.toFixed(2)} (${r.cvScore})`,
-          `${r.pearson >= 0 ? '+' : ''}${r.pearson.toFixed(2)} (${r.pearsonScore})`,
-          `${r.vif.toFixed(1)} (${r.vifScore})`,
-          r.total.toFixed(2),
-        ],
-        blockedBy: blockedBefore(index.get(indicatorKey(r.l4, r.indicator)), 'statistical'),
-      })),
-    [cardRows, index],
-  )
+  const rows: FactorCanvasRow[] = useMemo(() => {
+    const scored = cardRows.map((r) => ({
+      key: r.id,
+      l1: r.l1, l2: r.l2, l3: r.l3, l4: r.l4,
+      indicator: r.indicator,
+      tone: TONE[r.autoVerdict] ?? 'muted',
+      statusLabel: r.autoVerdict === 'unconsiderable' ? 'Unconsiderable' : r.autoVerdict || '—',
+      cells: [
+        `${r.cv.toFixed(2)} (${r.cvScore})`,
+        `${r.pearson >= 0 ? '+' : ''}${r.pearson.toFixed(2)} (${r.pearsonScore})`,
+        `${r.vif.toFixed(1)} (${r.vifScore})`,
+        r.total.toFixed(2),
+      ],
+      blockedBy: blockedBefore(index.get(indicatorKey(r.l4, r.indicator)), 'statistical'),
+    }))
+    const scoredKeys = new Set(cardRows.map((r) => indicatorKey(r.l4, r.indicator)))
+    return [...scored, ...ledgerOnlyRows(index, scoredKeys, 'statistical')]
+  }, [cardRows, index])
 
   const current: StatScoreRow | undefined = useMemo(
     () => cardRows.find((r) => r.id === selected),
@@ -61,7 +62,9 @@ export function StatCanvas() {
   if (!card) return null
 
   function setDisposition(id: string, disposition: StatDisposition) {
-    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) })
+    // A drop here is a statistical-layer verdict the selection step inherits —
+    // reload the ledger so 2.5's "Denied @ …" badges reflect it immediately.
+    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) }).then(reload)
   }
 
   const zeroed = cardRows.filter((r) => r.total === 0).length

@@ -40,7 +40,7 @@ from app.domain.models import (
     OlsYCandidate,
     OlsYChoice,
 )
-from app.mmm import driver_candidates, run_mmm, y_candidates
+from app.mmm import driver_candidates_by_l4, run_mmm, y_candidates
 from app.store.state import ProjectState
 from app.tools import get as get_tool
 from app.tools.tracing import traced
@@ -163,7 +163,7 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
     # variable went — and no trace of who decided it.
     seen: dict[tuple[str, str], OlsXCandidate] = {}
     for obj in objects:
-        for c in driver_candidates(df, obj):
+        for c in driver_candidates_by_l4(df, obj):
             key = _norm_pair(c["l4"], c["metric"])
             if key in seen:
                 continue

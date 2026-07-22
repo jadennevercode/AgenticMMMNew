@@ -293,6 +293,11 @@ export const api = {
     req<FactorMap>(`${p(projectId)}/factor-map/ignore`, {
       method: 'PUT', body: JSON.stringify({ rowId, ignored, note }),
     }),
+  /** Ignore many rows in one request — one 2.1 re-render, not one per row. */
+  setFactorMapIgnoreBulk: (projectId: string, rowIds: string[], note = '') =>
+    req<FactorMap>(`${p(projectId)}/factor-map/ignore-bulk`, {
+      method: 'PUT', body: JSON.stringify({ rowIds, note }),
+    }),
   collectSchemaValues: (projectId: string, column: string, limit = 50) =>
     req<{ column: string; values: string[] }>(`${p(projectId)}/target-schema/collect?column=${encodeURIComponent(column)}&limit=${limit}`),
 

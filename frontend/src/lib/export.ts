@@ -67,8 +67,15 @@ export interface ExportableArtifact {
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
-/** Export any artifact to a downloaded file (.xlsx for sheets, .md otherwise). */
-export async function exportArtifact(inst: ExportableArtifact): Promise<void> {
+/** Export any artifact to a downloaded file (.xlsx for sheets, .md otherwise).
+ *
+ * `signoffs` is only meaningful for the `validation` format — pass the store's
+ * per-indicator sign-off record so the export shows each indicator's own
+ * verdict instead of the collapsed per-L3 rollup. */
+export async function exportArtifact(
+  inst: ExportableArtifact,
+  signoffs: Record<string, string> = {},
+): Promise<void> {
   const base = safeName(inst.name)
   if (inst.format === 'sheet' && asSheet(inst.body)) {
     const XLSX = await loadXLSX()
@@ -77,7 +84,7 @@ export async function exportArtifact(inst: ExportableArtifact): Promise<void> {
     downloadBlob(new Blob([out], { type: XLSX_MIME }), `${base}.xlsx`)
     return
   }
-  const md = bodyToMarkdown(inst.format, inst.body, inst.content)
+  const md = bodyToMarkdown(inst.format, inst.body, inst.content, signoffs)
   downloadBlob(new Blob([md], { type: 'text/markdown;charset=utf-8' }), `${base}.md`)
 }
 

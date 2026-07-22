@@ -1007,6 +1007,27 @@ async def put_factor_map_ignore(project_id: str, body: FactorMapIgnoreBody) -> d
     return _factor_map_payload(st)
 
 
+class FactorMapIgnoreBulkBody(BaseModel):
+    rowIds: list[str]
+    note: str = ""
+
+
+@app.put("/api/projects/{project_id}/factor-map/ignore-bulk")
+async def put_factor_map_ignore_bulk(project_id: str, body: FactorMapIgnoreBulkBody) -> dict:
+    """Ignore many factor rows in one request (e.g. "Ignore all pending").
+
+    Applies every row, then re-renders `a-data-processing` and saves the project
+    **once** — the single-row endpoint's handler + save runs once per call, which
+    turns one button press into dozens of sequential heavy 2.1 recomputes."""
+    st = _require_state(project_id)
+    for row_id in body.rowIds:
+        st.factor_map_ignores[row_id] = body.note
+    if st.artifact("a-data-processing") is not None:
+        await _engine.handlers["2.1"](_engine, st, bp.TASK_MAP["2.1"])
+    get_store().save(project_id)
+    return _factor_map_payload(st)
+
+
 class FactorMapBindBody(BaseModel):
     rowId: str
     """Empty releases whatever is bound to the row (remap / undo)."""

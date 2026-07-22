@@ -31,14 +31,15 @@ const STATUS_LABEL: Record<string, string> = {
 export function DataProcessingCanvas({ inst }: { inst: ArtifactInstance }) {
   const projectId = useSimStore((s) => s.activeProjectId)
   const refresh = useSimStore((s) => s.refresh)
+  const reportError = useSimStore((s) => s.reportError)
   const [map, setMap] = useState<FactorMap | null>(null)
   const [selected, setSelected] = useState<string>('')
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
     if (!projectId) return
-    api.getFactorMap(projectId).then(setMap).catch(() => setMap(null))
-  }, [projectId])
+    api.getFactorMap(projectId).then(setMap).catch((e) => { setMap(null); reportError(e) })
+  }, [projectId, reportError])
 
   useEffect(load, [load])
 
@@ -65,6 +66,8 @@ export function DataProcessingCanvas({ inst }: { inst: ArtifactInstance }) {
     try {
       setMap(await fn())
       await refresh()
+    } catch (e) {
+      reportError(e)
     } finally {
       setBusy(false)
     }
@@ -80,19 +83,11 @@ export function DataProcessingCanvas({ inst }: { inst: ArtifactInstance }) {
     void mutate(() => api.setFactorMapIgnore(projectId, rowId, ignored, ''))
   }
 
-  async function ignoreAllPending() {
+  function ignoreAllPending() {
     if (!projectId || !map) return
-    setBusy(true)
-    try {
-      let latest = map
-      for (const r of map.rows.filter((x) => x.status === 'pending')) {
-        latest = await api.setFactorMapIgnore(projectId, r.rowId, true, 'No data source')
-      }
-      setMap(latest)
-      await refresh()
-    } finally {
-      setBusy(false)
-    }
+    const rowIds = map.rows.filter((x) => x.status === 'pending').map((r) => r.rowId)
+    if (!rowIds.length) return
+    void mutate(() => api.setFactorMapIgnoreBulk(projectId, rowIds, 'No data source'))
   }
 
   const header = (
