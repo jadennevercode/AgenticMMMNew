@@ -227,17 +227,21 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
         findings.append(TaskFinding(
             text=f"Modeling readiness: {problem}", tone="flag",
             evidence=[EvidenceRef(artifactId="a-data-processing")]))
-    # Where the tree is uncovered, not just how much of it. "18 pending" tells the
-    # reviewer nothing; "nothing under 渠道/终端营销 has data" is a decision.
+    # Where the tree was given up on, not just how much of it. The 2.1 gate
+    # cannot even open until pending is zero, so by the time this finding is
+    # read the only areas still uncovered are the ones the human explicitly
+    # ignored — "18 ignored" tells the reviewer nothing; "nothing under
+    # 渠道/终端营销 has data" is a decision. This mirrors the d-2.1 "Ignored
+    # factors stay out of the model for this run" consequence.
     gaps: dict[str, int] = {}
     for r in fmap.rows:
-        if r.status == "pending":
+        if r.status == "ignored":
             key = f"{r.l1} › {r.l2}".strip(" ›")
             gaps[key] = gaps.get(key, 0) + 1
     if gaps:
         top = sorted(gaps.items(), key=lambda kv: -kv[1])[:4]
         findings.append(TaskFinding(
-            text="Uncovered areas of the factor tree: "
+            text="Ignored areas of the factor tree (no data source; stays out of the model this run): "
                  + "; ".join(f"{name} ({n} indicator{'s' if n > 1 else ''})" for name, n in top),
             evidence=[EvidenceRef(artifactId="a-data-processing")]))
     eng.add_findings(st, task["id"], findings)
@@ -524,19 +528,39 @@ def _bv_groups(st: ProjectState, df: pd.DataFrame) -> list[dict]:
             "interpretation": _bv_interpretation(df, l3, indicators),
             # Reflect the durable verdict, so re-running 2.3 cannot erase a
             # sign-off the client already gave (`st.signoffs` is the truth —
-            # this field is a rendering of it).
-            "signoff": _signoff_for(st, l3),
+            # this field is a rendering of it). Derived from THIS group's own
+            # indicator pairs, not a raw L3-name lookup — sign-off is recorded
+            # per indicator (`ledger.signoff_key`), not per factor name.
+            "signoff": _signoff_for(st, pairs),
             "pairs": [{"l4": a, "indicator": b} for a, b in pairs],
         })
     return groups
 
 
-def _signoff_for(st: ProjectState, l3: str) -> str:
-    """The client's recorded verdict for an L3 factor ("yes" / "no" / "")."""
-    key = str(l3).strip().casefold()
-    for stored, verdict in (getattr(st, "signoffs", None) or {}).items():
-        if str(stored).strip().casefold() == key:
-            return str(verdict or "")
+def _signoff_for(st: ProjectState, pairs: list[tuple[str, str]]) -> str:
+    """The client's recorded verdict for a factor's indicator pairs.
+
+    "yes" when every pair is signed yes, "no" when every pair is signed no,
+    "" when none are recorded — or when the pairs disagree ("mixed"). The
+    frontend today only understands ""/"yes"/"no"
+    (`BusinessValidationView.tsx::setSignoff` toggles between those three), so
+    a genuine split is reported as "" rather than a fourth value it cannot
+    render; a later task that gives the UI a per-indicator affordance can
+    surface "mixed" directly instead of collapsing it here.
+    """
+    from app.agents.ledger import signoff_key
+
+    signoffs = getattr(st, "signoffs", None) or {}
+    verdicts = {
+        str(signoffs[key]).strip().lower()
+        for l4, indicator in pairs
+        for key in [signoff_key(l4, indicator)]
+        if key in signoffs and str(signoffs[key]).strip()
+    }
+    if verdicts == {"yes"}:
+        return "yes"
+    if verdicts == {"no"}:
+        return "no"
     return ""
 
 
@@ -759,7 +783,7 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     earlier layer already rejected are not scored at all (see
     ``build_stat_scorecard``). The AI then writes the case for or against each
     row, and the human rules at 2.4d — Good → include, Acceptable → review,
-    Unconsiderable / severe VIF → drop.
+    Unconsiderable → drop.
     """
     card = build_stat_scorecard(st, eng=eng, task_id=task["id"])
     # The AI argues each row from its own numbers; the score itself stays computed.
@@ -775,10 +799,13 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     def _label(r: StatScoreRow) -> str:
         return f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
 
-    # Auto-drop proposal only fires on a genuinely weak Total (Unconsiderable). A
-    # high VIF among otherwise-strong indicators is surfaced on the card for the
-    # human to weigh, not auto-dropped — collinearity is expected when scoring the
-    # whole indicator set at once (p ≥ n), so it never forces a blanket drop.
+    # Auto-drop proposal fires on a genuinely weak Total (Unconsiderable) — and
+    # because Total is the PRODUCT of the three 0/0.5/1 bands, a single severe
+    # VIF (band 0) zeroes it on its own. So a high VIF among otherwise-strong
+    # indicators is not merely surfaced on the card for the human to weigh — it
+    # already put the row in the drop set. Collinearity is still expected when
+    # scoring the whole indicator set at once (p ≥ n), but nothing overrides
+    # the product rule to protect it from that.
     drop_candidates = [_label(r) for r in card.rows if r.auto_verdict == "unconsiderable"]
     acceptable = [_label(r) for r in card.rows if r.auto_verdict == "Acceptable"]
     # VIF runs on the year-over-year DIFFERENCED frame (see stat_scoring._yoy), not
@@ -800,20 +827,13 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
         "drop": len(drop_candidates),
         "kept": accepted_stat_labels(card),
     })
-    # Make the 2.4 gate question reflect the real Acceptable-band count.
-    dec = task.get("decision")
-    if dec and dec["id"] in st.decisions:
-        n = len(acceptable)
-        st.decisions[dec["id"]].question = (
-            f"{n} indicator(s) scored Acceptable (0 < Total ≤ 0.5) — neither clearly in nor out"
-            + (f" (e.g. {acceptable[0]})" if acceptable else "")
-            + ". How should they enter the model?"
-        )
     if drop_candidates:
         eng.add_proposal(st, Proposal(
             id="p-2.4-collinear", targetArtifactId="a-ols-test",
             title="Drop collinear / low-signal indicators before modeling",
-            summary="Statistical screening flagged indicators with high VIF or weak correlation: "
+            summary="Statistical screening flagged indicators that failed a test outright "
+            "(near-zero variability, no correlation, or severe collinearity — Total is "
+            "their product, so any single failure zeroes it): "
             + ", ".join(drop_candidates[:5]),
             diff=[DiffLine(kind="remove", text=d) for d in drop_candidates[:5]],
             evidence=[EvidenceRef(artifactId="a-stat-tests")], confidence=0.72,

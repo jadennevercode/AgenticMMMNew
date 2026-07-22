@@ -146,13 +146,60 @@ def stat_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
 
 
 def signoff_key(l4: object, metric: object) -> str:
-    """The ``st.signoffs`` key for one indicator — ``_norm_pair`` joined by '|'.
+    """The ``st.signoffs`` key for one indicator: ``i:<norm_l4>|<norm_metric>``.
 
-    Legacy keys carry a bare normalised L3 and contain no '|', which is what
-    lets both live in one dict without a migration.
+    The ``i:`` prefix makes the shape self-describing instead of inferred from
+    the mere presence of ``|`` — an uploaded factor/metric name can itself
+    contain a ``|`` (e.g. ``"Search | Brand"``), which under the old bare
+    ``"<l4>|<metric>"`` vs bare-L3 scheme was ambiguous with the factor shape.
+    See :func:`_parse_signoff_key`.
     """
     a, b = _norm_pair(l4, metric)
-    return f"{a}|{b}"
+    return f"i:{a}|{b}"
+
+
+def signoff_factor_key(l3: object) -> str:
+    """The whole-factor ``st.signoffs`` key: ``f:<norm_l3>``.
+
+    Companion to :func:`signoff_key` for a verdict recorded at the L3 level
+    (every indicator under a factor) rather than per indicator.
+    """
+    return f"f:{_norm(l3)}"
+
+
+def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
+    """Decode one ``st.signoffs`` key.
+
+    Returns ``(kind, l4_or_l3, metric)`` — ``kind`` is ``"indicator"`` or
+    ``"factor"``; ``metric`` is ``""`` for a factor. Returns ``None`` when the
+    key cannot be trusted (the round-trip guard below): the caller must treat
+    that as "no recorded verdict", never act on a guess.
+
+    Accepts three shapes so nothing already stored is lost:
+      * ``"i:<l4>|<metric>"`` — the current indicator shape (`signoff_key`).
+      * ``"f:<l3>"``          — the current factor shape (`signoff_factor_key`).
+      * unprefixed legacy     — predates both prefixes: a bare
+        ``"<l4>|<metric>"`` (has a ``|``) reads as an indicator, a bare
+        ``"<l3>"`` (no ``|``) reads as a factor. This is the same rule the
+        prefixes exist to replace, kept only so state saved before this change
+        keeps its verdicts — a legacy L3 name that itself contains ``|`` is a
+        known, accepted gap in that old data (today's reference dataset has
+        none), not something re-parsing can resolve after the fact.
+    """
+    if key.startswith("i:"):
+        l4, sep, metric = key[2:].partition("|")
+        if not sep or f"i:{l4}|{metric}" != key:
+            return None  # malformed — an "i:" key must carry a '|'
+        return ("indicator", l4, metric)
+    if key.startswith("f:"):
+        l3 = key[2:]
+        if f"f:{l3}" != key:
+            return None
+        return ("factor", l3, "")
+    if "|" in key:
+        l4, _, metric = key.partition("|")
+        return ("indicator", l4, metric)
+    return ("factor", key, "")
 
 
 def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
@@ -168,22 +215,35 @@ def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
     for key, verdict in (getattr(st, "signoffs", None) or {}).items():
         if _norm(verdict) != "no":
             continue
-        if "|" in key:
-            l4, _, metric = key.partition("|")
-            pairs.add((_norm(l4), _norm(metric)))
+        parsed = _parse_signoff_key(key)
+        if parsed is None:
+            continue  # unparseable / ambiguous key — see _parse_signoff_key
+        kind, a, b = parsed
+        if kind == "indicator":
+            pairs.add((_norm(a), _norm(b)))
         else:
-            l3s.add(_norm(key))
+            l3s.add(_norm(a))
     return pairs, l3s
 
 
-def signoff_reject_l3(st: ProjectState) -> set[str]:
-    """Legacy-shaped view of :func:`signoff_denied` — bare-L3 denials only.
+def stale_factor_keys(st: ProjectState, l3: object) -> list[str]:
+    """Every ``st.signoffs`` key that resolves to a whole-factor verdict on
+    ``l3`` — the current ``f:`` shape or an old unprefixed legacy one.
 
-    Still used by ``app/agents/_test_ledger_signoff.py``, which only ever
-    writes bare-L3 keys; kept as a thin wrapper rather than duplicating the
-    read.
+    A verdict recorded at a finer grain (a single indicator, or a fresh
+    whole-L3 call) must not keep being overridden by a coarser one recorded
+    earlier, before sign-off became indicator-granular. See
+    ``app/main.py::put_signoff``.
     """
-    return signoff_denied(st)[1]
+    target = _norm(l3)
+    if not target:
+        return []
+    out: list[str] = []
+    for key in getattr(st, "signoffs", None) or {}:
+        parsed = _parse_signoff_key(key)
+        if parsed is not None and parsed[0] == "factor" and _norm(parsed[1]) == target:
+            out.append(key)
+    return out
 
 
 def ols_flagged_pairs(st: ProjectState) -> set[tuple[str, str]]:

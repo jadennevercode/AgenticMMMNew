@@ -357,8 +357,8 @@ TASKS: list[TaskDef] = [
      "basis_note": "统计得分 + AI 逐行入模建议。", "work_note": "Awaiting human review of the statistical verdicts.",
      "depends_on": ["2.4"], "duration": 1, "produces": [],
      "decision": {"id": "d-2.4", "kind": "choice", "title": "Borderline metrics into the model",
-                  "question": "Some metrics scored Acceptable (1.5–3) — neither clearly in nor out. How should they enter the model?",
-                  "evidence": [{"artifactId": "a-stat-tests", "note": "Acceptable-band (1.5–3) rows"}, {"artifactId": "a-quality-scorecard", "note": "Upstream quality dispositions"}],
+                  "question": "Some metrics scored Acceptable (0 < Total ≤ 0.5) — neither clearly in nor out. How should they enter the model?",
+                  "evidence": [{"artifactId": "a-stat-tests", "note": "Acceptable-band (0 < Total ≤ 0.5) rows"}, {"artifactId": "a-quality-scorecard", "note": "Upstream quality dispositions"}],
                   "recommendation": "Keep the Acceptable-band metrics alongside the Good ones; the OLS regression test (2.5) then checks each against its ROI / contribution range.",
                   "options": [
                       {"id": "keep", "label": "Keep acceptable metrics", "detail": "Enter with the Good-band metrics", "consequence": "The OLS test checks their contribution range", "recommended": True},

@@ -92,12 +92,20 @@ def test_2_2_gate_question_is_data_driven() -> None:
 # ── 2.4 · Statistical Score ─────────────────────────────────────────────────
 
 
-def test_2_4_screening_gate_question() -> None:
+def test_2_4_screening_produces_the_scorecard_and_acceptable_bucket() -> None:
+    """`stat_screening` handles 2.4, not 2.4d — it must never touch `d-2.4`'s
+    question (that block was dead code: `task["decision"]` is always None for
+    2.4, since the decision belongs to 2.4d). The old version of this test
+    asserted "Acceptable" in the question, which the static blueprint default
+    satisfies on its own — it would have passed with the dead block deleted
+    entirely. Assert what the running code actually determines instead."""
     st = _fresh()
     _run(data_agent.stat_screening, st, "2.4")
     assert st.artifact("a-stat-tests") is not None
     assert "screening_acceptable" in st.analysis
-    assert "Acceptable" in st.decisions["d-2.4"].question
+    assert st.analysis["screening"]["total"] == len(st.stat_scorecard.rows) > 0
+    # The gate question is the static blueprint text — 2.4 must not rewrite it.
+    assert st.decisions["d-2.4"].question == bp.TASK_MAP["2.4d"]["decision"]["question"]
 
 
 def test_2_4_does_not_rescore_what_2_2_dropped() -> None:
@@ -258,20 +266,54 @@ def test_master_table_never_carries_a_rejected_indicator() -> None:
     assert not (cols & rejected), "a dropped indicator must not reach the master table"
 
 
-def test_mapping_decision_gate_exists() -> None:
+def test_d_2_1_gates_2_2_and_reopens_2_1_on_rework() -> None:
     """2.1 resolves the mapping; 2.1d is where the human decides whether to keep
-    building data or move on. 2.2 must sit behind that decision, not behind 2.1."""
-    from app.domain import blueprint as bp
+    building data or move on. This exercises the actual DAG behaviour, not just
+    the blueprint dict shape (which cannot fail for any reason other than a
+    typo in blueprint.py itself):
 
-    task = bp.TASK_MAP["2.1d"]
-    dec = task["decision"]
-    assert dec["id"] == "d-2.1"
-    assert [o["id"] for o in dec["options"]] == ["proceed", "continue-data-engine"]
-    assert dec["rework_option_id"] == "continue-data-engine"
-    assert dec["rework_task_id"] == "2.1"
-    assert task["depends_on"] == ["2.1"]
-    assert bp.TASK_MAP["2.2"]["depends_on"] == ["2.1d"]
-    print("✓ mapping decision gate exists")
+    * 2.2 must not become actionable on 2.1 alone — it waits behind d-2.1.
+    * Autopilot's recommended-option pick lands on "proceed".
+    * Resolving "continue-data-engine" re-arms 2.1 (and 2.1d) instead of
+      leaving the DAG deadlocked.
+    """
+    from app.orchestrator.engine import Engine
+    from app.orchestrator.runner import _recommended_option
+
+    st = _fresh()
+    eng = Engine()
+
+    st.tasks["1.7"].status = "done"  # 2.1's own dependency, so rework can re-arm it
+    st.tasks["2.1"].status = "done"
+    eng._promote_ready(st)
+    assert st.tasks["2.1d"].status == "ready", "2.1d must unblock once 2.1 is done"
+    assert st.tasks["2.2"].status == "pending", \
+        "2.2 must wait behind d-2.1, not behind 2.1 alone"
+
+    # 2.1d has no handler — `run_task` would open the decision directly.
+    st.tasks["2.1d"].status = "awaiting_human"
+    st.decisions["d-2.1"].status = "open"
+
+    assert _recommended_option(bp.TASK_MAP["2.1d"]) == "proceed", \
+        "autopilot must resolve d-2.1 to its recommended option"
+
+    eng.resolve_decision(st, "d-2.1", "proceed")
+    assert st.tasks["2.1d"].status == "done"
+    eng._promote_ready(st)
+    assert st.tasks["2.2"].status == "ready", "resolving d-2.1 must unblock 2.2"
+
+    # Re-open and resolve the other way: continue-data-engine must re-arm 2.1
+    # (and 2.1d), not deadlock the DAG.
+    st.tasks["2.1d"].status = "awaiting_human"
+    st.decisions["d-2.1"].status = "open"
+    eng.resolve_decision(st, "d-2.1", "continue-data-engine")
+    # `_rework` both resets and immediately re-promotes — 2.1 has no other open
+    # dependency (1.7 is still done), so it lands straight back on "ready".
+    assert st.tasks["2.1"].status == "ready", \
+        "continue-data-engine must re-arm 2.1, not deadlock the run"
+    assert st.tasks["2.1d"].status == "pending", \
+        "2.1d must reset behind 2.1, not stay resolved"
+    print("✓ d-2.1 gates 2.2 and reopens 2.1 on rework")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ Run: PYTHONPATH=. .venv/bin/python -m app.agents._test_ledger_signoff
 """
 from __future__ import annotations
 
-from app.agents.ledger import drops_before, signoff_reject_l3
+from app.agents.ledger import drops_before, signoff_denied
 from app.domain.models import ArtifactInstance, IndustryRef, ProjectMeta
 from app.store.state import initial_state
 
@@ -24,10 +24,12 @@ def _state():
 
 def test_only_an_explicit_no_rejects() -> None:
     st = _state()
-    assert signoff_reject_l3(st) == set(), "a fresh project rejects nothing"
+    assert signoff_denied(st)[1] == set(), "a fresh project rejects nothing"
 
+    # Bare, unprefixed keys — the legacy shape predating `i:`/`f:` (still
+    # accepted on read; see `ledger._parse_signoff_key`).
     st.signoffs = {"TV": "yes", "Promotion": "no", "Display": ""}
-    assert signoff_reject_l3(st) == {"promotion"}, signoff_reject_l3(st)
+    assert signoff_denied(st)[1] == {"promotion"}, signoff_denied(st)[1]
 
 
 def test_verdict_is_not_read_from_the_artifact_body() -> None:
@@ -41,10 +43,10 @@ def test_verdict_is_not_read_from_the_artifact_body() -> None:
         id="a-business-validation", name="BV", taskRef="2.3", type="report", stage="s2",
         format="validation", body={"groups": [{"l3": "TV", "signoff": "no"}]},
         version=1, state="confirmed", producedByAgent="data", producedAtTick=0))
-    assert signoff_reject_l3(st) == set(), "the body must not drive the ledger"
+    assert signoff_denied(st)[1] == set(), "the body must not drive the ledger"
 
     st.signoffs = {"TV": "no"}
-    assert signoff_reject_l3(st) == {"tv"}
+    assert signoff_denied(st)[1] == {"tv"}
 
 
 def test_a_rejected_factor_is_inherited_downstream() -> None:

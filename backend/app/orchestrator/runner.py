@@ -33,7 +33,18 @@ async def ensure_recommendation(eng: Engine, st: ProjectState, decision_id: str)
         return
     ev_ids = [e.artifact_id for e in dr.evidence]
     ctx = artifact_text(st, ev_ids)
-    findings = st.findings.get(task_def["id"], [])
+    # Gather findings from the decision's own task AND its upstream
+    # dependencies — a gate's evidence is often filed under the task that
+    # produced it, not the gate task itself. d-2.1 belongs to 2.1d, which has
+    # no handler and so never has findings of its own; the coverage finding
+    # that actually grounds this recommendation is filed under 2.1.
+    seen_texts: set[str] = set()
+    findings = []
+    for tid in [task_def["id"], *task_def.get("depends_on", [])]:
+        for f in st.findings.get(tid, []):
+            if f.text not in seen_texts:
+                seen_texts.add(f.text)
+                findings.append(f)
     finding_text = "\n".join(f"- {f.text}" for f in findings)
     opts = "\n".join(f"- {o['id']}: {o['label']} ({o.get('consequence','')})"
                      for o in task_def["decision"].get("options", []))

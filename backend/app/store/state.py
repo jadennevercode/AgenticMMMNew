@@ -215,6 +215,14 @@ def heal_state(st: ProjectState) -> ProjectState:
             and st.tasks.get("1.4") is not None and st.tasks["1.4"].status == "done"):
         st.tasks["1.4b"].status = "done"
         st.tasks["1.4b"].progress = 100.0
+    # Same idea for the new 2.1d mapping-review gate, which sits between 2.1
+    # and 2.2. On a project that already finished 2.2 before this gate
+    # existed, mark the freshly back-filled 2.1d as done so a completed run
+    # isn't reopened at a mid-S2 human gate.
+    if ("2.1d" not in pre_existing and "2.1d" in st.tasks
+            and st.tasks.get("2.2") is not None and st.tasks["2.2"].status == "done"):
+        st.tasks["2.1d"].status = "done"
+        st.tasks["2.1d"].progress = 100.0
     for did, dr in template.decisions.items():
         st.decisions.setdefault(did, dr)
     for aid, ar in template.assignments.items():

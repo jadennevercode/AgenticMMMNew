@@ -474,7 +474,8 @@ StatDisposition = Literal["include", "review", "drop"]
 class StatScoreRow(CamelModel):
     """One factor-tree indicator scored on the 2.33 statistical tests.
 
-    Raw stats (cv/pearson/vif) plus their 0/0.5/1/2 band scores; Total = sum.
+    Raw stats (cv/pearson/vif) plus their 0/0.5/1 band scores; Total = the
+    PRODUCT of the three bands (a single failing test zeroes it), not a sum.
     Verdict follows the KB thresholds; disposition is the human's keep decision.
     """
     id: str
@@ -489,7 +490,7 @@ class StatScoreRow(CamelModel):
     cv_score: float = Field(default=0.0, alias="cvScore")
     pearson_score: float = Field(default=0.0, alias="pearsonScore")
     vif_score: float = Field(default=0.0, alias="vifScore")
-    total: float = 0.0             # cv_score + pearson_score + vif_score
+    total: float = 0.0             # cv_score * pearson_score * vif_score
     auto_verdict: str = Field(default="", alias="autoVerdict")  # Good|Acceptable|unconsiderable
     disposition: StatDisposition = "include"
     # The AI's case for or against this indicator, grounded in the stats above —

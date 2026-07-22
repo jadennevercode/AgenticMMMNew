@@ -115,6 +115,23 @@ def test_legacy_l3_signoff_still_rejects_the_whole_factor() -> None:
     assert not hit.adopted and hit.rejected_at == "signoff"
 
 
+def test_signoff_key_shape_is_explicit_not_inferred_from_a_pipe() -> None:
+    """`signoff_key` writes the `i:` shape; a metric name that itself contains
+    a '|' must still round-trip as the SAME indicator pair, not be misread as
+    a factor — the whole reason the key carries an explicit prefix instead of
+    being told apart from a bare-L3 key by the mere presence of '|'."""
+    from app.agents.ledger import signoff_denied, signoff_key
+
+    key = signoff_key("Digital", "Search | Brand")
+    assert key.startswith("i:")
+
+    st = _state()
+    st.signoffs = {key: "no"}
+    pairs, l3s = signoff_denied(st)
+    assert ("digital", "search | brand") in pairs
+    assert l3s == set()
+
+
 def test_selection_layer_rejects_unticked_variables() -> None:
     st = _state()
     rows = indicator_ledger(st)

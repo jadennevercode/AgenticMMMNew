@@ -814,6 +814,12 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
     model, inherited by every later ledger layer. It therefore lives on
     ProjectState — the artifact body is rewritten each time 2.3 re-runs, so a
     verdict stored there could not survive.
+
+    A project saved before sign-off became indicator-granular can carry a
+    legacy whole-factor verdict (``ledger.stale_factor_keys``). Writing or
+    clearing at a finer grain here always clears that legacy key for the same
+    L3 too — the human has now spoken at a finer grain, so the coarse legacy
+    verdict must not keep silently overriding them.
     """
     from app.agents import ledger
 
@@ -822,13 +828,22 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
         raise HTTPException(422, "verdict must be 'yes', 'no' or ''")
     st = _require_state(project_id)
 
+    stale_l3s: set[str] = set()
     if body.l4 or body.indicator:
         keys = [ledger.signoff_key(body.l4, body.indicator)]
+        target_l4 = body.l4.strip().lower()
+        target_ind = body.indicator.strip().lower()
+        row = next((r for r in ledger.indicator_ledger(st)
+                    if r.l4.strip().lower() == target_l4
+                    and r.indicator.strip().lower() == target_ind), None)
+        if row is not None and row.l3:
+            stale_l3s.add(row.l3)
     elif body.l3:
         target = body.l3.strip().lower()
         rows = ledger.indicator_ledger(st)
         keys = [ledger.signoff_key(r.l4, r.indicator) for r in rows
                 if r.l3.strip().lower() == target]
+        stale_l3s.add(body.l3)
     else:
         raise HTTPException(422, "supply l4+indicator, or l3")
 
@@ -837,6 +852,9 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
             st.signoffs[key] = verdict
         else:
             st.signoffs.pop(key, None)
+    for l3 in stale_l3s:
+        for stale_key in ledger.stale_factor_keys(st, l3):
+            st.signoffs.pop(stale_key, None)
 
     # Re-render the deck so the artifact and the ledger agree immediately.
     if st.artifact("a-business-validation") is not None:
