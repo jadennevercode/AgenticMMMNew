@@ -87,6 +87,9 @@ class ModelFrame:
         meta: per-column provenance (original metric label, metric_type, l1).
         y_metric: the source metric label chosen as the response.
         y_metric_type: its metric_type — decides whether Y is money (ROI unit).
+        l4_spend: per-L4 Spending series (norm_l4 -> monthly Series), aligned
+            to the frame's index. ROI *denominators* only.
+        l4_spend_meta: norm_l4 -> the metric labels summed into that series.
     """
     model_object: str
     frame: pd.DataFrame
@@ -96,6 +99,13 @@ class ModelFrame:
     meta: dict[str, dict] = field(default_factory=dict)
     y_metric: str = ""
     y_metric_type: str = ""
+    # Per-L4 Spending series (norm_l4 -> monthly Series), aligned to the frame's
+    # index. These are ROI *denominators* only: they never enter the design
+    # matrix, so an L4 represented in the model by an exposure metric still has
+    # a real spend to divide by. `l4_spend_meta` records which metric labels
+    # were summed into each series so the UI can explain the denominator.
+    l4_spend: dict[str, pd.Series] = field(default_factory=dict)
+    l4_spend_meta: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def n_obs(self) -> int:
@@ -372,6 +382,24 @@ def build_model_frame(
         keep_mask = drv["metric"].astype("string").map(_norm).isin(include)
         drv = drv[keep_mask]
 
+    # --- Per-L4 Spending series (ROI denominators) -------------------------
+    # Collected from the object's rows BEFORE exclusions and the include filter:
+    # a spend metric that is not a model variable (or was dropped upstream) is
+    # still the honest denominator for its L4. Not added to the design matrix.
+    l4_spend: dict[str, pd.Series] = {}
+    l4_spend_meta: dict[str, list[str]] = {}
+    spend_rows = obj[[_is_spend(mt, mv) for mt, mv in
+                      zip(obj["metric_type"], obj["metric"])]]
+    if not spend_rows.empty:
+        l4_of = (spend_rows["l4"].astype("string").map(_norm)
+                 if "l4" in spend_rows.columns
+                 else pd.Series("", index=spend_rows.index))
+        for l4v, g in spend_rows.groupby(l4_of):
+            if not l4v:
+                continue
+            l4_spend[str(l4v)] = g.groupby("month")["value"].sum()
+            l4_spend_meta[str(l4v)] = sorted({str(m) for m in g["metric"]})
+
     # Aggregate each metric by month (sum duplicates), build wide columns.
     x_meta: dict[str, dict] = {}
     x_series: dict[str, pd.Series] = {}
@@ -449,4 +477,6 @@ def build_model_frame(
         meta={c: x_meta[c] for c in keep},
         y_metric=y_metric,
         y_metric_type=y_metric_type,
+        l4_spend={k: v.reindex(wide.index).fillna(0.0) for k, v in l4_spend.items()},
+        l4_spend_meta=l4_spend_meta,
     )
