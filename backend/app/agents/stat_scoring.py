@@ -34,6 +34,25 @@ _DISPOSITION_DEFAULT: dict[str, str] = {
     "unconsiderable": "drop",
 }
 
+# Monthly data: a year-over-year difference removes the level, the trend and the
+# seasonality in one step. Both correlation-based tests need this — on raw levels
+# every indicator correlates with the KPI and with every other indicator, because
+# they all ride the same seasonal trend, and the tests measure that instead of the
+# indicator. CV is deliberately NOT differenced: it asks whether the series moves
+# at all, which is a property of the level series.
+DETREND_PERIOD = 12
+
+
+def _yoy(a: np.ndarray, period: int = DETREND_PERIOD) -> np.ndarray:
+    """Year-over-year difference along axis 0.
+
+    Series with no more than ``period`` observations are returned unchanged — a
+    short project should still be screened, just without the seasonal correction.
+    """
+    if a.shape[0] <= period:
+        return a
+    return a[period:] - a[:-period]
+
 
 def _monthly_y(df: pd.DataFrame) -> pd.Series | None:
     """Global monthly KPI (Y) series — the response the indicators are scored against."""
@@ -122,27 +141,50 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
     n = len(cols)
     # The three 2.33 tests, each a registered tool — one explicit call per test,
     # batched over every indicator (see app/tools/registry.py).
-    # VIF is computed once across ALL indicators, at indicator granularity.
-    vifs = traced(
-        eng, st, task_id, "stat.vif", f"{n} indicators × {len(wide)} months",
-        get_tool("stat.vif").run, wide[cols].to_numpy(dtype=float),
-        summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
-                            f"{int(np.nansum(np.asarray(v) > 10))} above 10" if len(v) else "no indicators",
-    )
-    vif_by_col = dict(zip(cols, vifs))
-    # Align each indicator to Y on the shared month index for Pearson.
-    y_aligned = y.reindex(wide.index)
     cvs = traced(
         eng, st, task_id, "stat.cv", f"{n} indicator series",
         get_tool("stat.cv").run, [wide[c].to_numpy(dtype=float) for c in cols],
         summarize=lambda vals: f"CV {min(vals):.2f}–{max(vals):.2f}" if vals else "no indicators",
     )
     cv_by_col = dict(zip(cols, cvs))
+
+    # CV stays on raw levels — see DETREND_PERIOD. The two correlation tests run on
+    # year-over-year differences.
+    detr = _yoy(wide[cols].to_numpy(dtype=float))
+    y_aligned = y.reindex(wide.index)
+    y_detr = _yoy(y_aligned.to_numpy(dtype=float))
+
+    # VIF is grouped by L4. Across all candidates it is not merely noisy but
+    # undefined — p indicators over n months with p >= n makes every column an exact
+    # combination of the others. Within one leaf factor p is 2-7 against n months, so
+    # the standard VIF is identified, and "do this factor's indicators duplicate each
+    # other?" is the question 2.33 actually poses ("同因子多指标时淘汰不达标者").
+    by_l4: dict[str, list[int]] = {}
+    for i, m in enumerate(metas):
+        by_l4.setdefault(m["l4"], []).append(i)
+    group_order = list(by_l4.values())
+    vif_groups = traced(
+        eng, st, task_id, "stat.vif",
+        f"{n} indicators in {len(group_order)} L4 groups × {len(detr)} periods",
+        get_tool("stat.vif").run, [detr[:, idx] for idx in group_order],
+        summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
+                            f"{int(np.nansum(np.asarray(v) >= 5))} at or above 5"
+                            if len(v) else "no indicators",
+    )
+    vif_by_col: dict[str, float] = {}
+    pos = 0
+    for idx in group_order:
+        for i in idx:
+            vif_by_col[cols[i]] = float(vif_groups[pos])
+            pos += 1
+
     rs = traced(
-        eng, st, task_id, "stat.pearson", f"{n} indicators vs KPI ({len(y_aligned)} months)",
-        get_tool("stat.pearson").run, [wide[c] for c in cols], y_aligned,
+        eng, st, task_id, "stat.pearson",
+        f"{n} indicators vs KPI ({len(y_detr)} year-over-year periods)",
+        get_tool("stat.pearson").run,
+        [pd.Series(detr[:, i]) for i in range(len(cols))], pd.Series(y_detr),
         summarize=lambda vals: f"|r| up to {max(abs(v) for v in vals):.2f} · "
-                               f"{sum(1 for v in vals if abs(v) >= 0.5)} at or above 0.5"
+                               f"{sum(1 for v in vals if abs(v) >= 0.3)} at or above 0.3"
                                if vals else "no indicators",
     )
     r_by_col = dict(zip(cols, rs))

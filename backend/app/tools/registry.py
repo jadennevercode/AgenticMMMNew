@@ -69,10 +69,15 @@ def _run_pearson(xs: list, y) -> list[float]:
     return [pearson(x, y) for x in xs]
 
 
-def _run_vif(matrix):
+def _run_vif(matrices: list):
+    """One VIF vector per matrix, concatenated — batched like _run_cv/_run_pearson.
+
+    2.4 calls this once per task run with one matrix per L4 group; the wrapper adds
+    no arithmetic of its own beyond concatenation.
+    """
     from app.agents.data_rules import vif_all
 
-    return vif_all(matrix)
+    return [v for m in matrices for v in vif_all(m)]
 
 
 def _run_ols(df, obj: str, **kwargs):
@@ -317,17 +322,17 @@ _ENTRIES: list[_Entry] = [
 
     _entry(ToolDetail(
         id="stat.vif", name="VIF (Collinearity)", category="statistical",
-        description="Variance inflation factor per indicator, computed once across the whole "
-                    "candidate set — collinear indicators destabilise the regression.",
-        inputSummary="The (months × indicators) matrix of all candidates still in play",
+        description="Variance inflation factor per indicator, computed once per L4 group — "
+                    "collinear indicators destabilise the regression.",
+        inputSummary="One (months × indicators) matrix per L4 group of candidates still in play",
         outputSummary="VIF per indicator → the 0 / 0.5 / 1 / 2 collinearity band",
         wraps="agents.data_rules.vif_all", usedBy=["2.4"],
         scenario=(
-            "Runs inside step 2.4 ONCE across the whole candidate set — this is why rejected "
-            "indicators must be filtered out before the call: a dead indicator's collinearity "
-            "would inflate the VIF of the ones still in play. A VIF at or above 10 drops the "
-            "indicator regardless of how well it scored on CV and Pearson, because high "
-            "collinearity inflates the KB total while meaning the opposite."),
+            "Runs inside step 2.4 once per L4 group — this is why rejected indicators must be "
+            "filtered out before the call: a dead indicator's collinearity would inflate the "
+            "VIF of the ones still in play. A VIF at or above 10 drops the indicator regardless "
+            "of how well it scored on CV and Pearson, because high collinearity inflates the KB "
+            "total while meaning the opposite."),
         method=(
             "Two regimes, both returning one VIF per column. Identified (n > p+1): the exact "
             "VIF_i = [inv(R)]_ii from the column correlation matrix R, equivalent to 1/(1−R²) "
@@ -336,6 +341,8 @@ _ENTRIES: list[_Entry] = [
             "VIF_i = 1/(1 − max_{j≠i} r_ij²) — defined for any p and readable as 'how well the "
             "single most collinear peer explains this indicator'."),
         logic=[
+            "Called once per L4 group: across all candidates VIF is undefined (p >= n), "
+            "while within a leaf factor p is 2-7 against n months and the standard VIF holds.",
             "Fewer than 2 columns → all VIFs are 1.0 (nothing to be collinear with).",
             "Build the column correlation matrix; constant columns are treated as uncorrelated.",
             "n > p + 1 → exact VIF from the inverted correlation matrix (pseudo-inverse on a "

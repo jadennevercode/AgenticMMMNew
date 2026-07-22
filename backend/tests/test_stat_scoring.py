@@ -87,6 +87,42 @@ def test_vif_identified_vs_underdetermined() -> None:
     print("✓ VIF identified + under-determined proxy")
 
 
+def test_yoy_removes_level_trend_and_season() -> None:
+    """A pure seasonal-plus-trend series carries no year-over-year signal beyond its
+    growth — which is exactly the confound that made every indicator correlate."""
+    from app.agents.stat_scoring import _yoy
+
+    t = np.arange(24, dtype=float)
+    season = np.sin(2 * np.pi * t / 12.0)
+    a = 100.0 + 3.0 * t + 10.0 * season          # level + linear trend + seasonality
+    d = _yoy(a)
+    assert d.shape[0] == 12, "24 monthly points yield 12 year-over-year differences"
+    # Trend growth over 12 months is constant (3 * 12) and the seasonal term cancels.
+    assert np.allclose(d, 36.0, atol=1e-9), f"expected a flat 36.0, got {d[:3]}"
+    # Too short to difference → returned unchanged rather than emptied.
+    short = np.arange(8, dtype=float)
+    assert np.array_equal(_yoy(short), short)
+    print("✓ YoY differencing removes level, trend and seasonality")
+
+
+def test_detrending_makes_the_screening_discriminate() -> None:
+    """The regression this task exists to prevent: on raw levels every indicator
+    passed CV and Pearson and failed VIF, so every total was 0 and 2.4 dropped
+    everything. After detrending the verdicts must actually vary."""
+    from app.agents.stat_scoring import build_stat_scorecard
+    from app.store.state import danone_meta, initial_state
+
+    card = build_stat_scorecard(initial_state(danone_meta()))
+    assert card.rows, "the reference dataset must yield scored indicators"
+    verdicts = {r.auto_verdict for r in card.rows}
+    assert len(verdicts) > 1, f"screening must discriminate, got only {verdicts}"
+    assert any(r.total > 0 for r in card.rows), "not every indicator can score zero"
+    vifs = [r.vif for r in card.rows]
+    assert min(vifs) < 5.0, f"detrended VIF should not start at {min(vifs):.1f}"
+    print(f"✓ screening discriminates — verdicts {sorted(verdicts)}, "
+          f"median VIF {float(np.median(vifs)):.2f}")
+
+
 def test_end_to_end_reference() -> None:
     """The scorecard scores every indicator on the real reference dataset."""
     st = ProjectState()  # no project data → reference fallback
@@ -121,5 +157,7 @@ if __name__ == "__main__":
     test_verdict_thresholds()
     test_reference_cv()
     test_vif_identified_vs_underdetermined()
+    test_yoy_removes_level_trend_and_season()
+    test_detrending_makes_the_screening_discriminate()
     test_end_to_end_reference()
     print("\nall statistical-score tests passed")
