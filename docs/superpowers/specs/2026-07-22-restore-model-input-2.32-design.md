@@ -9,7 +9,7 @@
 把 `model input_2.32.xlsx`（入模数据）拆解还原成两组产物：
 
 1. **FactorTree** — L1→L4 + Indicator，带渠道/区域粒度与来源标注，可直接 `PUT /api/projects/{id}/factor-tree`。
-2. **每个 Indicator 的数据** — 两种形态：客户原始态宽表（用于在 Data Engine 里注册数据资产、走完整 transform 流程），与入模态 19 列长表（publish-ready，作为标准答案与回归基线）。
+2. **每个 Indicator 的数据** — 两种形态：客户原始态（按数据源切片、保留明细粒度与脏值，用于在 Data Engine 里注册数据资产、走完整 transform 流程），与入模态 19 列长表（publish-ready，作为标准答案与回归基线）。
 
 产物集中在一个文件夹下，配一个可重跑的生成脚本和一个验证脚本，验证到 OLS 真的能拟合。**不改产品代码。**
 
@@ -23,6 +23,16 @@
 | `D.Data Station` | 23,813 行 × 22 列 | 实际长表：`Task name`·`品牌`·`省份组别`·`渠道类型`·`渠道`·`年`·`月`·`数据源`·`数据类型Level1..Level8`·`METRICS类型`·`METRICS`·`VALUE`，外加 `Variable`·`Variable no.`·`Metric no.` 三列命名元数据。57 个唯一 `Level5`，77 个 `Variable`，119 个 `Metric no.`，时间跨度 202301–202512。 |
 
 其他实测量：29 个 `数据源`、25 个 `Task name`、7 个 `渠道类型`（EC/O2O/MT/TT/AFH/社区团购/WS）、6 个 `省份组别`（National/A/B/C/D/E）、25 个 `METRICS类型`。
+
+### `D.Data Station` 是明细流水表，不是聚合表
+
+用 `(Task name, 品牌, 省份组别, 渠道类型, 渠道, 年, 月, 数据源, Level1..Level8, METRICS类型, METRICS)` 这个**全键**分组，23,813 行只压缩到 20,699 组，其中 1,160 组重复、**1,140 组的取值互不相同**（另有 105 行是整行完全重复）。
+
+例：`ANP spending 微信立减 / MIZONE / A / AFH / 景区、交通、商圈等 / 202409` 这一个格子下有 6 条不同的 `Spending`（970 / 1048.125 / 3955 / 7343.75 / 515.625 / 1243.125）与 6 条不同的 `签约门店数`。这是 6 场活动的明细，不是脏数据。
+
+**结论：这份数据无法在不聚合、不编造记录配对的前提下变成宽表。** 6 条 Spending 与 6 条 签约门店数 之间的一一对应关系源表里没有任何字段支持，任何"明细序号"配对都是凭空造的。
+
+因此 `raw/` **保持明细粒度**（见产物结构）。`curated/` 不受影响 —— 19 列长表天然容纳明细行，`build_model_frame` 在 pivot 时本就按 sum 聚合。
 
 ## 四条还原规则
 
@@ -96,11 +106,13 @@ restored/model-input-2.32/
     factor-tree.xlsx           人看的视图：L1-L4 + Indicator + 渠道 + 区域
                                + origin(planned/data/both) + hasData + rows + monthsCovered
     reconciliation.md          29 条规划无数据 + 21 条有数据未入树，逐条列明
-  raw/                         29 个 workbook，按 数据源 拆，中文宽表
+  raw/                         29 个 workbook，按 数据源 拆，中文列名，明细粒度
     SIA.xlsx  MI.xlsx  Media.xlsx  Trade ANP 线下数据-Sandro.xlsx  ...
                                每个 workbook: sheet = Task name
-                               行 = 月 × (品牌, 省份组别, 渠道类型, 渠道)
-                               列 = 该源的 METRICS（中文原名）
+                               每行 = 一条源记录（保留明细，不聚合、不配对）
+                               列 = 年·月·品牌·省份组别·渠道类型·渠道
+                                    + 数据类型Level1..Level8
+                                    + METRICS类型·METRICS·VALUE（中文原名）
   curated/
     long_table.csv             19 列 canonical 长表，引擎词表，publish-ready
     long_table.xlsx            同上的 Excel 版本
@@ -138,7 +150,7 @@ restored/model-input-2.32/
 2. 读 `D.Data Station`，清洗字符串列（trim、空串归 NA，与 `ingest.dataset.load_model_dataset` 同口径）。
 3. **推导分类映射**：join 2.32 ↔ 2.24 得到 L1 与 `METRICS类型` 的映射。若出现映射冲突（同一业务 L1 对应多个引擎 L1），或出现 join 未覆盖的 L1 取值，**直接报错退出**，不静默套用默认值。
 4. 按规则 1 建因子树（并集，标 origin），输出 `factor-tree.json` / `.xlsx` / `reconciliation.md`。
-5. 按 `数据源` 分组，pivot 成宽表，输出 29 个 raw workbook。
+5. 按 `数据源` 分组、组内按 `Task name` 分 sheet，**原样切片**（不聚合、不 pivot、不清洗脏值），输出 29 个 raw workbook。
 6. 应用规则 2/3/4，输出 19 列 curated 长表 + `taxonomy_map.csv` + `indicators.csv`。
 7. 输出 `qa/profile.md`。
 
@@ -147,7 +159,11 @@ restored/model-input-2.32/
 三条断言，失败即非零退出：
 
 1. **Schema** — `curated/long_table.csv` 的列名与顺序严格等于 `app.ingest.dataset.COLUMN_NAMES`。
-2. **无损** — 把 `raw/` 的 29 个宽表反 pivot 回长表，与源 `D.Data Station` 在 `(dims, metric) → value` 上逐格相等（行序无关）。这是"还原"的字面含义，必须逐格验证而非只比行数。
+2. **无损** — 两条：
+   - `raw/` 的 29 个 sheet 纵向拼回来，与源 `D.Data Station` 的全部 19 个业务列做**多重集相等**（行序无关，保留重复行）。
+   - `curated/long_table.csv` 把引擎词表反向映射回业务词表后，同样与源做多重集相等。
+
+   用多重集而非集合，是因为源表本身含 1,140 组同键异值的明细行与 105 行完全重复行 —— 用去重比较会把这 3,000 多行的丢失掩盖掉。
 3. **可跑通** — `build_model_frame(curated_long_table)` 至少产出一个 model object；该 object 的 Y 被识别（`y_metric` 非空）、drivers 数 > 0；`run_mmm` 能拟合并输出 R² 与 n_obs。输出落 `qa/ols_smoke.txt`。
 
 ## 已知风险
@@ -158,7 +174,8 @@ restored/model-input-2.32/
 | `MAX_DRIVERS=12` 截断 | 77 个 Variable 远超 `pivot.MAX_DRIVERS`，OLS 会按与 Y 的相关性截断驱动因子。 | 验证脚本打印被截掉的 driver 清单，避免"跑通了但悄悄丢了一半因子"。 |
 | Y 跨渠道不同质 | MT 出货 / EC GMV / O2O 箱数 口径不同，跨渠道汇总不可比。 | README 显式写明；默认 Y 由 `_pick_y_metric` 在同一 model object（= channel_type 分组）内选。 |
 | L6–L8 稀疏 | L6 仅 1,633 行非空、L7 4,744、L8 6,695。 | 原样透传到长表，不填补；`profile.md` 报告稀疏度。 |
-| 品牌列有脏值 | `品牌` 含 `'NAB'` 与 `'NAB '`（尾空格）两个值。 | 清洗阶段统一 trim，与 `load_model_dataset` 同口径。 |
+| 品牌列有脏值 | `品牌` 含 `'NAB'` 与 `'NAB '`（尾空格）两个值；`渠道` 含 `'snack store'` 与 `'Snack Store'`。 | `raw/` **保留脏值原样**（这正是 Data Engine 枚举聚类要处理的对象）；`curated/` 统一 trim，与 `load_model_dataset` 同口径。 |
+| raw/ 不是宽表 | 源表是明细流水，做宽表必须聚合或编造记录配对（见上文）。`raw/` 因此是按源切片的明细表。 | Data Engine 的活儿仍然真实：29 份异构文件合并、枚举清洗、词表翻译、类型转换。README 写明为何不是宽表。 |
 
 ## 不在范围内
 
