@@ -227,6 +227,19 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
         findings.append(TaskFinding(
             text=f"Modeling readiness: {problem}", tone="flag",
             evidence=[EvidenceRef(artifactId="a-data-processing")]))
+    # Where the tree is uncovered, not just how much of it. "18 pending" tells the
+    # reviewer nothing; "nothing under 渠道/终端营销 has data" is a decision.
+    gaps: dict[str, int] = {}
+    for r in fmap.rows:
+        if r.status == "pending":
+            key = f"{r.l1} › {r.l2}".strip(" ›")
+            gaps[key] = gaps.get(key, 0) + 1
+    if gaps:
+        top = sorted(gaps.items(), key=lambda kv: -kv[1])[:4]
+        findings.append(TaskFinding(
+            text="Uncovered areas of the factor tree: "
+                 + "; ".join(f"{name} ({n} indicator{'s' if n > 1 else ''})" for name, n in top),
+            evidence=[EvidenceRef(artifactId="a-data-processing")]))
     eng.add_findings(st, task["id"], findings)
 
 

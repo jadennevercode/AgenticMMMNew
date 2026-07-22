@@ -258,6 +258,22 @@ def test_master_table_never_carries_a_rejected_indicator() -> None:
     assert not (cols & rejected), "a dropped indicator must not reach the master table"
 
 
+def test_mapping_decision_gate_exists() -> None:
+    """2.1 resolves the mapping; 2.1d is where the human decides whether to keep
+    building data or move on. 2.2 must sit behind that decision, not behind 2.1."""
+    from app.domain import blueprint as bp
+
+    task = bp.TASK_MAP["2.1d"]
+    dec = task["decision"]
+    assert dec["id"] == "d-2.1"
+    assert [o["id"] for o in dec["options"]] == ["proceed", "continue-data-engine"]
+    assert dec["rework_option_id"] == "continue-data-engine"
+    assert dec["rework_task_id"] == "2.1"
+    assert task["depends_on"] == ["2.1"]
+    assert bp.TASK_MAP["2.2"]["depends_on"] == ["2.1d"]
+    print("✓ mapping decision gate exists")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

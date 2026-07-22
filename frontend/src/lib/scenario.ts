@@ -227,12 +227,34 @@ export const TASKS: TaskBlueprint[] = [
     },
   },
   {
+    id: '2.1d', name: 'Review the data mapping', agent: 'data', stage: 's2', class: 'H',
+    summary: 'Review how much of the factor tree the Data Engine actually covers, then decide whether to keep building data or start scoring what you have.',
+    how: 'The AI summarises the mapping — how many indicators are mapped, which parts of the factor tree have no data at all, and what that costs the model. You either go back to the Data Engine to close the gaps, or proceed to data quality scoring.',
+    basisNote: 'The resolved FactorTree↔DataAssets mapping and the factor tree it covers.',
+    workNote: 'Awaiting the mapping decision.',
+    dependsOn: ['2.1'], duration: 1, produces: [],
+    decision: {
+      id: 'd-2.1', kind: 'choice', title: 'Review the data mapping',
+      question: 'The FactorTree↔DataAssets mapping is resolved. Keep building data in the Data Engine, or proceed to data quality scoring?',
+      evidence: [
+        { artifactId: 'a-data-processing', note: 'Mapping matrix & coverage' },
+        { artifactId: 'a-factor-tree', note: 'The factor tree being mapped' },
+      ],
+      recommendation: 'Proceed — the mapping is resolved; score what is mapped today and revisit gaps in the Data Engine later if the model needs them.',
+      options: [
+        { id: 'proceed', label: 'Proceed to data quality', detail: 'Score the indicators that are mapped today', consequence: 'Ignored factors stay out of the model for this run', recommended: true },
+        { id: 'continue-data-engine', label: 'Continue in the Data Engine', detail: 'Go back and build data for the factors still uncovered', consequence: 'Intake reopens; the mapping gate re-arms and the timeline slips' },
+      ],
+      reworkTaskId: '2.1', reworkOptionId: 'continue-data-engine',
+    },
+  },
+  {
     id: '2.2', name: 'Data Quality Score', agent: 'data', stage: 's2', class: 'A',
     summary: 'The AI scores every L1×L2×L3×L4×metric on the four dimensions (consistency / completeness / granularity / accuracy, each 0 / 0.5 / 1) with a note, grounded in the rubric + computed evidence.',
     how: 'AI applies the standing rubric to the computed data evidence, assigning each dimension 0 / 0.5 / 1; the verdict (weakest dimension governs) is reviewed by a human next.',
     basisNote: '校验标准 + 数据资产证据。',
     workNote: 'AI 逐指标四维评分；Total = 最弱维度。',
-    dependsOn: ['2.1'], duration: 3, produces: ['a-quality-scorecard'],
+    dependsOn: ['2.1d'], duration: 3, produces: ['a-quality-scorecard'],
   },
   {
     id: '2.2d', name: 'Review data quality verdicts', agent: 'data', stage: 's2', class: 'H',
