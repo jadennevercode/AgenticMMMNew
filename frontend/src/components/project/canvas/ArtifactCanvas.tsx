@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useState, type ReactElement } from 'react'
 import { Plus } from 'lucide-react'
 import { useSimStore } from '../../../store/useSimStore'
 import { asDoc, asMasterData, asOlsTree, asReview, asSheet, asSlides } from '../../../lib/artifact-format'
 import { BusinessValidationView } from '../validation/BusinessValidationView'
+import { DataProcessingCanvas } from './DataProcessingCanvas'
 import { MasterDataView } from './MasterDataView'
 import { OlsTreeView } from './OlsTreeView'
 import { MiniMarkdown } from '../../ui/primitives'
@@ -343,8 +344,19 @@ function ReviewView({ inst, editing }: { inst: ArtifactInstance; editing: boolea
   )
 }
 
+/**
+ * Artifacts whose canvas is a purpose-built surface rather than a format renderer.
+ * Keyed by artifact id and applied in BOTH document and edit mode: for the S2
+ * modules the tree IS the document, not an editing affordance layered over one.
+ */
+const ID_CANVASES: Record<string, (inst: ArtifactInstance) => ReactElement> = {
+  'a-data-processing': (inst) => <DataProcessingCanvas inst={inst} />,
+}
+
 /** Dispatch to the renderer for the artifact's format */
 export function ArtifactCanvas({ inst, editing }: { inst: ArtifactInstance; editing: boolean }) {
+  const byId = ID_CANVASES[inst.id]
+  if (byId) return byId(inst)
   switch (inst.format) {
     case 'sheet':
       return <SheetView inst={inst} editing={editing} />
