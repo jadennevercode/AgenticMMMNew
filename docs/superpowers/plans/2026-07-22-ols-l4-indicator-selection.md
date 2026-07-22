@@ -210,7 +210,7 @@ git commit -m "feat(mmm): collect per-L4 spending series on ModelFrame as ROI de
 **Interfaces:**
 - Consumes: `ModelFrame.l4_spend`, `ModelFrame.l4_spend_meta` from Task 1.
 - Produces:
-  - `engine._roi(mf, X, res, price_per_unit) -> tuple[dict[str, float], str, dict[str, str]]` — third element is `roi_denominator_source` per driver column: `"self"` | `"l4_spend:<labels>"` | `"none"`.
+  - `engine._roi(mf, X, res, price_per_unit) -> tuple[dict[str, float], str, dict[str, str], dict[str, float]]` — third element is `roi_denominator_source` per driver column (`"self"` | `"l4_spend:<labels>"` | `"none"`); fourth is `l4_roi` keyed by norm-L4.
   - `MmmModelResult.l4_rollup: dict[str, dict]` — `{norm_l4: {"l4": str, "contribution": float, "roi": float|None, "roiDenominatorSource": str, "indicators": [col names]}}`.
   - `MmmModelResult.meta["roi_denominator_source"]: dict[str, str]`.
 
@@ -316,9 +316,17 @@ def _roi(
     * Y is volume, no price            → ROI stays volume-per-spend; the caller
       must label the unit and must NOT compare it to money ROI benchmarks.
 
-    Returns ``(roi, unit, denominator_source)`` where unit is "revenue/spend" or
-    "volume/spend" and denominator_source maps column → "self" |
-    "l4_spend:<labels>" | "none".
+    Returns ``(roi, unit, denominator_source, l4_roi)``. ``unit`` is
+    "revenue/spend" or "volume/spend"; ``denominator_source`` maps column →
+    "self" | "l4_spend:<labels>" | "none"; ``l4_roi`` maps norm-L4 → the
+    factor-level ratio.
+
+    The factor-level ratio is computed HERE rather than by summing the
+    per-column ratios, because those ratios only add up when they share a
+    denominator. A factor whose columns mix denominators (its own spend column
+    plus a second indicator) would otherwise produce a silently inflated
+    number. Here the whole factor's lift is divided once by the whole factor's
+    spend.
     """
     money = mf.y_is_money
     price = None if money else (price_per_unit if (price_per_unit or 0) > 0 else None)
@@ -326,16 +334,20 @@ def _roi(
 
     roi: dict[str, float] = {}
     source: dict[str, str] = {}
+    l4_num: dict[str, float] = {}
     for c in mf.x_cols:
         incremental = float(res.coef[c] * X[c].to_numpy(dtype=float).sum())
         if price:
             incremental *= float(price)
 
+        l4n = str(mf.meta[c].get("l4", "")).strip().lower()
+        if l4n:
+            l4_num[l4n] = l4_num.get(l4n, 0.0) + incremental
+
         if c in mf.spend_cols:
             spend = float(mf.frame[c].to_numpy(dtype=float).sum())
             src = "self"
         else:
-            l4n = str(mf.meta[c].get("l4", "")).strip().lower()
             series = mf.l4_spend.get(l4n)
             if series is None:
                 source[c] = "none"
@@ -349,7 +361,17 @@ def _roi(
             source[c] = src
         else:
             source[c] = "none"
-    return roi, unit, source
+
+    # Factor-level ratio: one numerator (the factor's whole lift) over one
+    # denominator (the factor's whole spend).
+    l4_roi: dict[str, float] = {}
+    for l4n, num in l4_num.items():
+        series = mf.l4_spend.get(l4n)
+        denom = (float(pd.Series(series).to_numpy(dtype=float).sum())
+                 if series is not None else 0.0)
+        if denom > 0:
+            l4_roi[l4n] = num / denom
+    return roi, unit, source, l4_roi
 ```
 
 - [ ] **Step 4: Add the rollup builder**
@@ -358,17 +380,16 @@ In `backend/app/mmm/engine.py`, insert this function immediately after `_roi`:
 
 ```python
 def _l4_rollup(
-    mf: ModelFrame, contribution: dict[str, float], roi: dict[str, float],
-    roi_source: dict[str, str],
+    mf: ModelFrame, contribution: dict[str, float], roi_source: dict[str, str],
+    l4_roi: dict[str, float],
 ) -> dict[str, dict]:
     """Aggregate per-column results to the L4 (factor) level.
 
-    Contribution sums across the L4's in-model columns; ROI sums the same
-    columns' incremental effect over ONE shared denominator, so summing the
-    per-column ratios is correct only because they share it — a column whose
-    denominator is missing contributes nothing and is recorded as such.
-    Knowledge ranges are maintained per (L4, indicator), so this is the level
-    the review compares against.
+    Contribution sums across the factor's in-model columns — that IS additive,
+    since every share is taken over the same actual Y. ROI is not summed here:
+    it arrives pre-computed from :func:`_roi`, which divides the factor's whole
+    lift by the factor's whole spend exactly once. Knowledge ranges are
+    maintained per (L4, indicator), so this is the level the review compares at.
     """
     out: dict[str, dict] = {}
     for c in mf.x_cols:
@@ -382,13 +403,13 @@ def _l4_rollup(
         })
         entry["indicators"].append(c)
         entry["contribution"] += float(contribution.get(c, 0.0))
-        if c in roi:
-            entry["roi"] = float(roi[c]) if entry["roi"] is None else entry["roi"] + float(roi[c])
-            entry["roiDenominatorSource"] = roi_source.get(c, "none")
-    for entry in out.values():
+        src = roi_source.get(c, "none")
+        if src != "none" and entry["roiDenominatorSource"] == "none":
+            entry["roiDenominatorSource"] = src
+    for l4n, entry in out.items():
         entry["contribution"] = round(entry["contribution"], 6)
-        if entry["roi"] is not None:
-            entry["roi"] = round(entry["roi"], 6)
+        if l4n in l4_roi:
+            entry["roi"] = round(float(l4_roi[l4n]), 6)
         entry["indicators"].sort()
     return out
 ```
@@ -419,8 +440,8 @@ In `backend/app/mmm/engine.py`, in `run_mmm`, replace the line:
 with:
 
 ```python
-    roi, roi_unit, roi_source = _roi(mf, X, res, price)
-    l4_rollup = _l4_rollup(mf, contribution, roi, roi_source)
+    roi, roi_unit, roi_source, l4_roi = _roi(mf, X, res, price)
+    l4_rollup = _l4_rollup(mf, contribution, roi_source, l4_roi)
 ```
 
 In the `return MmmModelResult(...)` call add after `due_to=due_to,`:
@@ -1495,10 +1516,8 @@ def run_selection(st: ProjectState, cfg: OlsConfig, *, eng=None,
     df = model_df(st)
     objects = model_objects(st)
     groups = candidate_groups(st, cfg)
-    idx = build_range_index(
-        getattr(getattr(st, "meta", None), "industry_l1", None) or None,
-        getattr(getattr(st, "meta", None), "industry_l2", None) or None,
-    )
+    industry = getattr(getattr(st, "meta", None), "industry", None)
+    idx = build_range_index(getattr(industry, "l1", None), getattr(industry, "l2", None))
     stats = _stat_index(st)
 
     def _pearson_of(l4: str, metric: str) -> float:
@@ -2096,4 +2115,6 @@ git commit -m "test: cover 2.5s selection in the API smoke test"
 
 **Spec coverage:** §2.2 sweep → Task 3; §2.3 ROI decoupling → Tasks 1-2; §2.4 L4 rollup → Task 2; §3.1 blueprint → Task 5; §3.2 selector module → Task 3; §3.3 tool registration → Task 4; §3.4 domain models → Task 5; §3.5 frontend → Task 8; §3.6 self-validation loop → Task 7. §2.2's optional `verify_pass` is deliberately **not** implemented — it is spec'd as default-off and adds a second full sweep for no current user-visible behaviour (YAGNI); add it only if path dependence is observed in practice.
 
-**Type consistency:** `select_indicators` returns `SelectionResult` with `order` / `groups` / `run_count`; `run_selection` maps it to the `OlsSelection` Pydantic model with `order` / `groups` / `runCount` / `sweptAt`. `CandidateRun.adj_r2` ↔ `OlsSelectionRun.adjR2` ↔ TS `adjR2`. `_roi` returns a 3-tuple everywhere it is called (single call site, in `run_mmm`).
+**Type consistency:** `select_indicators` returns `SelectionResult` with `order` / `groups` / `run_count`; `run_selection` maps it to the `OlsSelection` Pydantic model with `order` / `groups` / `runCount` / `sweptAt`. `CandidateRun.adj_r2` ↔ `OlsSelectionRun.adjR2` ↔ TS `adjR2`. `_roi` returns a 4-tuple and has a single call site, in `run_mmm`.
+
+**Pre-flight corrections applied before execution:** (a) Task 6's `build_range_index` call now reads `st.meta.industry.l1/.l2`, matching the existing call site in `build_ols_review` — the earlier draft read non-existent `industry_l1`/`industry_l2` attributes and would have silently degraded every project to reference-only bands. (b) Task 2's factor-level ROI is computed inside `_roi` from one numerator over one denominator, instead of summing per-column ratios — those ratios only add when they share a denominator, so a factor carrying both its spend column and a second indicator would have reported an inflated ROI.
