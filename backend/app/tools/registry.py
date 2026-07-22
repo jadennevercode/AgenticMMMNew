@@ -256,7 +256,7 @@ _ENTRIES: list[_Entry] = [
         description="Coefficient of variation per the 2.33 rule: min-max scale the series to "
                     "[0,1], then variance / mean. A flat indicator cannot explain movement.",
         inputSummary="One monthly value column per candidate indicator",
-        outputSummary="CV per indicator → the 0 / 0.5 / 1 / 2 volatility band",
+        outputSummary="CV per indicator → the 0 / 0.5 / 1 volatility band",
         wraps="agents.data_rules.reference_cv", usedBy=["2.4"],
         scenario=(
             "Runs inside step 2.4 Statistical Score, once per run, over every indicator still "
@@ -267,18 +267,18 @@ _ENTRIES: list[_Entry] = [
             "This is the workbook's explicit definition — 波动系数CV = 方差/均值 with the data "
             "first scaled to 0–1 — NOT the textbook CV = std/mean. Min-max scaling makes the "
             "measure unit-free so spend in RMB and GRPs are comparable. Empty, constant or "
-            "degenerate series return 0.0."),
+            "degenerate series return 0.0. Runs on the indicator's raw monthly levels — unlike "
+            "Pearson and VIF, which run on year-over-year differenced series."),
         logic=[
             "Drop NaNs, then min-max scale the series to [0,1]. A constant series (max ≤ min) "
             "returns 0 — no volatility to explain anything with.",
             "CV = variance(scaled) ÷ mean(scaled); a non-positive mean returns 0.",
-            "Band: CV ≤ 0.05 → 0 · CV < 0.1 → 0.5 · CV < 0.2 → 1 · otherwise → 2.",
+            "Band: CV ≤ 0.05 → 0 · CV < 0.1 → 0.5 · CV ≥ 0.1 → 1.",
         ],
         params=[
             ["band 0", "CV ≤ 0.05", "Effectively flat — cannot explain KPI movement"],
             ["band 0.5", "0.05 < CV < 0.1", "Low volatility"],
-            ["band 1", "0.1 ≤ CV < 0.2", "Adequate volatility"],
-            ["band 2", "CV ≥ 0.2", "Strong volatility"],
+            ["band 1", "CV ≥ 0.1", "Adequate volatility"],
         ],
     ), _run_cv, "app.agents.data_rules", "reference_cv"),
 
@@ -287,7 +287,7 @@ _ENTRIES: list[_Entry] = [
         description="Signed Pearson r between each indicator and the KPI (Y) on the shared "
                     "month index — the direction and strength of its relationship to sales.",
         inputSummary="Each indicator's monthly series + the aligned monthly KPI series",
-        outputSummary="Signed r per indicator → the 0 / 0.5 / 1 / 2 correlation band",
+        outputSummary="Signed r per indicator → the 0 / 0.5 / 1 correlation band",
         wraps="agents.stat_scoring.pearson", usedBy=["2.4"],
         scenario=(
             "Runs inside step 2.4 next to CV and VIF. The KPI series is the global monthly sum "
@@ -298,19 +298,20 @@ _ENTRIES: list[_Entry] = [
         method=(
             "Standard Pearson r over the months where BOTH series are present. Fewer than 3 "
             "overlapping points, or a zero-variance side, returns 0.0 rather than a spurious "
-            "correlation."),
+            "correlation. Runs on year-over-year differenced series, not raw levels — on raw "
+            "levels every indicator correlates with the KPI, because they all ride the same "
+            "seasonal trend."),
         logic=[
             "Align indicator and KPI on the shared month index; mask out months where either "
             "side is missing.",
             "Fewer than 3 usable months → 0.0. Zero standard deviation on either side → 0.0.",
             "r = corrcoef(x, y); NaN → 0.0.",
-            "Band on |r|: < 0.1 → 0 · < 0.3 → 0.5 · < 0.5 → 1 · otherwise → 2.",
+            "Band on |r|: < 0.1 → 0 · < 0.3 → 0.5 · ≥ 0.3 → 1.",
         ],
         params=[
             ["band 0", "|r| < 0.1", "No usable relationship with the KPI"],
             ["band 0.5", "0.1 ≤ |r| < 0.3", "Weak relationship"],
-            ["band 1", "0.3 ≤ |r| < 0.5", "Moderate relationship"],
-            ["band 2", "|r| ≥ 0.5", "Strong relationship"],
+            ["band 1", "|r| ≥ 0.3", "Moderate or strong relationship"],
             ["MIN_ABS_PEARSON", "0.1", "Below this the 2.5x proposal leaves the X unticked"],
         ],
     ), _run_pearson, "app.agents.stat_scoring", "pearson"),
@@ -321,34 +322,36 @@ _ENTRIES: list[_Entry] = [
                     "candidate set — collinear indicators destabilise the regression.",
         inputSummary="The (months × indicators) matrix of all candidates still in play, "
                     "year-over-year detrended",
-        outputSummary="VIF per indicator → the 0 / 0.5 / 1 / 2 collinearity band",
+        outputSummary="VIF per indicator → the 0 / 0.5 / 1 collinearity band",
         wraps="agents.data_rules.vif_all", usedBy=["2.4"],
         scenario=(
             "Runs inside step 2.4 ONCE across the whole candidate set — this is why rejected "
             "indicators must be filtered out before the call: a dead indicator's collinearity "
-            "would inflate the VIF of the ones still in play. A VIF at or above 10 drops the "
-            "indicator regardless of how well it scored on CV and Pearson, because high "
-            "collinearity inflates the KB total while meaning the opposite."),
+            "would inflate the VIF of the ones still in play. Note the band direction: VIF = 1 "
+            "(no collinearity) is the GOOD end and scores 1, while VIF ≥ 5 scores 0 — and "
+            "because the 2.4 Total is the product of the three bands, that zero drops the "
+            "indicator no matter how well it scored on CV and Pearson."),
         method=(
             "Two regimes, both returning one VIF per column. Identified (n > p+1): the exact "
             "VIF_i = [inv(R)]_ii from the column correlation matrix R, equivalent to 1/(1−R²) "
             "of regressing column i on the rest. Under-determined (p ≥ n), the normal regime "
             "when screening every FactorTree indicator: the pairwise-max proxy "
             "VIF_i = 1/(1 − max_{j≠i} r_ij²) — defined for any p and readable as 'how well the "
-            "single most collinear peer explains this indicator'."),
+            "single most collinear peer explains this indicator'. Like Pearson, runs on "
+            "year-over-year differenced series, not raw levels."),
         logic=[
             "Fewer than 2 columns → all VIFs are 1.0 (nothing to be collinear with).",
             "Build the column correlation matrix; constant columns are treated as uncorrelated.",
             "n > p + 1 → exact VIF from the inverted correlation matrix (pseudo-inverse on a "
             "singular matrix).",
             "p ≥ n → pairwise-max proxy on the squared correlations.",
-            "Floor at 1.0, cap at VIF_MAX. Band: VIF ≤ 1 → 0 · < 5 → 0.5 · < 10 → 1 · ≥ 10 → 2.",
+            "Floor at 1.0, cap at VIF_MAX. Band: VIF ≥ 5 → 0 · 1 < VIF < 5 → 0.5 · VIF ≤ 1 → 1.",
         ],
         params=[
-            ["STAT_SEVERE_VIF", "10.0", "At or above this the indicator drops regardless of Total"],
             ["VIF_MAX", "1000.0", "Display/scoring cap"],
-            ["band 0.5", "1 < VIF < 5", "Mild collinearity"],
-            ["band 1", "5 ≤ VIF < 10", "Moderate collinearity"],
+            ["band 0", "VIF ≥ 5", "Clear collinearity — zeroes the 2.4 Total"],
+            ["band 0.5", "1 < VIF < 5", "Mild collinearity, generally acceptable"],
+            ["band 1", "VIF ≤ 1", "No linear relationship with the other indicators"],
         ],
     ), _run_vif, "app.agents.data_rules", "vif_all"),
 
