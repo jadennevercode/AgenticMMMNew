@@ -32,8 +32,10 @@ from app.agents.quality_scoring import (
     UNUSABLE_MAX,
     FieldContext,
     QualityResult,
+    SeriesEvidence as QualityEvidence,
+    SubScore,
     compute_series_evidence,
-    score_quality,
+    roll_up_quality,
 )
 from app.llm.volcano import LLMError, get_llm
 from app.agents.dataset_cache import model_df, model_objects
@@ -54,6 +56,8 @@ from app.domain.models import (
 from app.mmm import build_model_frame, run_mmm
 from app.orchestrator.engine import Engine
 from app.store.state import ProjectState
+from app.tools import get as get_tool
+from app.tools.tracing import traced
 
 SYS = agent_system("data")
 
@@ -224,6 +228,41 @@ def _field_context(df: pd.DataFrame) -> dict[tuple, FieldContext]:
     return out
 
 
+_QUALITY_TOOLS = ("quality.consistency", "quality.accuracy",
+                  "quality.completeness", "quality.granularity")
+
+
+def _run_quality_tools(eng: Engine, st: ProjectState, task_id: str,
+                       evidences: list[QualityEvidence],
+                       contexts: list[FieldContext]) -> list[list[list[SubScore]]]:
+    """Call the four quality tools, one explicit traced invocation each.
+
+    Returns the subcheck lists per dimension in `_QUALITY_TOOLS` order — the same
+    order `score_quality` concatenates them in, so the rollup is unchanged.
+    """
+    out: list[list[list[SubScore]]] = []
+    for tool_id in _QUALITY_TOOLS:
+        # Completeness is the one dimension that also reads the parent factor's
+        # spend/performance context.
+        args = (evidences, contexts) if tool_id == "quality.completeness" else (evidences,)
+        out.append(traced(
+            eng, st, task_id, tool_id, f"{len(evidences)} metric series",
+            get_tool(tool_id).run, *args,
+            summarize=lambda subs: _quality_tool_summary(subs),
+        ))
+    return out
+
+
+def _quality_tool_summary(per_series: list[list[SubScore]]) -> str:
+    """'avg 0.83 · 4 series scored 0' — what the dimension found across the batch."""
+    scores = [s.score for subs in per_series for s in subs if s.blocking]
+    if not scores:
+        return "no blocking subchecks"
+    zeros = sum(1 for subs in per_series
+                if any(s.score == 0.0 for s in subs if s.blocking))
+    return f"avg {sum(scores) / len(scores):.2f} across {len(scores)} subchecks · {zeros} series scored 0"
+
+
 async def _ai_review_dimensions(rows: list[dict]) -> dict[str, dict]:
     """Have the AI review the four dimension scores + write an English note per
     dimension, grounded in the deterministic subcheck breakdown and the rubric.
@@ -278,17 +317,24 @@ async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
     four dimensions (Excel 2.12). The human reviews the verdicts in 2.2d."""
     df = model_df(st)
     fields = _field_context(df)
-    # 1) deterministic subcheck evidence + baseline dimension scores per series.
-    base: list[tuple[str, dict, QualityResult]] = []
+    # 1) deterministic subcheck evidence, then the four registered quality tools —
+    #    one explicit call each, batched over every series (see app/tools).
+    evidences: list[QualityEvidence] = []
+    contexts: list[FieldContext] = []
+    metas: list[dict] = []
     grouped = df.groupby(["l1", "l2", "l3", "l4", "metric"], dropna=False)
     for i, ((l1, l2, l3, l4, metric), grp) in enumerate(grouped):
         if not str(metric).strip() or str(metric) == "<NA>":
             continue
-        ev = compute_series_evidence(grp)
-        result = score_quality(ev, fields.get((l1, l2, l3, l4), FieldContext(False, True)))
-        rid = f"q-{i}"
-        base.append((rid, {"id": rid, "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
-                           "l4": _s(l4), "indicator": _s(metric)}, result))
+        evidences.append(compute_series_evidence(grp))
+        contexts.append(fields.get((l1, l2, l3, l4), FieldContext(False, True)))
+        metas.append({"id": f"q-{i}", "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
+                      "l4": _s(l4), "indicator": _s(metric)})
+    subs_by_dim = _run_quality_tools(eng, st, task["id"], evidences, contexts)
+    base: list[tuple[str, dict, QualityResult]] = [
+        (meta["id"], meta, roll_up_quality([s for dim in subs_by_dim for s in dim[idx]]))
+        for idx, meta in enumerate(metas)
+    ]
     # 2) AI reviews the dimension scores over the subcheck breakdown (falls back to baseline).
     review_rows = [{**meta,
                     "baseline": {d: getattr(res, d) for d in DIMENSIONS},
@@ -655,7 +701,7 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     row, and the human rules at 2.4d — Good → include, Acceptable → review,
     Unconsiderable / severe VIF → drop.
     """
-    card = build_stat_scorecard(st)
+    card = build_stat_scorecard(st, eng=eng, task_id=task["id"])
     # The AI argues each row from its own numbers; the score itself stays computed.
     ai = await _ai_stat_rationales([
         {"id": r.id, "indicator": f"{r.l4 or r.l3} · {r.indicator}".strip(" ·"),
@@ -758,7 +804,7 @@ async def ols_regression_test(eng: Engine, st: ProjectState, task: dict) -> None
     with per-variable verdicts — flagging out-of-range variables for review.
     ROI is only range-checked when it is a revenue/spend ratio. See
     ``app.agents.ols_review.build_ols_review`` and the ``olsTree`` format."""
-    body, prefit, flagged = build_ols_review(st)
+    body, prefit, flagged = build_ols_review(st, eng=eng, task_id=task["id"])
     eng.produce(st, "a-ols-test", body=body, state="confirmed", agent="data")
     eng.set_analysis(st, "prefit", prefit)
     eng.set_analysis(st, "ols_flagged", flagged)

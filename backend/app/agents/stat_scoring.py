@@ -23,6 +23,8 @@ from app.agents.data_rules import reference_cv, score_statistical, vif_all
 from app.domain.models import StatScoreRow, StatScorecard
 from app.mmm.pivot import _is_y_row, _pick_y_metric
 from app.store.state import ProjectState
+from app.tools import get as get_tool
+from app.tools.tracing import traced
 
 # A disposition default per verdict: keep the good ones, send the middle band to
 # the human, drop the unusable — the human can override any of these on the Canvas.
@@ -86,8 +88,13 @@ def _s(v: object) -> str:
     return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v)
 
 
-def build_stat_scorecard(st: ProjectState) -> StatScorecard:
+def build_stat_scorecard(st: ProjectState, *, eng=None,
+                         task_id: str | None = None) -> StatScorecard:
     """Score the indicators still in play on CV / Pearson / VIF.
+
+    Pass ``eng``/``task_id`` (the 2.4 handler does) to record the three checks as
+    explicit tool invocations. Secondary callers that merely re-derive the card
+    for lookup leave them off, so they don't manufacture phantom invocations.
 
     Indicators an earlier layer already rejected (2.1 mapping, 2.2 quality, 2.3
     sign-off) are not scored at all. That is not just bookkeeping: re-scoring
@@ -112,23 +119,44 @@ def build_stat_scorecard(st: ProjectState) -> StatScorecard:
             return StatScorecard(rows=[])
 
     cols = [m["col"] for m in metas]
+    n = len(cols)
+    # The three 2.33 tests, each a registered tool — one explicit call per test,
+    # batched over every indicator (see app/tools/registry.py).
     # VIF is computed once across ALL indicators, at indicator granularity.
-    vifs = vif_all(wide[cols].to_numpy(dtype=float))
+    vifs = traced(
+        eng, st, task_id, "stat.vif", f"{n} indicators × {len(wide)} months",
+        get_tool("stat.vif").run, wide[cols].to_numpy(dtype=float),
+        summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
+                            f"{int(np.nansum(np.asarray(v) > 10))} above 10" if len(v) else "no indicators",
+    )
     vif_by_col = dict(zip(cols, vifs))
     # Align each indicator to Y on the shared month index for Pearson.
     y_aligned = y.reindex(wide.index)
+    cvs = traced(
+        eng, st, task_id, "stat.cv", f"{n} indicator series",
+        get_tool("stat.cv").run, [wide[c].to_numpy(dtype=float) for c in cols],
+        summarize=lambda vals: f"CV {min(vals):.2f}–{max(vals):.2f}" if vals else "no indicators",
+    )
+    cv_by_col = dict(zip(cols, cvs))
+    rs = traced(
+        eng, st, task_id, "stat.pearson", f"{n} indicators vs KPI ({len(y_aligned)} months)",
+        get_tool("stat.pearson").run, [wide[c] for c in cols], y_aligned,
+        summarize=lambda vals: f"|r| up to {max(abs(v) for v in vals):.2f} · "
+                               f"{sum(1 for v in vals if abs(v) >= 0.5)} at or above 0.5"
+                               if vals else "no indicators",
+    )
+    r_by_col = dict(zip(cols, rs))
 
     rows: list[StatScoreRow] = []
     for m in metas:
         col = m["col"]
-        x = wide[col].to_numpy(dtype=float)
-        cv = reference_cv(x)
-        pearson = _pearson(wide[col], y_aligned)
+        cv = cv_by_col[col]
+        corr = r_by_col[col]
         vif = float(vif_by_col.get(col, 1.0))
-        sc = score_statistical(cv, pearson, vif)
+        sc = score_statistical(cv, corr, vif)
         rows.append(StatScoreRow(
             id=f"s-{col}", l1=m["l1"], l2=m["l2"], l3=m["l3"], l4=m["l4"],
-            indicator=m["indicator"], cv=round(cv, 4), pearson=round(pearson, 4),
+            indicator=m["indicator"], cv=round(cv, 4), pearson=round(corr, 4),
             vif=round(vif, 3), cvScore=sc.cv_score, pearsonScore=sc.pearson_score,
             vifScore=sc.vif_score, total=sc.total, autoVerdict=sc.verdict,
             disposition=_DISPOSITION_DEFAULT.get(sc.verdict, "review"),
@@ -138,7 +166,7 @@ def build_stat_scorecard(st: ProjectState) -> StatScorecard:
     return StatScorecard(rows=rows)
 
 
-def _pearson(x: pd.Series, y: pd.Series) -> float:
+def pearson(x: pd.Series, y: pd.Series) -> float:
     """Signed Pearson r between two aligned month-indexed series (0.0 if undefined)."""
     xv = x.to_numpy(dtype=float)
     yv = y.to_numpy(dtype=float)
@@ -150,6 +178,9 @@ def _pearson(x: pd.Series, y: pd.Series) -> float:
         return 0.0
     r = float(np.corrcoef(xv, yv)[0, 1])
     return 0.0 if np.isnan(r) else r
+
+
+_pearson = pearson  # legacy internal alias
 
 
 def accepted_stat_labels(card: StatScorecard) -> list[str]:

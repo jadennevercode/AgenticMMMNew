@@ -24,6 +24,7 @@ import type {
   StatScorecard,
   TaskFinding,
   TaskRuntime,
+  ToolInvocation,
 } from '../lib/types'
 import { TASKS } from '../lib/scenario'
 import { bodyToMarkdown } from '../lib/artifact-format'
@@ -135,6 +136,7 @@ interface BackendState {
   proposals?: BackendProposal[]
   insights?: BackendInsight[]
   events?: SimEvent[]
+  tool_invocations?: ToolInvocation[]
   ledger?: LedgerEntry[]
   assistant?: AssistantTurn[]
   artifactChats?: Record<string, AssistantTurn[]>
@@ -179,6 +181,8 @@ interface SimStore {
   /** Per-task grounded findings, keyed by task id (from backend) */
   findings: Record<string, TaskFinding[]>
   events: SimEvent[]
+  /** Explicit tool-call trace, newest first (backend `tool_invocations`). */
+  toolInvocations: ToolInvocation[]
   assistant: AssistantTurn[]
   ledger: LedgerEntry[]
   selectedTaskId: string | null
@@ -358,6 +362,7 @@ function mapState(s: BackendState, currentChats: Record<string, AssistantTurn[]>
   if (Array.isArray(s.insights)) patch.insights = s.insights
   if (Array.isArray(s.artifacts)) patch.artifacts = s.artifacts
   if (Array.isArray(s.events)) patch.events = s.events
+  if (Array.isArray(s.tool_invocations)) patch.toolInvocations = s.tool_invocations
   if (Array.isArray(s.ledger)) patch.ledger = s.ledger
   if (Array.isArray(s.assistant)) patch.assistant = s.assistant.length ? s.assistant : [WELCOME]
   if (s.findings) patch.findings = s.findings
@@ -387,6 +392,7 @@ function blankRuntime(): Partial<SimStore> {
     artifactDrafting: null,
     findings: {},
     events: [],
+    toolInvocations: [],
     assistant: [WELCOME],
     ledger: [],
     files: [],
@@ -466,6 +472,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     artifactDrafting: null,
     findings: {},
     events: [],
+    toolInvocations: [],
     assistant: [WELCOME],
     ledger: [],
     files: [],

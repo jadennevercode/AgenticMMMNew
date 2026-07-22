@@ -42,6 +42,8 @@ from app.domain.models import (
 )
 from app.mmm import driver_candidates, run_mmm, y_candidates
 from app.store.state import ProjectState
+from app.tools import get as get_tool
+from app.tools.tracing import traced
 
 # |t| threshold for statistical significance (≈ 5% two-sided at moderate dof).
 SIGNIFICANT_T = 2.0
@@ -241,12 +243,18 @@ def _collect_records(
     st: ProjectState,
     exclude: frozenset[tuple[str, str]],
     cfg: OlsConfig | None = None,
+    *,
+    eng=None,
+    task_id: str | None = None,
 ) -> tuple[list[dict], dict, dict]:
     """Fit each model object; return (object summaries, prefit, per-indicator records).
 
     When ``cfg`` is present the fit honours the human's confirmed setup — the Y
     they chose, the X they ticked, and their transform/control parameters.
     Without it we fall back to the legacy auto-fit so old projects still run.
+
+    ``eng``/``task_id`` record each object's regression as an explicit
+    ``model.ols`` tool invocation; without them the fit runs untraced.
     """
     objects: list[dict] = []
     prefit: dict[str, dict] = {}
@@ -256,9 +264,16 @@ def _collect_records(
     include = selected_x_metrics(cfg)
     params = cfg.params if cfg is not None else None
     for obj in model_objects(st):
+        y_metric = y_metric_for(cfg, obj)
         try:
-            res = run_mmm(df, obj, adstock=0.5, hill_half=1.0, exclude=exclude,
-                          y_metric=y_metric_for(cfg, obj), include=include, params=params)
+            res = traced(
+                eng, st, task_id, "model.ols",
+                f"{obj} · Y={y_metric or 'auto'} · {len(include) if include else 'auto'} X",
+                get_tool("model.ols").run, df, obj,
+                adstock=0.5, hill_half=1.0, exclude=exclude,
+                y_metric=y_metric, include=include, params=params,
+                summarize=lambda r: f"R²={r.r2:.3f} · {int(r.n_obs)} obs · {len(r.drivers)} drivers",
+            )
         except Exception as e:  # noqa: BLE001
             objects.append({
                 "object": obj, "nObs": 0, "drivers": 0, "r2": None, "adjR2": None,
@@ -392,13 +407,16 @@ def _empty_row_fields() -> dict:
     }
 
 
-def build_ols_review(st: ProjectState, *, fit: bool = True) -> tuple[dict, dict, list[dict]]:
+def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
+                     task_id: str | None = None) -> tuple[dict, dict, list[dict]]:
     """Build the 2.5 artifact body, the prefit analysis map, and the flagged list.
 
     Args:
         fit: when False, skip the regression and return the **setup state** — the
             proposal is rendered but nothing is fitted yet (2.5 proposes; 2.5r
             fits once the human has confirmed Y / X / parameters).
+        eng, task_id: supplied by the 2.5r handler so each object's regression is
+            recorded as an explicit ``model.ols`` tool invocation.
 
     Returns ``(body, prefit, flagged)`` where ``body`` is the ``olsTree`` artifact,
     ``prefit[obj] = {r2, mape, baseline_pct, red_flags}``, and ``flagged`` is a list
@@ -423,7 +441,7 @@ def build_ols_review(st: ProjectState, *, fit: bool = True) -> tuple[dict, dict,
                      "they are confirmed."),
         }
         return body, {}, []
-    objects, prefit, records = _collect_records(st, exclude, cfg)
+    objects, prefit, records = _collect_records(st, exclude, cfg, eng=eng, task_id=task_id)
 
     industry = getattr(getattr(st, "meta", None), "industry", None)
     idx = build_range_index(getattr(industry, "l1", None), getattr(industry, "l2", None))

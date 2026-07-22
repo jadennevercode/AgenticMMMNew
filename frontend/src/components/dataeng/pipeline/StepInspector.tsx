@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { Loader2, Plus, Sparkles, Table2, Trash2, X } from 'lucide-react'
+import { Check, Layers, Loader2, PanelRightClose, Plus, Sparkles, Trash2, X } from 'lucide-react'
 import type {
-  AggSpec, DbtPreview, EnumMapEntry, FieldMapEntry, StepKind, TransformStep,
+  AggSpec, ClusterResult, EnumMapEntry, FieldMapEntry, StepKind, TransformStep, ValueCluster,
 } from '../../../lib/types'
 import { Button } from '../../ui/button'
 import { cn } from '../../../lib/cn'
@@ -22,13 +22,13 @@ export interface InspectorProps {
   inputOptions: string[]              // all valid inputs: 'source:<t>' + other step ids
   isOutput: boolean
   targetColumns: string[]             // for enum target select
+  previewColumns: string[]            // columns of the previewed output, for pickers
   onChange: (next: TransformStep) => void
   onDelete: () => void
   onMakeOutput: () => void
-  onPreview: () => void
-  preview: DbtPreview | null
-  previewBusy: boolean
   onSuggestEnum: (field: string, targetColumn: string) => Promise<EnumMapEntry[] | null>
+  onClusterEnum: (field: string) => Promise<ClusterResult | null>
+  onCollapse: () => void
 }
 
 const inputCls = 'w-full rounded-md border border-border bg-background px-2 py-1 text-[11px] outline-none focus:border-primary/60'
@@ -55,6 +55,9 @@ export function StepInspector(props: InspectorProps) {
           )}
           <Button size="icon" variant="ghost" onClick={props.onDelete} aria-label="Delete step">
             <Trash2 className="size-3.5" />
+          </Button>
+          <Button size="icon" variant="ghost" onClick={props.onCollapse} aria-label="Hide step settings">
+            <PanelRightClose className="size-3.5" />
           </Button>
         </div>
       </div>
@@ -107,34 +110,9 @@ export function StepInspector(props: InspectorProps) {
           </label>
         )}
 
-        {/* preview */}
-        <div>
-          <Button size="sm" variant="outline" onClick={props.onPreview} disabled={props.previewBusy}>
-            {props.previewBusy ? <Loader2 className="size-3.5 animate-spin" /> : <Table2 className="size-3.5" />}
-            Preview output
-          </Button>
-          {props.preview && (
-            <div className="mt-2 overflow-hidden rounded-md border border-border">
-              <div className="border-b border-border bg-muted/50 px-2 py-1 text-[10px] text-muted-foreground">
-                {props.preview.rowCount.toLocaleString()} rows
-              </div>
-              <div className="max-h-44 overflow-auto">
-                <table className="w-full border-collapse text-[10px]">
-                  <thead className="sticky top-0 bg-muted/80 text-left text-muted-foreground backdrop-blur">
-                    <tr>{props.preview.columns.map((c) => <th key={c} className="whitespace-nowrap px-2 py-1 font-medium">{c}</th>)}</tr>
-                  </thead>
-                  <tbody>
-                    {props.preview.rows.map((row, ri) => (
-                      <tr key={ri} className="border-t border-border">
-                        {row.map((cell, ci) => <td key={ci} className="whitespace-nowrap px-2 py-0.5 tabular-nums">{cell}</td>)}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </div>
+        <p className="border-t border-border pt-2 text-[10px] leading-relaxed text-muted-foreground">
+          Every edit re-runs the preview on the left against the real rows — no save or build needed.
+        </p>
       </div>
     </div>
   )
@@ -179,38 +157,75 @@ function FieldMapGrid({ step, set }: { step: TransformStep; set: (p: Partial<Tra
 function EnumMapGrid(props: InspectorProps & { set: (p: Partial<TransformStep>) => void }) {
   const { step, set } = props
   const [target, setTarget] = useState(props.targetColumns[0] ?? '')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'suggest' | 'cluster' | null>(null)
+  const [clusters, setClusters] = useState<ClusterResult | null>(null)
   const rows = step.enumMap
   const patch = (i: number, p: Partial<EnumMapEntry>) =>
     set({ enumMap: rows.map((r, idx) => (idx === i ? { ...r, ...p, by: 'human' as const } : r)) })
   const unmapped = rows.filter((r) => !r.canonical).length
+  const columnOptions = props.previewColumns
 
   async function suggest() {
     if (!step.enumField) return
-    setBusy(true)
+    setBusy('suggest')
     try {
       const got = await props.onSuggestEnum(step.enumField, target)
       if (got) set({ enumMap: got })
-    } finally { setBusy(false) }
+    } finally { setBusy(null) }
+  }
+
+  async function findClusters() {
+    if (!step.enumField) return
+    setBusy('cluster')
+    try { setClusters(await props.onClusterEnum(step.enumField)) }
+    finally { setBusy(null) }
+  }
+
+  /** Accept one cluster: every spelling in it maps to the canonical value. */
+  function applyCluster(group: ValueCluster, canonical: string) {
+    const decided = new Map(rows.map((r) => [r.raw, r]))
+    for (const [raw] of group.values) {
+      decided.set(raw, { raw, canonical, confidence: 1, by: 'human' })
+    }
+    set({ enumMap: [...decided.values()] })
+    setClusters((c) => c && { ...c, clusters: c.clusters.filter((g) => g.key !== group.key) })
   }
 
   return (
     <div className="space-y-2">
-      <div className="flex items-end gap-2">
-        <label className="flex-1 space-y-1 text-[10px] font-medium text-muted-foreground">
+      <div className="grid grid-cols-2 gap-2">
+        <label className="space-y-1 text-[10px] font-medium text-muted-foreground">
           FIELD TO STANDARDISE
-          <input className={inputCls} value={step.enumField} onChange={(e) => set({ enumField: e.target.value })} placeholder="raw_channel" />
+          <input className={inputCls} list="preview-columns" value={step.enumField}
+            onChange={(e) => { set({ enumField: e.target.value }); setClusters(null) }}
+            placeholder="raw_channel" />
+          <datalist id="preview-columns">
+            {columnOptions.map((c) => <option key={c} value={c} />)}
+          </datalist>
         </label>
-        <label className="flex-1 space-y-1 text-[10px] font-medium text-muted-foreground">
+        <label className="space-y-1 text-[10px] font-medium text-muted-foreground">
           STANDARD VALUES OF
           <select className={inputCls} value={target} onChange={(e) => setTarget(e.target.value)}>
             {props.targetColumns.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </label>
-        <Button size="sm" variant="outline" onClick={() => void suggest()} disabled={busy || !step.enumField}>
-          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}Suggest
+      </div>
+      <div className="flex gap-2">
+        <Button size="sm" variant="outline" className="flex-1" onClick={() => void suggest()}
+          disabled={!!busy || !step.enumField}>
+          {busy === 'suggest' ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+          AI suggest
+        </Button>
+        <Button size="sm" variant="outline" className="flex-1" onClick={() => void findClusters()}
+          disabled={!!busy || !step.enumField}>
+          {busy === 'cluster' ? <Loader2 className="size-3.5 animate-spin" /> : <Layers className="size-3.5" />}
+          Cluster similar
         </Button>
       </div>
+
+      {clusters && <ClusterReview result={clusters} onApply={applyCluster}
+        onDismiss={(g) => setClusters({ ...clusters, clusters: clusters.clusters.filter((x) => x.key !== g.key) })} />}
+
       {unmapped > 0 && (
         <p className="rounded bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-700">
           {unmapped} value(s) unmapped — fill the canonical value or they pass through unchanged.
@@ -236,6 +251,69 @@ function EnumMapGrid(props: InspectorProps & { set: (p: Partial<TransformStep>) 
       <Button size="sm" variant="ghost" onClick={() => set({ enumMap: [...rows, { raw: '', canonical: '', confidence: 1, by: 'human' }] })}>
         <Plus className="size-3" />Add mapping
       </Button>
+    </div>
+  )
+}
+
+/**
+ * Near-duplicate spellings, grouped into one decision each.
+ *
+ * The grouping is deterministic (key-collision fingerprints, computed over the rows
+ * that actually reach this step) so the proposal is reproducible — but it is still a
+ * proposal: nothing enters the mapping table until a group is accepted here.
+ */
+function ClusterReview({ result, onApply, onDismiss }: {
+  result: ClusterResult
+  onApply: (group: ValueCluster, canonical: string) => void
+  onDismiss: (group: ValueCluster) => void
+}) {
+  const [edited, setEdited] = useState<Record<string, string>>({})
+  if (!result.ok) {
+    return (
+      <p className="rounded bg-rose-500/10 px-2 py-1 text-[10px] text-rose-700">{result.error}</p>
+    )
+  }
+  if (result.clusters.length === 0) {
+    return (
+      <p className="rounded bg-muted px-2 py-1 text-[10px] text-muted-foreground">
+        No near-duplicate spellings among the {result.values.toLocaleString()} distinct values.
+      </p>
+    )
+  }
+  return (
+    <div className="space-y-1.5 rounded-md border border-primary/30 bg-primary/5 p-2">
+      <p className="text-[10px] font-medium text-primary">
+        {result.clusters.length} group(s) of spellings look like the same value
+      </p>
+      {result.clusters.map((g) => {
+        const canonical = edited[g.key] ?? g.suggestion
+        return (
+          <div key={g.key} className="rounded border border-border bg-background p-1.5">
+            <div className="flex flex-wrap items-center gap-1">
+              {g.values.map(([value, n]) => (
+                <span key={value} className="rounded-full bg-secondary px-1.5 py-0.5 font-mono text-[9px]">
+                  {value}<span className="ml-1 tabular-nums text-muted-foreground">{n.toLocaleString()}</span>
+                </span>
+              ))}
+            </div>
+            <div className="mt-1.5 flex items-center gap-1">
+              <span className="text-[10px] text-muted-foreground">→</span>
+              <input
+                className={cn(cellCls, 'min-w-0 flex-1 border-border font-mono')}
+                value={canonical}
+                onChange={(e) => setEdited((m) => ({ ...m, [g.key]: e.target.value }))}
+              />
+              <Button size="sm" variant="ghost" onClick={() => onApply(g, canonical)} disabled={!canonical.trim()}>
+                <Check className="size-3" />Accept
+              </Button>
+              <button type="button" onClick={() => onDismiss(g)}
+                className="text-muted-foreground hover:text-rose-600" aria-label="Dismiss group">
+                <X className="size-3" />
+              </button>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

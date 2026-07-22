@@ -14,6 +14,7 @@ import { AssignmentCard } from '../workbench/AssignmentCard'
 import { Field, RunTimeline, Findings } from '../workbench/TaskTrace'
 import { ArtifactCanvas } from './canvas/ArtifactCanvas'
 import { TaskStepPanel } from './panels/TaskStepPanel'
+import { ToolTrace } from '../tools/ToolTrace'
 import { ProfileEditor } from './ProfileEditor'
 import { FactorTreeEditor } from './FactorTreeEditor'
 import { QualityScorecardEditor } from './QualityScorecardEditor'
@@ -207,6 +208,10 @@ function BuildStep({ task, index, total }: { task: TaskBlueprint; index: number;
             )}
           </div>
         )}
+
+        {/* Which registered tools this step called — shown collapsed too, since a
+            finished step is exactly when you want to see what it actually ran. */}
+        <ToolTrace taskId={task.id} className="mt-2 pl-5" />
       </div>
     </li>
   )

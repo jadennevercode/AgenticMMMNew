@@ -806,6 +806,7 @@ export type SimEventType =
   | 'suggestion'
   | 'finding'
   | 'info'
+  | 'tool'
 
 export interface SimEvent {
   id: number
@@ -814,6 +815,69 @@ export interface SimEvent {
   taskId?: string
   type: SimEventType
   message: string
+}
+
+/* ── Tools ─────────────────────────────────────────────── */
+
+export type ToolCategory = 'quality' | 'statistical' | 'model'
+export type ToolStatus = 'running' | 'ok' | 'error'
+
+/** A registered analysis tool — the catalog entry in the Tools module. */
+export interface ToolSpec {
+  id: string
+  name: string
+  category: ToolCategory
+  description: string
+  inputSummary: string
+  outputSummary: string
+  wraps: string
+  usedBy: string[]
+  version: string
+}
+
+/** Where a tool's implementation lives, plus its real source code. */
+export interface ToolSource {
+  module: string
+  path: string
+  symbol: string
+  line: number
+  code: string
+}
+
+/** One way to reach a tool over the API. */
+export interface ToolApiCall {
+  method: string
+  path: string
+  note: string
+  example: string
+}
+
+/** The full tool page: scenario, method, decision bands, source, API surface. */
+export interface ToolDetail extends ToolSpec {
+  scenario: string
+  method: string
+  logic: string[]
+  /** [name, value, meaning] */
+  params: string[][]
+  source: ToolSource | null
+  api: ToolApiCall[]
+}
+
+/** One explicit tool call recorded while a task ran. */
+export interface ToolInvocation {
+  id: string
+  toolId: string
+  toolName: string
+  category: ToolCategory
+  taskId: string
+  argsSummary: string
+  resultSummary: string
+  status: ToolStatus
+  startedTick: number
+  startedAt: string
+  finishedAt: string
+  durationMs: number | null
+  error: string
 }
 
 /* ── Assistant ─────────────────────────────────────────── */
@@ -1365,6 +1429,44 @@ export interface DbtPreview {
   columns: string[]
   rows: string[][]
   rowCount: number
+}
+
+/** Per-column profile rendered in the preview grid's header. */
+export interface ColumnStat {
+  name: string
+  type: string
+  nullPct: number
+  distinct: number
+  min: string
+  max: string
+  top: [string, number][]   // value counts, categorical columns only
+  histogram: number[]       // equal-width buckets, numeric columns only
+}
+
+/** Sandbox run of the pipeline prefix ending at one step — the editor's fast path. */
+export interface StepPreview {
+  ok: boolean
+  error: string
+  columns: string[]
+  rows: string[][]
+  rowCount: number
+  stats: ColumnStat[]
+}
+
+/** Raw spellings that key-collision clustering judges to be the same value. */
+export interface ValueCluster {
+  key: string
+  method: 'fingerprint' | 'ngram'
+  suggestion: string
+  rows: number
+  values: [string, number][]
+}
+
+export interface ClusterResult {
+  ok: boolean
+  error: string
+  values: number
+  clusters: ValueCluster[]
 }
 
 // ── Transform pipeline (Data Engine) ──

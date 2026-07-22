@@ -2,13 +2,14 @@ import { useRef, useState } from 'react'
 import {
   Download, Eye, FileSpreadsheet, Loader2, RefreshCw, Trash2, Upload,
 } from 'lucide-react'
-import type { DataAsset, DataAssetStatus, DbtPreview } from '../../lib/types'
+import type { DataAsset, DataAssetStatus, StepPreview } from '../../lib/types'
 import { api } from '../../api/client'
 import { useSimStore } from '../../store/useSimStore'
 import { Card } from '../ui/card'
 import { Button } from '../ui/button'
 import { Badge } from '../ui/badge'
 import { cn } from '../../lib/cn'
+import { DataGrid } from './grid/DataGrid'
 import { ReviewPanel } from './ReviewPanel'
 import { TransformPanel } from './pipeline/TransformPanel'
 import { PublishPanel } from './pipeline/PublishPanel'
@@ -38,7 +39,7 @@ export function AssetDetail({ asset }: { asset: DataAsset }) {
   const pid = useSimStore((s) => s.activeProjectId)
   const { reviewDataAsset, uploadRawForAsset, deleteDataAsset } = useSimStore.getState()
   const [step, setStep] = useState<Step>('source')
-  const [rawPrev, setRawPrev] = useState<{ table: string; data: DbtPreview } | null>(null)
+  const [rawPrev, setRawPrev] = useState<{ table: string; data: StepPreview } | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const busy = busyId === asset.id
 
@@ -48,7 +49,9 @@ export function AssetDetail({ asset }: { asset: DataAsset }) {
   async function previewRaw(table: string) {
     if (!pid) return
     try {
-      setRawPrev({ table, data: await api.rawPreview(pid, asset.id, table) })
+      // The same sandbox call the transform screen uses, so a raw table is profiled
+      // exactly like a transformed one.
+      setRawPrev({ table, data: await api.previewPipeline(pid, asset.id, null, `source:${table}`) })
     } catch { setRawPrev(null) }
   }
 
@@ -95,7 +98,10 @@ export function AssetDetail({ asset }: { asset: DataAsset }) {
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto p-5">
+      {/* The transform screen manages its own scrolling so the grid can fill the
+          viewport; every other step is a normal scrolling document. */}
+      <div className={cn('min-h-0 flex-1',
+        step === 'workspace' ? 'flex overflow-hidden p-4' : 'overflow-auto p-5')}>
         {step === 'source' && (
           <div className="space-y-4">
             <Card className="space-y-3 p-4">
@@ -141,26 +147,19 @@ export function AssetDetail({ asset }: { asset: DataAsset }) {
               </Button>
             </Card>
             {rawPrev && (
-              <Card className="overflow-hidden p-0">
-                <div className="flex items-center justify-between border-b border-border px-4 py-2">
-                  <h4 className="text-[13px] font-semibold">Preview · <span className="font-mono text-primary">{rawPrev.table}</span></h4>
-                  <span className="text-[11px] text-muted-foreground">{rawPrev.data.rowCount.toLocaleString()} rows</span>
-                </div>
-                <div className="max-h-72 overflow-auto">
-                  <table className="w-full border-collapse text-[11px]">
-                    <thead className="sticky top-0 bg-muted/80 text-left text-muted-foreground backdrop-blur">
-                      <tr>{rawPrev.data.columns.map((c) => <th key={c} className="whitespace-nowrap px-3 py-1.5 font-medium">{c}</th>)}</tr>
-                    </thead>
-                    <tbody>
-                      {rawPrev.data.rows.map((row, ri) => (
-                        <tr key={ri} className="border-t border-border">
-                          {row.map((cell, ci) => <td key={ci} className="whitespace-nowrap px-3 py-1">{cell}</td>)}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
+              <section className="space-y-1.5">
+                <h4 className="text-[13px] font-semibold">
+                  Preview · <span className="font-mono text-primary">{rawPrev.table}</span>
+                </h4>
+                <DataGrid
+                  className="h-80"
+                  columns={rawPrev.data.columns}
+                  rows={rawPrev.data.rows}
+                  stats={rawPrev.data.stats}
+                  totalRows={rawPrev.data.rowCount}
+                  error={rawPrev.data.ok ? '' : rawPrev.data.error}
+                />
+              </section>
             )}
             {hasSource && (
               <Button onClick={() => { void reviewDataAsset(asset.id); setStep('review') }} disabled={busy}>

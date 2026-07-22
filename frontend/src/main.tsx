@@ -10,6 +10,8 @@ import DecisionsView from './components/decisions/DecisionsView'
 import AssetsView from './components/assets/AssetsView'
 import KnowledgeView from './components/knowledge/KnowledgeView'
 import DataEngineView from './components/dataeng/DataEngineView'
+import ToolsView from './components/tools/ToolsView'
+import ToolDetailView from './components/tools/ToolDetailView'
 import GlobalSettingsView, { ProjectSettingsInShell } from './components/settings/GlobalSettingsView'
 
 const router = createHashRouter([
@@ -25,6 +27,8 @@ const router = createHashRouter([
       { path: 'data', element: <DataEngineView /> },
       { path: 'assets', element: <AssetsView /> },
       { path: 'knowledge', element: <KnowledgeView /> },
+      { path: 'tools', element: <ToolsView /> },
+      { path: 'tools/:toolId', element: <ToolDetailView /> },
       { path: 'settings', element: <ProjectSettingsInShell /> },
     ],
   },

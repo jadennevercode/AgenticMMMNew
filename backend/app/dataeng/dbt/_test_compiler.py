@@ -70,10 +70,10 @@ def test_source_provenance() -> None:
     carries: dict[str, bool] = {}
 
     # raw source with no `source` column → stamped with its file label
-    ref, carry = compiler._input_ref("source:t", {}, prov, carries)
+    ref, carry = compiler._input_ref("source:t", compiler._dbt_ref({}), prov, carries)
     assert "'sales_2023.xlsx' as \"source\"" in ref and carry is True
     # raw source that already has its own `source` column → not double-stamped
-    ref2, carry2 = compiler._input_ref("source:own", {}, prov, carries)
+    ref2, carry2 = compiler._input_ref("source:own", compiler._dbt_ref({}), prov, carries)
     assert "as \"source\"" not in ref2 and carry2 is True
 
     # field_map on a carrying input appends `source` even though it isn't mapped

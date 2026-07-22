@@ -48,6 +48,7 @@ from app.domain.models import (
     TaskFinding,
     TaskRuntime,
     TimeWindow,
+    ToolInvocation,
 )
 
 
@@ -120,6 +121,9 @@ class ProjectState(BaseModel):
     proposals: list[Proposal] = []
     insights: list[Insight] = []
     events: list[SimEvent] = []
+    # Explicit tool-call trace (newest first, capped) — see app/tools/tracing.py.
+    # snake_case with no alias, like `events`: the frontend store reads it as-is.
+    tool_invocations: list[ToolInvocation] = Field(default_factory=list)
     ledger: list[LedgerEntry] = []
     assistant: list[AssistantTurn] = []
     # Per-artifact chat threads for the "ask the AI to change this document" box.

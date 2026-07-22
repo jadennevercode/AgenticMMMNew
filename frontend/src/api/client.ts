@@ -9,6 +9,7 @@ import type {
   ArtifactEditProposal,
   ArtifactInstance,
   DataAsset,
+  ClusterResult,
   DbtPreview,
   DbtWorkspaceInfo,
   EnumMapEntry,
@@ -18,6 +19,7 @@ import type {
   MasterTable,
   MasterTableQuery,
   TargetColumn,
+  StepPreview,
   TransformPipeline,
   DataRequestManifest,
   FactorTree,
@@ -34,6 +36,9 @@ import type {
   StatScorecard,
   TemplateKind,
   TimeWindow,
+  ToolDetail,
+  ToolInvocation,
+  ToolSpec,
   ValidationSeriesRequest,
   ValidationSeriesResponse,
 } from '../lib/types'
@@ -82,6 +87,17 @@ const p = (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}
 export const api = {
   health: () => req<{ ok: boolean; running: boolean }>('/api/health'),
   meta: () => req<BackendMeta>('/api/meta'),
+
+  // ── analysis tools ────────────────────────────────────
+  listTools: () => req<ToolSpec[]>('/api/tools'),
+  toolDetail: (toolId: string) => req<ToolDetail>(`/api/tools/${encodeURIComponent(toolId)}`),
+  listToolInvocations: (projectId: string, opts?: { taskId?: string; toolId?: string }) => {
+    const q = new URLSearchParams()
+    if (opts?.taskId) q.set('taskId', opts.taskId)
+    if (opts?.toolId) q.set('toolId', opts.toolId)
+    const qs = q.toString()
+    return req<ToolInvocation[]>(`${p(projectId)}/tool-invocations${qs ? `?${qs}` : ''}`)
+  },
 
   // ── project registry ──────────────────────────────────
   listProjects: () => req<ProjectListItem[]>('/api/projects'),
@@ -209,6 +225,18 @@ export const api = {
     req<TransformPipeline>(`${p(projectId)}/data-assets/${assetId}/pipeline`),
   putPipeline: (projectId: string, assetId: string, pipe: TransformPipeline) =>
     req<TransformPipeline>(`${p(projectId)}/data-assets/${assetId}/pipeline`, { method: 'PUT', body: JSON.stringify(pipe) }),
+  /** Preview the pipeline as edited — the unsaved pipeline travels with the request. */
+  previewPipeline: (projectId: string, assetId: string, pipeline: TransformPipeline | null,
+                    stepId: string, limit = 200) =>
+    req<StepPreview>(`${p(projectId)}/data-assets/${assetId}/pipeline/preview`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId, limit }),
+    }),
+  /** Group near-duplicate spellings reaching an enum step into one decision each. */
+  clusterEnumValues: (projectId: string, assetId: string, pipeline: TransformPipeline | null,
+                      stepId: string, field: string) =>
+    req<ClusterResult>(`${p(projectId)}/data-assets/${assetId}/pipeline/cluster-enum`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId, field }),
+    }),
   suggestEnumMap: (projectId: string, assetId: string, field: string, targetColumn: string) =>
     req<EnumMapEntry[]>(`${p(projectId)}/data-assets/${assetId}/pipeline/suggest-enum`, { method: 'POST', body: JSON.stringify({ field, targetColumn }) }),
   rawPreview: (projectId: string, assetId: string, table: string, limit = 50) =>

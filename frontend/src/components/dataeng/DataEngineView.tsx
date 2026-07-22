@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BookMarked, Database, Plus, Table2 } from 'lucide-react'
+import { BookMarked, Database, PanelLeftClose, PanelLeftOpen, Plus, Table2 } from 'lucide-react'
 import type { DataAssetStatus } from '../../lib/types'
 import { useSimStore } from '../../store/useSimStore'
 import { Button } from '../ui/button'
@@ -25,6 +25,8 @@ export default function DataEngineView() {
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [view, setView] = useState<EngineView>('assets')
+  // The transform screen wants the width for its grid; the asset list folds to a rail.
+  const [railOpen, setRailOpen] = useState(true)
 
   useEffect(() => {
     void loadDataAssets()
@@ -45,15 +47,28 @@ export default function DataEngineView() {
   return (
     <div className="flex h-[calc(100vh-52px)]">
       {/* ── asset list ── */}
-      <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-card">
+      {!railOpen && (
+        <div className="flex w-11 shrink-0 flex-col items-center gap-2 border-r border-border bg-card py-3">
+          <Button size="icon" variant="ghost" onClick={() => setRailOpen(true)} aria-label="Show asset list">
+            <PanelLeftOpen className="size-4" />
+          </Button>
+          <Database className="size-4 text-primary" />
+        </div>
+      )}
+      <aside className={cn('flex w-72 shrink-0 flex-col border-r border-border bg-card', !railOpen && 'hidden')}>
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
             <Database className="size-4 text-primary" />
             <h1 className="text-sm font-semibold">Data Engine</h1>
           </div>
-          <Button size="icon" variant="ghost" onClick={() => setCreating((v) => !v)} aria-label="New asset">
-            <Plus className="size-4" />
-          </Button>
+          <div className="flex items-center">
+            <Button size="icon" variant="ghost" onClick={() => setCreating((v) => !v)} aria-label="New asset">
+              <Plus className="size-4" />
+            </Button>
+            <Button size="icon" variant="ghost" onClick={() => setRailOpen(false)} aria-label="Hide asset list">
+              <PanelLeftClose className="size-4" />
+            </Button>
+          </div>
         </div>
 
         <div className="flex gap-1 border-b border-border p-2">

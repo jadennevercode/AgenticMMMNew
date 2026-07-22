@@ -15,11 +15,19 @@ is preserved through the column-dropping steps (``field_map`` carries it forward
 ``aggregate`` adds it to the group-by unless the step sets ``merge_sources``). This
 lets a published asset built from several files keep per-row origin, so Business
 Validation can filter a chart down to a single contributing source.
+
+Two back-ends share these SQL templates. :func:`compile_pipeline` emits dbt models
+(``{{ ref }}`` / ``{{ source }}``, enum maps as seeds) for the authoritative build;
+:func:`compile_preview_sql` emits one self-contained ``WITH`` query (plain table
+names, enum maps inlined as ``VALUES``) that the DuckDB sandbox runs directly, so
+the editor can show a step's output without a dbt subprocess. Both walk the same
+step DAG through :func:`_compile_step`, so a preview cannot drift from the build.
 """
 from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.dataeng.duck import sanitize_ident
@@ -74,13 +82,14 @@ def compile_pipeline(pipe: TransformPipeline, mart_name: str,
     prov = _Provenance(enabled=SOURCE_COL in schema_cols,
                        raw_columns=raw_columns or {}, labels=source_labels or {})
     carries: dict[str, bool] = {}  # step id → its output has a `source` column
+    ref_of = _dbt_ref(out.step_models)
 
     for step in order:
         model_name = out.step_models[step.id]
         layer = ("marts" if step.id == output_id
                  else "staging" if all(i.startswith(SOURCE_PREFIX) for i in step.inputs)
                  else "intermediate")
-        expanded = [_input_ref(i, out.step_models, prov, carries) for i in step.inputs]
+        expanded = [_input_ref(i, ref_of, prov, carries) for i in step.inputs]
         refs = [e[0] for e in expanded]
         inputs_carry = [e[1] for e in expanded]
         sql, seed, produces_source = _compile_step(
@@ -103,6 +112,66 @@ def compile_pipeline(pipe: TransformPipeline, mart_name: str,
     return out
 
 
+def compile_preview_sql(pipe: TransformPipeline, upto_step_id: str = "",
+                        target_schema: list[TargetColumn] | None = None,
+                        raw_columns: dict[str, list[str]] | None = None,
+                        source_labels: dict[str, str] | None = None) -> str:
+    """Compile the pipeline *prefix* ending at ``upto_step_id`` into one read-only
+    ``WITH`` query over the registered raw tables.
+
+    Only the target step's ancestors are compiled, so previewing an early step
+    never pays for the branches it does not feed. The result is a single SELECT
+    that :mod:`app.dataeng.duck` can validate and run — the editor's fast path,
+    while ``dbt build`` stays the authoritative one.
+    """
+    steps = {s.id: s for s in pipe.steps}
+    if not steps:
+        raise CompileError("pipeline has no steps")
+    output_id = pipe.output_step or pipe.steps[-1].id
+    target_id = upto_step_id or output_id
+    if target_id not in steps:
+        raise CompileError(f"step {target_id!r} not found")
+
+    needed = _ancestors(steps, target_id)
+    order = [s for s in _topo_order(pipe.steps) if s.id in needed]
+    ctes = {s.id: f"p{i}_{sanitize_ident(s.name or s.kind)}" for i, s in enumerate(order, 1)}
+
+    schema_cols = {c.name for c in (target_schema or [])}
+    prov = _Provenance(enabled=SOURCE_COL in schema_cols,
+                       raw_columns=raw_columns or {}, labels=source_labels or {})
+    carries: dict[str, bool] = {}
+    ref_of = _plain_ref(ctes)
+
+    parts: list[str] = []
+    for step in order:
+        expanded = [_input_ref(i, ref_of, prov, carries) for i in step.inputs]
+        sql, _seed, produces_source = _compile_step(
+            step, [e[0] for e in expanded], ctes[step.id],
+            [e[1] for e in expanded], prov.enabled, inline_seeds=True)
+        carries[step.id] = produces_source
+        if step.id == output_id and "month" in schema_cols:
+            sql = ("select *, strptime(cast(\"month\" as varchar) || '01', '%Y%m%d')::date "
+                   f"as period_date\nfrom (\n{sql}\n)")
+        parts.append(f"{ctes[step.id]} as (\n{sql}\n)")
+    return "with " + ",\n".join(parts) + f"\nselect * from {ctes[target_id]}"
+
+
+def _ancestors(steps: dict[str, TransformStep], target_id: str) -> set[str]:
+    """The target step plus every step it transitively reads from."""
+    seen: set[str] = set()
+    stack = [target_id]
+    while stack:
+        sid = stack.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        step = steps.get(sid)
+        if step is None:
+            raise CompileError(f"step {sid!r} referenced but not defined")
+        stack.extend(i for i in step.inputs if not i.startswith(SOURCE_PREFIX))
+    return seen
+
+
 # ── source provenance ────────────────────────────────────
 @dataclass
 class _Provenance:
@@ -112,15 +181,15 @@ class _Provenance:
     labels: dict[str, str]              # raw table name → human source label (filename)
 
 
-def _input_ref(inp: str, step_models: dict[str, str], prov: _Provenance,
+def _input_ref(inp: str, ref_of: Callable[[str], str], prov: _Provenance,
                carries: dict[str, bool]) -> tuple[str, bool]:
     """Expand one input to (sql ref, does-it-carry-a-source-column).
 
     A raw source is stamped with its origin label unless the raw file already has
     its own ``source`` column; an upstream input carries whatever it produced."""
     if not inp.startswith(SOURCE_PREFIX):
-        return _ref(inp, step_models), carries.get(inp, False)
-    ref = _ref(inp, step_models)
+        return ref_of(inp), carries.get(inp, False)
+    ref = ref_of(inp)
     if not prov.enabled:
         return ref, False
     table = sanitize_ident(inp[len(SOURCE_PREFIX):])
@@ -133,7 +202,7 @@ def _input_ref(inp: str, step_models: dict[str, str], prov: _Provenance,
 
 # ── per-step SQL ─────────────────────────────────────────
 def _compile_step(step: TransformStep, refs: list[str], model_name: str,
-                  inputs_carry: list[bool], prov_on: bool
+                  inputs_carry: list[bool], prov_on: bool, *, inline_seeds: bool = False
                   ) -> tuple[str, tuple[str, str] | None, bool]:
     if not refs and step.kind != "custom_sql":
         raise CompileError(f"step {step.id} ({step.kind}) has no inputs")
@@ -142,7 +211,7 @@ def _compile_step(step: TransformStep, refs: list[str], model_name: str,
     if kind == "field_map":
         return _sql_field_map(step, refs[0], prov_on and carry0)
     if kind == "enum_map":
-        sql, seed = _sql_enum_map(step, refs[0], model_name)
+        sql, seed = _sql_enum_map(step, refs[0], inline=inline_seeds)
         return sql, seed, carry0
     if kind == "join":
         right_has_source = bool(step.join and SOURCE_COL in (step.join.right_columns or []))
@@ -191,26 +260,35 @@ def _sql_field_map(step: TransformStep, ref: str,
     return f"select {', '.join(cols)} from {ref}", None, produces_source
 
 
-def _sql_enum_map(step: TransformStep, ref: str,
-                  model_name: str) -> tuple[str, tuple[str, str]]:
+def _sql_enum_map(step: TransformStep, ref: str, *,
+                  inline: bool = False) -> tuple[str, tuple[str, str] | None]:
+    """The standardising join. The dbt build reads the map from a seed; the preview
+    inlines it as a VALUES list so the query is self-contained."""
     fld = step.enum_field.strip()
     if not fld:
         raise CompileError(f"enum_map step {step.id} has no field")
     rows = [e for e in step.enum_map if e.raw.strip() and e.canonical.strip()]
     if not rows:
         raise CompileError(f"enum_map step {step.id} has no accepted mappings")
+
+    def body(map_ref: str) -> str:
+        return (
+            f'select t.* replace (coalesce(m.canonical, t."{fld}") as "{fld}")\n'
+            f"from {ref} t\n"
+            f'left join {map_ref} m on t."{fld}" = m.raw'
+        )
+
+    if inline:
+        values = ", ".join(f"({_lit(e.raw)}, {_lit(e.canonical)})" for e in rows)
+        return body(f"(select * from (values {values}) as _m(raw, canonical))"), None
+
     seed_name = f"map_{sanitize_ident(step.name or step.id)}"
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["raw", "canonical"])
     for e in rows:
         w.writerow([e.raw, e.canonical])
-    sql = (
-        f'select t.* replace (coalesce(m.canonical, t."{fld}") as "{fld}")\n'
-        f"from {ref} t\n"
-        f'left join {{{{ ref(\'{seed_name}\') }}}} m on t."{fld}" = m.raw'
-    )
-    return sql, (seed_name, buf.getvalue())
+    return body(f"{{{{ ref('{seed_name}') }}}}"), (seed_name, buf.getvalue())
 
 
 def _sql_join(step: TransformStep, refs: list[str]) -> str:
@@ -308,14 +386,33 @@ def _model_name(step: TransformStep, idx: int, used: set[str]) -> str:
     return name
 
 
-def _ref(inp: str, step_models: dict[str, str]) -> str:
-    if inp.startswith(SOURCE_PREFIX):
-        table = sanitize_ident(inp[len(SOURCE_PREFIX):])
-        return f"{{{{ source('raw', '{table}') }}}}"
-    model = step_models.get(inp)
-    if model is None:
-        raise CompileError(f"input {inp!r} does not match any step or source")
-    return f"{{{{ ref('{model}') }}}}"
+def _dbt_ref(step_models: dict[str, str]) -> Callable[[str], str]:
+    """Resolve an input token to a dbt ``{{ source }}`` / ``{{ ref }}``."""
+    def ref(inp: str) -> str:
+        if inp.startswith(SOURCE_PREFIX):
+            return f"{{{{ source('raw', '{sanitize_ident(inp[len(SOURCE_PREFIX):])}') }}}}"
+        model = step_models.get(inp)
+        if model is None:
+            raise CompileError(f"input {inp!r} does not match any step or source")
+        return f"{{{{ ref('{model}') }}}}"
+    return ref
+
+
+def _plain_ref(step_ctes: dict[str, str]) -> Callable[[str], str]:
+    """Resolve an input token to a bare identifier — a registered raw table or an
+    upstream CTE — for the sandbox preview query."""
+    def ref(inp: str) -> str:
+        if inp.startswith(SOURCE_PREFIX):
+            return sanitize_ident(inp[len(SOURCE_PREFIX):])
+        cte = step_ctes.get(inp)
+        if cte is None:
+            raise CompileError(f"input {inp!r} does not match any step or source")
+        return cte
+    return ref
+
+
+def _lit(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _duck_type(cast: str) -> str:

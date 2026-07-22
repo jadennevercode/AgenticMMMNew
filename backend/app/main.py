@@ -47,6 +47,7 @@ from app.orchestrator.runner import run_until_blocked
 from app.store.files import get_files
 from app.store.state import ProjectState, get_store, project_summary
 from app.store.templates import get_templates
+from app.tools import registry as tools
 
 app = FastAPI(title="Agentic MMM Backend", version="2.0.0")
 app.add_middleware(
@@ -88,6 +89,22 @@ async def meta() -> dict:
 @app.get("/api/industries")
 async def industries() -> dict:
     return {"tree": ind.INDUSTRY_TREE}
+
+
+# ── analysis tools (cross-project registry) ──────────────
+@app.get("/api/tools")
+async def list_tools() -> list[dict]:
+    """The tool catalog — every check a task can explicitly call."""
+    return [s.model_dump(by_alias=True) for s in tools.list_specs()]
+
+
+@app.get("/api/tools/{tool_id}")
+async def tool_detail(tool_id: str) -> dict:
+    """One tool's full page: scenario, method, bands, live source, API surface."""
+    try:
+        return tools.detail(tool_id).model_dump(by_alias=True)
+    except KeyError:
+        raise HTTPException(404, "unknown tool") from None
 
 
 # ── knowledge templates (cross-project, editable) ────────
@@ -194,6 +211,17 @@ async def delete_project(project_id: str) -> dict:
 @app.get("/api/projects/{project_id}/state")
 async def state(project_id: str) -> dict:
     return _require_state(project_id).model_dump(by_alias=True)
+
+
+@app.get("/api/projects/{project_id}/tool-invocations")
+async def tool_invocations(project_id: str, taskId: Optional[str] = None,
+                           toolId: Optional[str] = None) -> list[dict]:
+    """This project's tool-call trace, newest first (optionally per task / tool)."""
+    st = _require_state(project_id)
+    items = [v for v in st.tool_invocations
+             if (taskId is None or v.task_id == taskId)
+             and (toolId is None or v.tool_id == toolId)]
+    return [v.model_dump(by_alias=True) for v in items]
 
 
 @app.post("/api/projects/{project_id}/reset")
@@ -465,6 +493,8 @@ async def update_data_asset(project_id: str, asset_id: str, body: UpdateAsset) -
         asset.description = body.description
     if body.sourceFileIds is not None:
         asset.source_file_ids = body.sourceFileIds
+        from app.dataeng import preview
+        preview.invalidate(project_id, asset.id)
     asset_svc.touch(asset)
     get_store().save(project_id)
     return asset.model_dump(by_alias=True)
@@ -559,6 +589,74 @@ async def pipeline_suggest_enum(project_id: str, asset_id: str, body: SuggestEnu
     st, asset = _require_asset(project_id, asset_id)
     entries = await service.suggest_enum_map(st, project_id, asset, body.field, body.targetColumn)
     return [e.model_dump(by_alias=True) for e in entries]
+
+
+class PreviewBody(BaseModel):
+    """Preview the pipeline as it stands in the editor — the pipeline travels with
+    the request so an unsaved edit renders without a save/build round trip."""
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""            # a step id, or 'source:<table>'; '' = the output step
+    limit: int = 200
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/preview")
+async def pipeline_preview(project_id: str, asset_id: str, body: PreviewBody) -> dict:
+    """Run the pipeline prefix ending at one step in the DuckDB sandbox."""
+    from app.dataeng import preview
+    st, asset = _require_asset(project_id, asset_id)
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+    res = preview.preview_step(st, project_id, asset, pipe, body.stepId, limit=body.limit)
+    return {
+        "ok": res.ok, "error": res.error, "columns": res.columns,
+        "rows": res.rows, "rowCount": res.row_count,
+        "stats": [
+            {"name": s.name, "type": s.type, "nullPct": s.null_pct,
+             "distinct": s.distinct, "min": s.min, "max": s.max,
+             "top": [[v, n] for v, n in s.top], "histogram": s.histogram}
+            for s in res.stats
+        ],
+    }
+
+
+class ClusterEnumBody(BaseModel):
+    """Cluster the values reaching an enum_map step, so near-duplicate spellings
+    are reviewed as one decision instead of row by row."""
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""            # the enum_map step (its input is clustered), or 'source:<t>'
+    field: str
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/cluster-enum")
+async def pipeline_cluster_enum(project_id: str, asset_id: str, body: ClusterEnumBody) -> dict:
+    from app.dataeng import cluster, preview
+    st, asset = _require_asset(project_id, asset_id)
+    if not body.field.strip():
+        raise HTTPException(422, "field is required")
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+
+    upstream = body.stepId
+    if not upstream.startswith("source:"):
+        step = next((s for s in (pipe.steps if pipe else []) if s.id == body.stepId), None)
+        if step is None:
+            raise HTTPException(404, f"step {body.stepId!r} not found in the pipeline")
+        if not step.inputs:
+            return {"ok": False, "error": "Connect an input to this step first.",
+                    "values": 0, "clusters": []}
+        upstream = step.inputs[0]
+
+    values, error = preview.column_values(
+        st, project_id, asset, pipe, upstream, body.field.strip())
+    if error:
+        return {"ok": False, "error": error, "values": 0, "clusters": []}
+    clusters = cluster.cluster_values(values)
+    return {
+        "ok": True, "error": "", "values": len(values),
+        "clusters": [
+            {"key": c.key, "method": c.method, "suggestion": c.suggestion,
+             "rows": c.rows, "values": [[v, n] for v, n in c.values]}
+            for c in clusters
+        ],
+    }
 
 
 class WriteModel(BaseModel):

@@ -1,4 +1,4 @@
-import { CheckCircle2, ChevronRight, CircleDot, FileText, Lightbulb, Sparkles, TriangleAlert } from 'lucide-react'
+import { CheckCircle2, ChevronRight, CircleDot, FileText, Lightbulb, Sparkles, TriangleAlert, Wrench } from 'lucide-react'
 import { useSimStore } from '../../store/useSimStore'
 import { AGENT_COLOR } from '../../lib/profiles'
 import { cn } from '../../lib/cn'
@@ -13,6 +13,7 @@ const EVENT_ICON: Record<SimEvent['type'], typeof FileText> = {
   suggestion: Sparkles,
   finding: Lightbulb,
   info: ChevronRight,
+  tool: Wrench,
 }
 
 export function ActivityPanel() {

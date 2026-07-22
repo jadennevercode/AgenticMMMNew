@@ -76,18 +76,31 @@ def _strip_sql(sql: str) -> str:
     return no_line.strip().rstrip(";").strip()
 
 
+def _blank_literals(sql: str) -> str:
+    """Blank out string literals and quoted identifiers before the token scan.
+
+    Keywords inside quotes are inert data or a column name, never a statement —
+    scanning them rejects legitimate queries (a source file named ``sales copy.xlsx``
+    stamped as provenance, an enum value ``Load``, a column named ``copy``).
+    Semicolons inside quotes are neutralised the same way, so the single-statement
+    check stays sound.
+    """
+    return re.sub(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"", "''", sql)
+
+
 def validate_sql(sql: str) -> str:
     """Validate user SQL is a single read-only query. Returns the cleaned SQL.
 
     Raises SqlSafetyError on empty input, multiple statements, a non-SELECT/WITH
-    leading keyword, or any banned token.
+    leading keyword, or any banned token outside a string literal.
     """
     cleaned = _strip_sql(sql or "")
     if not cleaned:
         raise SqlSafetyError("SQL is empty")
-    if ";" in cleaned:
+    scanned = _blank_literals(cleaned)
+    if ";" in scanned:
         raise SqlSafetyError("only a single statement is allowed")
-    lowered = cleaned.lower()
+    lowered = scanned.lower()
     if not lowered.startswith(_ALLOWED_PREFIXES):
         raise SqlSafetyError("only SELECT / WITH queries are allowed")
     # Token check on word boundaries so 'create' doesn't trip on 'created_at'.
@@ -175,6 +188,174 @@ def run_clean_sql(
         return RunResult(ok=False, error=f"SQL error: {e}")
     finally:
         con.close()
+
+
+# ── editor preview (pipeline prefix → grid + column profile) ──
+# Header-level profiling the grid renders above each column. Caps keep the extra
+# passes cheap: a column is only value-counted when it is genuinely categorical,
+# and only the first few numeric columns get a histogram.
+TOP_VALUES = 6          # value-counts kept per categorical column
+TOP_MAX_DISTINCT = 40   # a column with more distinct values is not categorical
+HIST_BUCKETS = 10
+HIST_MAX_COLUMNS = 16   # numeric columns that get a histogram
+
+
+@dataclass
+class ColumnStat:
+    """Profile of one preview column — what the grid header renders."""
+    name: str
+    type: str = ""
+    null_pct: float = 0.0
+    distinct: int = 0
+    min: str = ""
+    max: str = ""
+    top: list[tuple[str, int]] = field(default_factory=list)
+    histogram: list[int] = field(default_factory=list)
+
+
+@dataclass
+class PreviewResult:
+    ok: bool = False
+    error: str = ""
+    columns: list[str] = field(default_factory=list)
+    row_count: int = 0
+    rows: list[list[str]] = field(default_factory=list)
+    stats: list[ColumnStat] = field(default_factory=list)
+
+
+_NUMERIC_TYPES = ("tinyint", "smallint", "integer", "bigint", "hugeint",
+                  "float", "double", "decimal", "real")
+
+
+def run_preview(sql: str, tables: dict[str, pd.DataFrame], *,
+                limit: int = 200, timeout_s: float = DEFAULT_TIMEOUT_S,
+                with_stats: bool = True) -> PreviewResult:
+    """Run a read-only query and return grid rows plus a per-column profile.
+
+    Unlike :func:`run_clean_sql` this never materialises the full result to the
+    caller — it keeps it in the sandbox, returns `limit` rows for display, and
+    profiles the whole (row-capped) output so the header stats describe the real
+    data rather than the visible page.
+    """
+    try:
+        cleaned = validate_sql(sql)
+    except SqlSafetyError as e:
+        return PreviewResult(ok=False, error=str(e))
+
+    con = _new_connection()
+    try:
+        for name, df in tables.items():
+            con.register(sanitize_ident(name), df)
+        _run_with_timeout(
+            con, f"CREATE TEMP TABLE __preview AS (\n{cleaned}\n)", timeout_s)
+
+        row_count = int(con.execute("SELECT count(*) FROM __preview").fetchone()[0])
+        head = con.execute(f"SELECT * FROM __preview LIMIT {int(limit)}").fetch_df()
+        columns = [str(c) for c in head.columns]
+        stats = (_profile(con, columns, row_count) if with_stats else [])
+        return PreviewResult(ok=True, columns=columns, row_count=row_count,
+                             rows=_to_preview(head), stats=stats)
+    except duckdb.InterruptException:
+        return PreviewResult(ok=False, error=f"query exceeded {timeout_s:.0f}s timeout")
+    except duckdb.Error as e:
+        return PreviewResult(ok=False, error=f"SQL error: {e}")
+    finally:
+        con.close()
+
+
+def _profile(con: duckdb.DuckDBPyConnection, columns: list[str],
+             row_count: int) -> list[ColumnStat]:
+    """Column stats for the grid header, built on DuckDB's own SUMMARIZE."""
+    try:
+        summary = con.execute("SUMMARIZE __preview").fetch_df()
+    except duckdb.Error:
+        return [ColumnStat(name=c) for c in columns]
+
+    def cell(row: pd.Series, key: str) -> str:
+        v = row.get(key)
+        return "" if v is None or pd.isna(v) else str(v)
+
+    by_name: dict[str, ColumnStat] = {}
+    for _, row in summary.iterrows():
+        name = str(row.get("column_name"))
+        try:
+            null_pct = float(cell(row, "null_percentage") or 0.0)
+        except ValueError:
+            null_pct = 0.0
+        try:
+            distinct = int(float(cell(row, "approx_unique") or 0))
+        except ValueError:
+            distinct = 0
+        by_name[name] = ColumnStat(
+            name=name, type=cell(row, "column_type").lower(),
+            null_pct=round(null_pct, 2), distinct=distinct,
+            min=cell(row, "min"), max=cell(row, "max"))
+
+    stats = [by_name.get(c, ColumnStat(name=c)) for c in columns]
+    if row_count > 0:
+        _add_top_values(con, stats)
+        _add_histograms(con, stats)
+    return stats
+
+
+def _add_top_values(con: duckdb.DuckDBPyConnection, stats: list[ColumnStat]) -> None:
+    """Value counts for categorical columns — the enum-shaped ones a cleaning
+    step is most likely to target."""
+    for st in stats:
+        if not (0 < st.distinct <= TOP_MAX_DISTINCT):
+            continue
+        if any(st.type.startswith(t) for t in _NUMERIC_TYPES):
+            continue
+        col = st.name.replace('"', '""')
+        try:
+            rows = con.execute(
+                f'SELECT cast("{col}" as varchar), count(*) FROM __preview '
+                f'WHERE "{col}" IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT {TOP_VALUES}'
+            ).fetchall()
+        except duckdb.Error:
+            continue
+        st.top = [(str(v), int(n)) for v, n in rows]
+
+
+def _add_histograms(con: duckdb.DuckDBPyConnection, stats: list[ColumnStat]) -> None:
+    """Equal-width distributions for numeric columns, in one round trip."""
+    parts: list[str] = []
+    targets: list[ColumnStat] = []
+    for st in stats:
+        if len(targets) >= HIST_MAX_COLUMNS:
+            break
+        if not any(st.type.startswith(t) for t in _NUMERIC_TYPES):
+            continue
+        try:
+            lo, hi = float(st.min), float(st.max)
+        except ValueError:
+            continue
+        width = (hi - lo) / HIST_BUCKETS
+        col = st.name.replace('"', '""')
+        bucket = ("0" if width <= 0 else
+                  f'least({HIST_BUCKETS - 1}, greatest(0, cast(floor((cast("{col}" '
+                  f'as double) - {lo}) / {width}) as integer)))')
+        parts.append(
+            f'SELECT {_quote(st.name)} as c, {bucket} as b, count(*) as n '
+            f'FROM __preview WHERE "{col}" IS NOT NULL GROUP BY 2')
+        targets.append(st)
+    if not parts:
+        return
+    try:
+        rows = con.execute(" UNION ALL ".join(parts)).fetchall()
+    except duckdb.Error:
+        return
+    buckets: dict[str, list[int]] = {st.name: [0] * HIST_BUCKETS for st in targets}
+    for name, b, n in rows:
+        idx = int(b)
+        if 0 <= idx < HIST_BUCKETS:
+            buckets[str(name)][idx] = int(n)
+    for st in targets:
+        st.histogram = buckets[st.name]
+
+
+def _quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _to_preview(df: pd.DataFrame) -> list[list[str]]:

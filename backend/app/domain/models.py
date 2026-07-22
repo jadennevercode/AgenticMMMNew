@@ -32,8 +32,10 @@ AssignmentKind = Literal["upload", "form", "export"]
 AssignmentStatus = Literal["idle", "open", "submitted"]
 SimEventType = Literal[
     "task_start", "task_done", "artifact", "decision_open",
-    "decision_resolved", "suggestion", "finding", "info",
+    "decision_resolved", "suggestion", "finding", "info", "tool",
 ]
+ToolCategory = Literal["quality", "statistical", "model"]
+ToolStatus = Literal["running", "ok", "error"]
 
 
 class CamelModel(BaseModel):
@@ -259,6 +261,68 @@ class SimEvent(CamelModel):
     task_id: Optional[str] = Field(default=None, alias="taskId")
     type: SimEventType
     message: str
+
+
+class ToolSpec(CamelModel):
+    """A registered analysis tool — the catalog entry shown in the Tools module."""
+
+    id: str
+    name: str
+    category: ToolCategory
+    description: str
+    input_summary: str = Field(alias="inputSummary")
+    output_summary: str = Field(alias="outputSummary")
+    wraps: str            # the implementing function, e.g. "quality_scoring._consistency_subs"
+    used_by: list[str] = Field(default_factory=list, alias="usedBy")  # task ids
+    version: str = "1.0"
+
+
+class ToolSource(CamelModel):
+    """Where the implementation lives — and the code itself, read at request time."""
+
+    module: str        # dotted module, e.g. app.agents.quality_scoring
+    path: str          # repo-relative file, e.g. backend/app/agents/quality_scoring.py
+    symbol: str        # the implementing function
+    line: int = 0      # 1-indexed definition line
+    code: str = ""     # the function's real source (inspect.getsource)
+
+
+class ToolApiCall(CamelModel):
+    """One way to reach this tool over the API."""
+
+    method: str
+    path: str
+    note: str
+    example: str = ""
+
+
+class ToolDetail(ToolSpec):
+    """The full tool page: when it runs, how it computes, the bands, the code, the API."""
+
+    scenario: str = ""                 # where it sits in the workflow and why
+    method: str = ""                   # the calculation, stated precisely
+    logic: list[str] = Field(default_factory=list)          # ordered decision rules
+    params: list[list[str]] = Field(default_factory=list)   # [name, value, meaning]
+    source: Optional[ToolSource] = None
+    api: list[ToolApiCall] = Field(default_factory=list)
+
+
+class ToolInvocation(CamelModel):
+    """One explicit tool call recorded while a task ran."""
+
+    id: str
+    tool_id: str = Field(alias="toolId")
+    tool_name: str = Field(alias="toolName")
+    category: ToolCategory
+    task_id: str = Field(alias="taskId")
+    args_summary: str = Field(default="", alias="argsSummary")
+    result_summary: str = Field(default="", alias="resultSummary")
+    status: ToolStatus = "running"
+    started_tick: int = Field(default=0, alias="startedTick")
+    started_at: str = Field(default="", alias="startedAt")
+    finished_at: str = Field(default="", alias="finishedAt")
+    duration_ms: Optional[float] = Field(default=None, alias="durationMs")
+    error: str = ""
 
 
 class LedgerEntry(CamelModel):

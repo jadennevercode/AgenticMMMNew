@@ -347,6 +347,31 @@ def test_model_service_config() -> None:
         ms._CACHE = None
 
 
+def test_tool_registry_and_trace() -> None:
+    """The 8 tools are registered, and a traced call lands on the project state."""
+    from app.domain import blueprint as bp
+    from app.tools import get as get_tool, list_specs
+    from app.tools.tracing import tool_run
+
+    specs = list_specs()
+    assert len(specs) == 8, len(specs)
+    assert {s.category for s in specs} == {"quality", "statistical", "model"}
+    # every tool names a real task as its caller
+    task_ids = {t["id"] for t in bp.TASKS}
+    for s in specs:
+        assert s.used_by and set(s.used_by) <= task_ids, (s.id, s.used_by)
+        assert get_tool(s.id).run is not None
+
+    st = initial_state(_test_meta("smoke-tools"))
+    with tool_run(None, st, "2.4", "stat.cv", "3 series") as h:
+        h.result("CV 0.10-0.90")
+    rec = st.tool_invocations[0]
+    assert rec.status == "ok" and rec.task_id == "2.4" and rec.tool_id == "stat.cv"
+    assert rec.duration_ms is not None and rec.result_summary == "CV 0.10-0.90"
+    # /state must carry the trace to the frontend (snake_case, un-aliased)
+    assert st.model_dump(by_alias=True)["tool_invocations"], "trace missing from /state"
+
+
 if __name__ == "__main__":
     test_blueprint_integrity()
     test_initial_state()
@@ -360,4 +385,5 @@ if __name__ == "__main__":
     test_validation_chain_shape()
     test_rework_resets_downstream()
     test_model_service_config()
+    test_tool_registry_and_trace()
     print("all smoke tests passed")

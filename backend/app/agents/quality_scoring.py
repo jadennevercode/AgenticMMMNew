@@ -203,12 +203,21 @@ def _pct(x: float) -> str:
 
 def score_quality(ev: SeriesEvidence, field: FieldContext) -> QualityResult:
     """Score one series on the 10 subchecks → 4 dimensions → product Total."""
-    subs = [
+    return roll_up_quality([
         *_consistency_subs(ev),
         *_accuracy_subs(ev),
         *_completeness_subs(ev, field),
         *_granularity_subs(ev),
-    ]
+    ])
+
+
+def roll_up_quality(subs: list[SubScore]) -> QualityResult:
+    """Roll the 10 subchecks into 4 dimensions → product Total → verdict.
+
+    Split out from `score_quality` so the 2.2 handler can obtain the subchecks
+    through the four registered quality tools and still land on the identical
+    result — the rollup lives in one place either way.
+    """
     dims = {d: _roll_up(subs, d) for d in DIMENSIONS}
     total = round(dims["consistency"] * dims["accuracy"]
                   * dims["completeness"] * dims["granularity"], 4)

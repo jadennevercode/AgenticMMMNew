@@ -14,6 +14,7 @@ import {
   Settings,
   SquareStack,
   TriangleAlert,
+  Wrench,
   Workflow,
   type LucideIcon,
 } from 'lucide-react'
@@ -109,6 +110,7 @@ export default function AppShell() {
     { to: `${base}/data`, label: 'Data Engine', icon: Database },
     { to: `${base}/assets`, label: 'Assets', icon: FolderOpen },
     { to: `${base}/knowledge`, label: 'Knowledge', icon: BookOpen },
+    { to: `${base}/tools`, label: 'Tools', icon: Wrench },
     { to: `${base}/settings`, label: 'Settings', icon: Settings },
   ]
 

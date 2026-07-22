@@ -136,8 +136,65 @@ app/store/files.py     per-project Project Folder: real upload+storage+parse und
                        data/projects/{id}/files/{category}/ (+ _index.json)
 app/store/templates.py editable per-industry Factor-Tree & Interview templates, seeded from
                        Assets/ workbooks (template_seed.py) under data/templates/
+app/tools/             the analysis-tool registry: registry.py (8 ToolSpecs + thin `run`
+                       wrappers) · tracing.py (`tool_run` / `traced` → ToolInvocation)
 app/llm/volcano.py     Volcano Ark client + robust JSON parse/repair
 ```
+
+**Tools — the S2 checks are registered, explicitly-called tools.** The four quality
+dimensions (2.2), the three statistical tests (2.4) and the OLS fit (2.5/2.5r) are each a
+registered `Tool` (`app/tools/registry.py`) rather than an anonymous helper. Two rules:
+
+- The wrappers are **identity wrappers** over the existing implementations
+  (`quality_scoring._*_subs`, `data_rules.reference_cv` / `vif_all`, `stat_scoring.pearson`,
+  `mmm.engine.run_mmm`). Registering a computation must never change its numbers —
+  `app/tools/_test_tools.py` asserts wrapper == direct call cell for cell, including the
+  tool-composed 2.2 scorecard vs `score_quality`. If it fails, the tool layer has started
+  doing arithmetic; revert rather than update the expectation.
+- Every call goes through `tracing.traced` / `tool_run`, which records a `ToolInvocation`
+  (args/result summary, status, real duration) onto `ProjectState.tool_invocations` and emits
+  a `tool` event. Granularity is **one call per tool per task run** (batched over series),
+  except `model.ols` which is one per model object. All tracing params (`eng`, `task_id`) are
+  optional and default to untraced, so secondary paths (`ols_review._stat_index`, the
+  `fit=False` setup pass) don't manufacture phantom invocations.
+
+Each tool documents itself in the registry entry — `scenario` / `method` / `logic` / `params`
+live next to the wrapper so the docs cannot drift from the code, and the **source is not
+duplicated**: `registry.detail()` reads it off the live function with `inspect.getsource`.
+Keep the catalog **flat** (no category grouping in the UI) — a tool may be called from several
+steps and the category list is open-ended; `category` is a badge, not a hierarchy.
+
+Endpoints: `GET /api/tools` (light catalog), `GET /api/tools/{toolId}` (full page + source),
+`GET /api/projects/{id}/tool-invocations` (`?taskId=&toolId=`). Front end:
+`components/tools/ToolsView.tsx` is the flat list, `ToolDetailView.tsx` the per-tool page
+(Overview / Implementation / API / Trace tabs), and `ToolTrace.tsx` renders the per-step chips
+inside each artifact's Build process — shown even when the step is collapsed, each linking
+into its tool page.
+
+**Data Engine — two execution paths, one compiler.** `dbt build` (real dbt Fusion binary on
+DuckDB) is the **authoritative** path: it runs the quality tests and is what Publish gates on.
+It is also a subprocess over the whole DAG, far too slow to answer "what does this step do to my
+rows?" while someone edits. So the editor has a second, fast path:
+
+- `dbt/compiler.py` compiles the step DAG **twice from the same per-step SQL templates** —
+  `compile_pipeline()` → dbt models (`{{ ref }}`, enum maps as seeds); `compile_preview_sql()` →
+  one self-contained `WITH` query (plain names, enum maps inlined as `VALUES`) covering only the
+  target step's *ancestors*. Because both walk `_compile_step`, a preview cannot show a shape the
+  build would not produce — `app/dataeng/_test_preview.py` asserts the two agree cell for cell.
+- `duck.py::run_preview()` runs that query in the locked-down sandbox and profiles the result via
+  DuckDB's own `SUMMARIZE` (+ value counts / histograms) → the stats the grid renders per column.
+- `preview.py` is the orchestration (raw frames memoised per project/asset/source-set;
+  `invalidate()` on source change). `POST .../pipeline/preview` carries the **in-editor**
+  pipeline, so unsaved edits render immediately.
+- `cluster.py` groups near-duplicate raw spellings with OpenRefine's key-collision method
+  (fingerprint + n-gram fingerprint, merged transitively via union-find). It is a *proposal*:
+  nothing enters the enum map until a human accepts a group. `POST .../pipeline/cluster-enum`.
+
+Front end: `components/dataeng/grid/DataGrid.tsx` (TanStack Table + Virtual — sorting, filtering,
+row windowing, profiled headers) is the one grid every surface uses. The transform screen is
+**grid-first** — step rail · live preview · step inspector, with the React Flow DAG as a toggled
+"Graph" view — and `usePipelinePreview.ts` re-runs the preview as you type (debounced, newest
+response wins). Do not reintroduce hand-rolled `<table>` data views.
 
 **Business Understanding (S1) deepening.** The S1 stage is document-grounded and editable:
 the **Project Folder** (bottom-right dock) stores real uploads by category; S1 agents ground
