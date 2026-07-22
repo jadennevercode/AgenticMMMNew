@@ -796,12 +796,16 @@ async def update_anomaly_review(project_id: str, body: AnomalyReview) -> dict:
 
 
 class SignoffBody(BaseModel):
-    """One sign-off verdict. Supply `l4` + `indicator` for a single indicator, or
-    `l3` alone to apply the verdict to every indicator under that factor.
-    An empty `verdict` clears the entry back to un-reviewed."""
+    """One sign-off verdict. Supply `l4` + `indicator` for a single indicator,
+    `pairs` (each `{"l4", "indicator"}`) for an explicit set — this is what a
+    card's "Accept all" / "Deny all" should send, so the write matches exactly
+    what the card rendered — or `l3` alone as a fallback that fans the verdict
+    over every indicator the ledger's universe currently attributes to that
+    factor. An empty `verdict` clears the entry back to un-reviewed."""
     l3: str = ""
     l4: str = ""
     indicator: str = ""
+    pairs: list[dict] = []
     verdict: str = ""  # "yes" | "no" | ""
 
 
@@ -810,10 +814,10 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
     """Record the client's business-validation sign-off at 2.3s.
 
     This is a *decision*, not an artifact edit: an explicit "no" excludes the
-    indicator (or, given only `l3`, every indicator under that factor) from the
-    model, inherited by every later ledger layer. It therefore lives on
-    ProjectState — the artifact body is rewritten each time 2.3 re-runs, so a
-    verdict stored there could not survive.
+    indicator (or, given `pairs`/`l3`, every indicator named) from the model,
+    inherited by every later ledger layer. It therefore lives on ProjectState
+    — the artifact body is patched in place (see `refresh_signoff_in_artifact`),
+    never regenerated, so a verdict stored there always survives.
 
     A project saved before sign-off became indicator-granular can carry a
     legacy whole-factor verdict (``ledger.stale_factor_keys``). Writing or
@@ -822,6 +826,7 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
     verdict must not keep silently overriding them.
     """
     from app.agents import ledger
+    from app.agents.data import refresh_signoff_in_artifact
 
     verdict = body.verdict.strip().lower()
     if verdict not in ("", "yes", "no"):
@@ -829,7 +834,23 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
     st = _require_state(project_id)
 
     stale_l3s: set[str] = set()
-    if body.l4 or body.indicator:
+    if body.pairs:
+        # Explicit pair list (e.g. a card's "Deny all") — write exactly what
+        # was displayed, not a re-derived (and possibly mismatched) set.
+        rows = ledger.indicator_ledger(st)
+        keys: list[str] = []
+        for p in body.pairs:
+            l4 = str(p.get("l4", "")) if isinstance(p, dict) else ""
+            indicator = str(p.get("indicator", "")) if isinstance(p, dict) else ""
+            if not indicator and not l4:
+                continue
+            keys.append(ledger.signoff_key(l4, indicator))
+            target_l4, target_ind = l4.strip().lower(), indicator.strip().lower()
+            row = next((r for r in rows if r.l4.strip().lower() == target_l4
+                        and r.indicator.strip().lower() == target_ind), None)
+            if row is not None and row.l3:
+                stale_l3s.add(row.l3)
+    elif body.l4 or body.indicator:
         keys = [ledger.signoff_key(body.l4, body.indicator)]
         target_l4 = body.l4.strip().lower()
         target_ind = body.indicator.strip().lower()
@@ -839,14 +860,18 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
         if row is not None and row.l3:
             stale_l3s.add(row.l3)
     elif body.l3:
+        # Fallback fan-out for callers that do not send `pairs`. Uses the same
+        # fixed (l4, metric) universe as every other layer (post-C1), so this
+        # now matches what the card displays instead of an arbitrary-L4 collapse.
         target = body.l3.strip().lower()
         rows = ledger.indicator_ledger(st)
         keys = [ledger.signoff_key(r.l4, r.indicator) for r in rows
                 if r.l3.strip().lower() == target]
         stale_l3s.add(body.l3)
     else:
-        raise HTTPException(422, "supply l4+indicator, or l3")
+        raise HTTPException(422, "supply l4+indicator, pairs, or l3")
 
+    keys = list(dict.fromkeys(keys))  # de-dupe, preserve order
     for key in keys:
         if verdict:
             st.signoffs[key] = verdict
@@ -856,11 +881,11 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
         for stale_key in ledger.stale_factor_keys(st, l3):
             st.signoffs.pop(stale_key, None)
 
-    # Re-render the deck so the artifact and the ledger agree immediately.
-    if st.artifact("a-business-validation") is not None:
-        await _engine.handlers["2.3"](_engine, st, bp.TASK_MAP["2.3"])
+    # Patch the existing deck in place — never re-run 2.3 here (see I2): that
+    # would redo the LLM narration, bump the version, and un-confirm the deck.
+    refresh_signoff_in_artifact(st)
     get_store().save(project_id)
-    return {"signoffs": dict(st.signoffs)}
+    return {"signoffs": dict(st.signoffs), "written": len(keys)}
 
 
 # ── Master Data live slice (task 2.6) ────────────────────

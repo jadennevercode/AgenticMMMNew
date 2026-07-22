@@ -35,8 +35,13 @@ def test_bv_groups_carry_their_indicator_pairs() -> None:
 
 
 def test_bv_pairs_land_in_the_ledger_key_space() -> None:
-    """The pairs a chart emits must actually be keys the ledger recognizes —
-    a shape mismatch here would mean sign-off silently rejects nothing."""
+    """Every pair a chart emits must have a matching ledger row — not merely
+    overlap with the ledger's key space. (C1: `indicator_ledger` used to be
+    built from a driver universe that collapsed (l4, metric) to one row per
+    metric with an arbitrary L4, so most emitted pairs had no ledger row at
+    all — a bare intersection assertion here passed at 1/93 and did not catch
+    it.) A shape mismatch on any single pair would mean sign-off silently
+    rejects nothing for that indicator."""
     from app.agents.data import _bv_groups
     from app.agents.dataset_cache import model_df
     from app.agents.ledger import indicator_ledger, signoff_key
@@ -46,8 +51,8 @@ def test_bv_pairs_land_in_the_ledger_key_space() -> None:
     groups = _bv_groups(st, df)
     emitted = {signoff_key(p["l4"], p["indicator"]) for g in groups for p in g["pairs"]}
     ledger_keys = {signoff_key(r.l4, r.indicator) for r in indicator_ledger(st)}
-    assert emitted & ledger_keys, \
-        "the emitted (l4, indicator) pairs must intersect the ledger's own key space"
+    missing = sorted(emitted - ledger_keys)
+    assert not missing, missing[:5]
     print("✓ bv pairs land in the ledger key space")
 
 

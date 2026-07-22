@@ -291,6 +291,8 @@ TASKS: list[TaskDef] = [
                               "in the Data Engine, or proceed to data quality scoring?",
                   "evidence": [{"artifactId": "a-data-processing", "note": "Mapping matrix & coverage"},
                                {"artifactId": "a-factor-tree", "note": "The factor tree being mapped"}],
+                  "recommendation": "Proceed — the mapping is resolved; score what is mapped today "
+                                    "and revisit gaps in the Data Engine later if the model needs them.",
                   "options": [
                       {"id": "proceed", "label": "Proceed to data quality",
                        "detail": "Score the indicators that are mapped today",

@@ -50,16 +50,26 @@ def test_verdict_is_not_read_from_the_artifact_body() -> None:
 
 
 def test_a_rejected_factor_is_inherited_downstream() -> None:
-    """A rejected L3 is dropped for every layer after signoff — the whole point
-    of the layer. `drops_before` is what each later layer asks."""
-    st = _state()
-    st.signoffs = {"Promotion": "no"}
+    """A rejected indicator is dropped for every layer after signoff, and not
+    before — the whole point of the layer. `drops_before` is what each later
+    layer asks.
 
-    # Nothing has been scored, so the drop set is driven purely by the L3
-    # rejection reaching the layers that come after it.
-    before_signoff = drops_before(st, "signoff")
-    after_signoff = drops_before(st, "statistical")
-    assert len(after_signoff) >= len(before_signoff)
+    Asserts the *specific* denied pair, not a bare count comparison: on a
+    project with no bound data (as here), both sides of `len(after) >=
+    len(before)` are empty regardless of whether the signoff layer rules at
+    all, so that assertion would still pass with the layer deleted entirely.
+    """
+    from app.agents.ledger import _norm_pair, signoff_key
+
+    st = _state()
+    pair = _norm_pair("TV", "花费")
+    st.signoffs = {signoff_key("TV", "花费"): "no"}
+
+    before_signoff = drops_before(st, "signoff")       # mapping + quality only
+    after_signoff = drops_before(st, "statistical")    # + signoff itself
+
+    assert pair not in before_signoff, "signoff must not inherit its own verdict"
+    assert pair in after_signoff, "a later layer must inherit the signoff rejection"
 
 
 def test_signoffs_serialize_snake_case() -> None:

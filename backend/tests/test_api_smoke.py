@@ -108,10 +108,17 @@ def _stub_engine() -> Engine:
 
 def test_dag_runs_with_stub_handlers() -> None:
     """The whole DAG completes in autopilot once the S1 upload gates have files."""
+    from app.config import get_settings
+
     pid = "smoke-dag-complete"
     get_files().purge(pid)
     st = initial_state(_test_meta(pid))
     eng = _stub_engine()
+    # `_seed_s2_intake` flips the process-wide (lru_cache'd) settings singleton
+    # to let the reference table stand in for this stub's data; save/restore so
+    # it doesn't leak the no-fallback rule off for every test that runs after
+    # this one in the same process (I4).
+    allowed = get_settings().allow_reference_fallback
     try:
         _seed_s1_uploads(pid)
         _seed_s2_intake(st)
@@ -120,6 +127,7 @@ def test_dag_runs_with_stub_handlers() -> None:
         assert status["tasks_done"] == len(bp.TASKS)
     finally:
         get_files().purge(pid)
+        get_settings().allow_reference_fallback = allowed
 
 
 def test_s2_blocks_without_data_intake() -> None:
@@ -225,31 +233,42 @@ def test_data_gate_blocks_without_slot_coverage() -> None:
 
 def test_factor_map_gate() -> None:
     """2.1 Data Processing gate: blocks while any active factor row is unresolved,
-    clears once every row is mapped (published indicator) or ignored, and re-blocks
-    when an ignore is undone."""
+    clears (on the mapping path) once every row is mapped (published indicator) or
+    ignored, and re-blocks when an ignore is undone.
+
+    Asserts `mapping_complete` plus `_mapping_status` — the mapping path's own
+    verdict — rather than the composite `intake_status(...)`/`data_intake_ready`.
+    The composite folds in a further modeling-readiness check (`_data_blockers`:
+    is there an actual modelable table?), and resets its `path` to "none" whenever
+    that later check fails — which this stub state always does (no bound/published
+    data, only factor-tree + indicator metadata) even once the mapping itself is
+    genuinely complete, so asserting the composite (or its `path`) would falsely
+    fail here regardless of whether the mapping layer works.
+    """
+    from app.agents.intake_status import _mapping_status
     from app.dataeng.mapping import mapping_complete, resolve_factor_map
     from app.domain.models import FactorRow, FactorTree, Indicator
-    from app.orchestrator.engine import data_intake_ready
 
     st = initial_state(_test_meta("smoke-factor-map"))
     st.factor_tree = FactorTree(rows=[
         FactorRow(id="fr-1", l1="生意", l2="营销", l3="店内促销", l4="折扣", indicator="折扣率", status="baseline"),
         FactorRow(id="fr-2", l1="生意", l2="媒体", l3="社媒", l4="曝光", indicator="曝光量", status="baseline"),
     ])
-    asg = {"requiresMapping": True, "requiresManifest": True}
     # unresolved → blocked
     assert mapping_complete(st) is False
-    assert data_intake_ready(st, asg) is False
-    # map fr-1 via an exact tree_row_id, ignore fr-2 → complete
+    assert _mapping_status(st)[0] is False
+    # map fr-1 via an exact tree_row_id, ignore fr-2 → mapping resolved
     st.indicators = [Indicator(id="i1", metric="折扣率", l1="生意", l2="营销", l3="店内促销",
                                l4="折扣", assetId="a1", assetName="Promo", treeRowId="fr-1")]
     st.factor_map_ignores = {"fr-2": "no reliable source"}
     fmap = resolve_factor_map(st)
     assert (fmap.mapped, fmap.ignored, fmap.pending) == (1, 1, 0)
-    assert mapping_complete(st) is True and data_intake_ready(st, asg) is True
+    assert mapping_complete(st) is True
+    assert _mapping_status(st)[0] is True
     # undo the ignore → pending again, gate re-blocks
     st.factor_map_ignores = {}
-    assert mapping_complete(st) is False and data_intake_ready(st, asg) is False
+    assert mapping_complete(st) is False
+    assert _mapping_status(st)[0] is False
 
 
 def test_validation_verdict_rollup() -> None:
@@ -424,18 +443,11 @@ def test_tool_registry_and_trace() -> None:
 
 
 if __name__ == "__main__":
-    test_blueprint_integrity()
-    test_initial_state()
-    test_industry_taxonomy()
-    test_json_repair()
-    test_s2_blocks_without_data_intake()
-    test_dag_runs_with_stub_handlers()
-    test_s1_blocks_without_uploads()
-    test_project_data_binding()
-    test_data_gate_blocks_without_slot_coverage()
-    test_validation_verdict_rollup()
-    test_validation_chain_shape()
-    test_rework_resets_downstream()
-    test_model_service_config()
-    test_tool_registry_and_trace()
+    # Reflective: iterate every `test_*` defined in this module so a newly added
+    # test can never again go undefined here (I3 — 4 of 18 tests were silently
+    # never run this way).
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            _fn()
+            print(f"  ok  {_name}")
     print("all smoke tests passed")

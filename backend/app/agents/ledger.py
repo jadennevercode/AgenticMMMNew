@@ -158,15 +158,6 @@ def signoff_key(l4: object, metric: object) -> str:
     return f"i:{a}|{b}"
 
 
-def signoff_factor_key(l3: object) -> str:
-    """The whole-factor ``st.signoffs`` key: ``f:<norm_l3>``.
-
-    Companion to :func:`signoff_key` for a verdict recorded at the L3 level
-    (every indicator under a factor) rather than per indicator.
-    """
-    return f"f:{_norm(l3)}"
-
-
 def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
     """Decode one ``st.signoffs`` key.
 
@@ -175,27 +166,27 @@ def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
     key cannot be trusted (the round-trip guard below): the caller must treat
     that as "no recorded verdict", never act on a guess.
 
-    Accepts three shapes so nothing already stored is lost:
+    Accepts two shapes so nothing already stored is lost:
       * ``"i:<l4>|<metric>"`` — the current indicator shape (`signoff_key`).
-      * ``"f:<l3>"``          — the current factor shape (`signoff_factor_key`).
-      * unprefixed legacy     — predates both prefixes: a bare
+      * unprefixed legacy     — predates the ``i:`` prefix: a bare
         ``"<l4>|<metric>"`` (has a ``|``) reads as an indicator, a bare
-        ``"<l3>"`` (no ``|``) reads as a factor. This is the same rule the
-        prefixes exist to replace, kept only so state saved before this change
-        keeps its verdicts — a legacy L3 name that itself contains ``|`` is a
-        known, accepted gap in that old data (today's reference dataset has
-        none), not something re-parsing can resolve after the fact.
+        ``"<l3>"`` (no ``|``) reads as a whole-factor verdict. This is the
+        same rule the prefix exists to replace, kept only so state saved
+        before this change keeps its verdicts — a legacy L3 name that itself
+        contains ``|`` is a known, accepted gap in that old data (today's
+        reference dataset has none), not something re-parsing can resolve
+        after the fact.
+
+    There is no ``"f:"`` factor-key shape: nothing ever writes one (only the
+    ``l3`` fallback in ``PUT /signoff`` exists, and it fans out to per-indicator
+    ``i:`` keys rather than storing a factor-level key), so a whole-factor
+    verdict only ever reaches this parser via the unprefixed-legacy path above.
     """
     if key.startswith("i:"):
         l4, sep, metric = key[2:].partition("|")
         if not sep or f"i:{l4}|{metric}" != key:
             return None  # malformed — an "i:" key must carry a '|'
         return ("indicator", l4, metric)
-    if key.startswith("f:"):
-        l3 = key[2:]
-        if f"f:{l3}" != key:
-            return None
-        return ("factor", l3, "")
     if "|" in key:
         l4, _, metric = key.partition("|")
         return ("indicator", l4, metric)
@@ -227,8 +218,8 @@ def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
 
 
 def stale_factor_keys(st: ProjectState, l3: object) -> list[str]:
-    """Every ``st.signoffs`` key that resolves to a whole-factor verdict on
-    ``l3`` — the current ``f:`` shape or an old unprefixed legacy one.
+    """Every ``st.signoffs`` key that resolves to a whole-factor legacy verdict
+    on ``l3`` (the unprefixed bare-L3 shape; see ``_parse_signoff_key``).
 
     A verdict recorded at a finer grain (a single indicator, or a fresh
     whole-L3 call) must not keep being overridden by a coarser one recorded
@@ -374,9 +365,17 @@ def invalidate_universe(project_id: str | None = None) -> None:
 
 
 def _universe(st: ProjectState) -> dict[tuple[str, str], dict]:
-    """Every indicator that could enter a model, from the modeling long table."""
+    """Every indicator that could enter a model, from the modeling long table.
+
+    Keyed on the true ``(l4, metric)`` combination via
+    :func:`~app.mmm.driver_candidates_by_l4` — **not** the plain
+    ``driver_candidates``, which collapses to one row per metric with an
+    arbitrary L4 (``g["l4"].iloc[0]``) and so silently disagrees with every
+    other layer's key space (the scorecards, the per-indicator sign-off,
+    `build_model_frame`'s own per-row exclude).
+    """
     from app.agents.dataset_cache import model_df, model_objects
-    from app.mmm import driver_candidates
+    from app.mmm import driver_candidates_by_l4
 
     pid = getattr(st, "project_id", None) or ""
     cached = _UNIVERSE_CACHE.get(pid)
@@ -392,7 +391,7 @@ def _universe(st: ProjectState) -> dict[tuple[str, str], dict]:
     universe: dict[tuple[str, str], dict] = {}
     for obj in objects:
         try:
-            cands = driver_candidates(df, obj)
+            cands = driver_candidates_by_l4(df, obj)
         except Exception:  # noqa: BLE001
             continue
         for c in cands:
@@ -525,6 +524,26 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
             adopted=False, rejected_at="mapping",
             reason=note or "Ignored in the FactorTree↔DataAssets mapping.",
         ))
+        known.add(key)
+
+    # C1 belt-and-braces: a sign-off denial the (still-imperfect) driver
+    # universe never carried at all — real enough for the client to deny at
+    # 2.3, but absent from `_universe`'s own predicate. `model_selection`
+    # already excludes it directly (see above); surface it here too so the
+    # funnel and the canvas do not silently disagree with the fit.
+    for key in sorted(sign_drop):
+        if key in known:
+            continue
+        l4, metric = key
+        rows.append(LedgerRow(
+            key=key, l1="", l2="", l3="", l4=l4, indicator=metric, metric=metric,
+            verdicts=(LayerVerdict("signoff", LAYER_TASK["signoff"], LAYER_LABEL["signoff"],
+                                   STATUS_REJECTED,
+                                   f"Not signed off by the client at Business Validation ({metric})."),),
+            adopted=False, rejected_at="signoff",
+            reason=f"Not signed off by the client at Business Validation ({metric}).",
+        ))
+        known.add(key)
     return tuple(rows)
 
 
@@ -544,11 +563,14 @@ def model_selection(st: ProjectState) -> ModelSelection:
     project that has not reached 2.5) fitting exactly as before.
     """
     ledger = indicator_ledger(st)
-    # The scorecards are unioned in directly as well as via the ledger: they can
-    # name a pair the current long table no longer carries, and an exclude entry
-    # for an absent indicator is free.
+    # The scorecards (and sign-off) are unioned in directly as well as via the
+    # ledger: they can name a pair the current long table no longer carries —
+    # or, for sign-off, a pair the (still-imperfect) driver universe never
+    # carried at all (C1) — and an exclude entry for an absent indicator is
+    # free. `include` below stays metric-only and is never widened by this.
     exclude = frozenset({r.key for r in ledger if not r.adopted}
-                        | quality_drop_pairs(st) | stat_drop_pairs(st))
+                        | quality_drop_pairs(st) | stat_drop_pairs(st)
+                        | signoff_drop_pairs(st))
 
     cfg: OlsConfig | None = getattr(st, "ols_config", None)
     include: frozenset[str] | None = None

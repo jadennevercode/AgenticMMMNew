@@ -564,6 +564,32 @@ def _signoff_for(st: ProjectState, pairs: list[tuple[str, str]]) -> str:
     return ""
 
 
+def refresh_signoff_in_artifact(st: ProjectState) -> None:
+    """Patch just the per-group ``signoff`` field on ``a-business-validation``
+    in place, after a sign-off write.
+
+    Re-running the whole 2.3 handler on every Accept/Deny click would redo
+    `_bv_narrate`'s LLM call over every group, bump the artifact `version`, and
+    reset `state` back to "proposed" — un-confirming the very deliverable the
+    sign-off is meant to confirm. This derives each group's `signoff` exactly
+    the way `_signoff_for` does (so the two can never drift) and touches
+    nothing else on the artifact: not `state`, not `version`, not the charts
+    or interpretation text.
+    """
+    art = st.artifact("a-business-validation")
+    if art is None or not isinstance(art.body, dict):
+        return
+    groups = art.body.get("groups")
+    if not isinstance(groups, list):
+        return
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        pairs = [(p.get("l4", ""), p.get("indicator", ""))
+                 for p in (g.get("pairs") or []) if isinstance(p, dict)]
+        g["signoff"] = _signoff_for(st, pairs)
+
+
 async def _bv_narrate(groups: list[dict]) -> None:
     """Best-effort: refine each factor's interpretation in one grounded LLM call.
     Silently keeps the deterministic text when no LLM is configured."""

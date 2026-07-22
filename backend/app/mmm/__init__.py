@@ -31,6 +31,7 @@ from app.mmm.pivot import (
     ModelFrame,
     build_model_frame,
     driver_candidates,
+    driver_candidates_by_l4,
     is_money_metric,
     is_volume_metric_type,
     y_candidates,
@@ -44,7 +45,8 @@ __all__ = [
     "fit_ols", "OLSResult",
     # pivot
     "build_model_frame", "ModelFrame", "LONG_COLUMNS", "CN_TO_EN",
-    "y_candidates", "driver_candidates", "is_money_metric", "is_volume_metric_type",
+    "y_candidates", "driver_candidates", "driver_candidates_by_l4",
+    "is_money_metric", "is_volume_metric_type",
     # engine
     "run_mmm", "run_all_objects", "make_candidates", "MmmModelResult",
 ]

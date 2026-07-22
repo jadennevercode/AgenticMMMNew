@@ -22,6 +22,7 @@ __all__ = [
     "CN_TO_EN",
     "y_candidates",
     "driver_candidates",
+    "driver_candidates_by_l4",
     "is_money_metric",
     "is_volume_metric_type",
 ]
@@ -272,6 +273,59 @@ def driver_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
             "l3": str(g["l3"].iloc[0]) if "l3" in g else "",
             "l4": str(g["l4"].iloc[0]) if "l4" in g else "",
             "is_spend": _is_spend(mt, metric),
+            "months": months,
+        })
+    return out
+
+
+def driver_candidates_by_l4(long_df: pd.DataFrame, model_object: str) -> list[dict]:
+    """Every ``(l4, metric)`` driver combination usable for a model object.
+
+    Same predicate and ``MIN_MONTHS`` rule as :func:`driver_candidates`, but
+    grouped on ``["l1", "l2", "l3", "l4", "metric"]`` instead of ``metric``
+    alone. ``driver_candidates`` collapses to one row per metric with an
+    arbitrary L4 (``g["l4"].iloc[0]``), which silently disagrees with every
+    other S2 layer's key space — the scorecards (`stat_scoring._indicator_series`
+    groups the same way), the per-indicator sign-off, and `build_model_frame`'s
+    own per-row exclude. This is the driver universe the ledger must build from.
+    """
+    df = long_df
+    if "value" not in df.columns and "VALUE" in df.columns:
+        df = df.rename(columns=CN_TO_EN)
+    df = df.copy()
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df["month"] = pd.to_numeric(df["month"], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["month", "value"])
+    obj = df[_resolve_object_filter(df, model_object)]
+    if obj.empty:
+        return []
+
+    y_rows = obj[_is_y_row(obj)]
+    y_metric = _pick_y_metric(y_rows) if not y_rows.empty else ""
+
+    drv = obj[is_driver_row(obj)]
+    drv = drv[~_is_y_row(drv) & (drv["metric"] != y_metric)]
+
+    group_cols = [c for c in ("l1", "l2", "l3", "l4") if c in drv.columns] + ["metric"]
+    out: list[dict] = []
+    for key, g in drv.groupby(group_cols, dropna=False):
+        vals = dict(zip(group_cols, key if isinstance(key, tuple) else (key,)))
+        metric = vals["metric"]
+        months = int(g["month"].nunique())
+        if months < MIN_MONTHS:
+            continue
+        s = g.groupby("month")["value"].sum()
+        if float(np.nanstd(s.to_numpy(dtype=float))) == 0.0:
+            continue  # constant → uninformative, breaks VIF
+        mt = str(g["metric_type"].iloc[0])
+        out.append({
+            "metric": str(metric),
+            "metric_type": mt,
+            "l1": str(vals.get("l1", "")),
+            "l2": str(vals.get("l2", "")),
+            "l3": str(vals.get("l3", "")),
+            "l4": str(vals.get("l4", "")),
+            "is_spend": _is_spend(mt, str(metric)),
             "months": months,
         })
     return out
