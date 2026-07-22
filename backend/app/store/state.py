@@ -95,7 +95,11 @@ class ProjectState(BaseModel):
     # snake_case (it is a plain BaseModel), and an aliased field here emits a
     # camelCase key the frontend's snake_case reader silently misses.
     ols_config: Optional[OlsConfig] = None
-    # S2 · 2.3s: the client's per-L3 business sign-off (normalised L3 -> "yes"|"no").
+    # S2 · 2.3s: the client's business-validation sign-off ("<l4>|<indicator>" ->
+    # "yes"|"no", both normalised — see `ledger.signoff_key`). Bare keys with no
+    # '|' are legacy: they carry a normalised L3 and mean "this whole factor",
+    # expanded against the indicator universe on read (`ledger.signoff_drop_pairs`).
+    # The two shapes coexist in one dict with no migration step.
     # Source of truth for the ledger's signoff layer. It lives HERE and not in the
     # a-business-validation body because a producing handler rewrites that body on
     # every run — a human verdict stored there is erased by the next re-render (and

@@ -194,14 +194,16 @@ export const api = {
   updateAnomalyReview: (projectId: string, review: AnomalyReview) =>
     req<AnomalyReview>(`${p(projectId)}/anomaly-review`, { method: 'PUT', body: JSON.stringify(review) }),
 
-  /** 2.3s — the client's per-factor sign-off. An explicit 'no' excludes the
-   *  factor and all its indicators from the model, inherited by every later
-   *  ledger layer. Pass '' to clear it back to un-reviewed. */
-  setSignoff: (projectId: string, l3: string, verdict: 'yes' | 'no' | '') =>
-    req<{ signoffs: Record<string, string> }>(`${p(projectId)}/signoff`, {
-      method: 'PUT',
-      body: JSON.stringify({ l3, verdict }),
-    }),
+  /** 2.3s — the client's business-validation sign-off, at indicator or factor
+   *  granularity. Supply `l4` + `indicator` for a single indicator, or `l3`
+   *  alone to apply the verdict to every indicator under that factor. An
+   *  explicit 'no' excludes the target from the model, inherited by every
+   *  later ledger layer. Pass '' to clear it back to un-reviewed. */
+  setSignoff: (projectId: string, body: {
+    l3?: string; l4?: string; indicator?: string; verdict: '' | 'yes' | 'no'
+  }) => req<{ signoffs: Record<string, string> }>(`${p(projectId)}/signoff`, {
+    method: 'PUT', body: JSON.stringify(body),
+  }),
 
   // ── data engine (raw → review → clean → publish data asset) ──
   listDataAssets: (projectId: string) =>

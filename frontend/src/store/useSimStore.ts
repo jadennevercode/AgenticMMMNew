@@ -918,7 +918,7 @@ export const useSimStore = create<SimStore>((set, get) => {
       // or the ledger's signoff layer can never reject anything. (It used to go
       // through `editArtifact`, which is local-only — the next poll erased it.)
       try {
-        await api.setSignoff(pid, l3, verdict)
+        await api.setSignoff(pid, { l3, verdict })
         await get().refresh()
       } catch (e) {
         set({ error: errorMessage(e) })

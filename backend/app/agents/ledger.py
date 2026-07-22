@@ -145,20 +145,45 @@ def stat_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
     return _scorecard_pairs(getattr(st, "stat_scorecard", None), ("drop",))
 
 
-def signoff_reject_l3(st: ProjectState) -> set[str]:
-    """L3 factors the client explicitly did **not** sign off at 2.3.
+def signoff_key(l4: object, metric: object) -> str:
+    """The ``st.signoffs`` key for one indicator — ``_norm_pair`` joined by '|'.
 
-    Only an explicit ``no`` rejects: a blank sign-off means "not individually
-    reviewed", which the global ``d-2.3`` gate covers. Treating blank as a
-    rejection would empty the model before the human ever opened the deck.
-
-    Read from ``st.signoffs`` (durable state written by ``PUT /signoff``). This
-    used to read the ``a-business-validation`` artifact body, which no code path
-    ever persisted — so this whole layer was structurally incapable of rejecting
-    anything, while the funnel still credited it for indicators nobody reviewed.
+    Legacy keys carry a bare normalised L3 and contain no '|', which is what
+    lets both live in one dict without a migration.
     """
-    return {_norm(l3) for l3, verdict in (getattr(st, "signoffs", None) or {}).items()
-            if _norm(verdict) == "no"}
+    a, b = _norm_pair(l4, metric)
+    return f"{a}|{b}"
+
+
+def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
+    """Everything the client denied at 2.3, split by key shape.
+
+    Returns (denied_pairs, denied_l3). Only an explicit "no" rejects: a missing
+    entry means "not individually reviewed", which the d-2.3 gate covers —
+    treating it as a rejection would empty the model before the human ever
+    opened the deck.
+    """
+    pairs: set[tuple[str, str]] = set()
+    l3s: set[str] = set()
+    for key, verdict in (getattr(st, "signoffs", None) or {}).items():
+        if _norm(verdict) != "no":
+            continue
+        if "|" in key:
+            l4, _, metric = key.partition("|")
+            pairs.add((_norm(l4), _norm(metric)))
+        else:
+            l3s.add(_norm(key))
+    return pairs, l3s
+
+
+def signoff_reject_l3(st: ProjectState) -> set[str]:
+    """Legacy-shaped view of :func:`signoff_denied` — bare-L3 denials only.
+
+    Still used by ``app/agents/_test_ledger_signoff.py``, which only ever
+    writes bare-L3 keys; kept as a thin wrapper rather than duplicating the
+    read.
+    """
+    return signoff_denied(st)[1]
 
 
 def ols_flagged_pairs(st: ProjectState) -> set[tuple[str, str]]:
@@ -213,16 +238,16 @@ def freeze_range_drops(st: ProjectState, option_id: str) -> None:
 
 
 def signoff_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
-    """Indicator pairs under an L3 factor the client refused to sign off at 2.3.
+    """Indicators 2.3 rejected, in the (l4, metric) key space everything filters on.
 
-    Sign-off rules at factor (L3) granularity, so it has to be expanded against
-    the indicator universe to reach the ``(l4, metric)`` key space everything
-    else filters on.
+    Per-indicator denials are already in that space. Legacy per-L3 denials are
+    expanded against the indicator universe, so projects saved before sign-off
+    became indicator-granular keep their verdicts.
     """
-    rejected_l3 = signoff_reject_l3(st)
-    if not rejected_l3:
-        return set()
-    return {key for key, c in _universe(st).items() if _norm(c.get("l3")) in rejected_l3}
+    pairs, l3s = signoff_denied(st)
+    if l3s:
+        pairs |= {key for key, c in _universe(st).items() if _norm(c.get("l3")) in l3s}
+    return pairs
 
 
 def unticked_pairs(st: ProjectState) -> set[tuple[str, str]]:
@@ -342,7 +367,7 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
     universe = _universe(st)
     ignored = _mapping_ignored(st)
     q_drop, q_flag = quality_drop_pairs(st), quality_flag_pairs(st)
-    no_signoff = signoff_reject_l3(st)
+    sign_drop = signoff_drop_pairs(st)
     s_drop = stat_drop_pairs(st)
     flagged = ols_flagged_pairs(st)
     r_drop = range_drop_pairs(st)
@@ -386,10 +411,11 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
         else:
             rule("quality", STATUS_ADOPTED, "Passed the data-quality review.")
 
-        # 2.3 — the client's per-factor sign-off (L3 granularity).
-        if _norm(c.get("l3")) in no_signoff:
+        # 2.3 — the client's business-validation sign-off, per indicator (or,
+        # for legacy keys, per L3 factor).
+        if _matches(key, sign_drop):
             rule("signoff", STATUS_REJECTED,
-                 f"Factor '{c.get('l3')}' was not signed off by the client.")
+                 f"Not signed off by the client at Business Validation ({c.get('indicator', key[1])}).")
         else:
             rule("signoff", STATUS_ADOPTED, "Covered by the business-validation sign-off.")
 

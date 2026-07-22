@@ -796,28 +796,48 @@ async def update_anomaly_review(project_id: str, body: AnomalyReview) -> dict:
 
 
 class SignoffBody(BaseModel):
-    """One L3 factor's business sign-off. "" clears it back to un-reviewed."""
-    l3: str
+    """One sign-off verdict. Supply `l4` + `indicator` for a single indicator, or
+    `l3` alone to apply the verdict to every indicator under that factor.
+    An empty `verdict` clears the entry back to un-reviewed."""
+    l3: str = ""
+    l4: str = ""
+    indicator: str = ""
     verdict: str = ""  # "yes" | "no" | ""
 
 
 @app.put("/api/projects/{project_id}/signoff")
 async def put_signoff(project_id: str, body: SignoffBody) -> dict:
-    """Record the client's per-factor sign-off at 2.3s.
+    """Record the client's business-validation sign-off at 2.3s.
 
     This is a *decision*, not an artifact edit: an explicit "no" excludes the
-    factor and every one of its indicators from the model, inherited by every
-    later ledger layer. It therefore lives on ProjectState — the artifact body is
-    rewritten each time 2.3 re-runs, so a verdict stored there could not survive.
+    indicator (or, given only `l3`, every indicator under that factor) from the
+    model, inherited by every later ledger layer. It therefore lives on
+    ProjectState — the artifact body is rewritten each time 2.3 re-runs, so a
+    verdict stored there could not survive.
     """
+    from app.agents import ledger
+
     verdict = body.verdict.strip().lower()
     if verdict not in ("", "yes", "no"):
         raise HTTPException(422, "verdict must be 'yes', 'no' or ''")
     st = _require_state(project_id)
-    if verdict:
-        st.signoffs[body.l3] = verdict
+
+    if body.l4 or body.indicator:
+        keys = [ledger.signoff_key(body.l4, body.indicator)]
+    elif body.l3:
+        target = body.l3.strip().lower()
+        rows = ledger.indicator_ledger(st)
+        keys = [ledger.signoff_key(r.l4, r.indicator) for r in rows
+                if r.l3.strip().lower() == target]
     else:
-        st.signoffs.pop(body.l3, None)
+        raise HTTPException(422, "supply l4+indicator, or l3")
+
+    for key in keys:
+        if verdict:
+            st.signoffs[key] = verdict
+        else:
+            st.signoffs.pop(key, None)
+
     # Re-render the deck so the artifact and the ledger agree immediately.
     if st.artifact("a-business-validation") is not None:
         await _engine.handlers["2.3"](_engine, st, bp.TASK_MAP["2.3"])

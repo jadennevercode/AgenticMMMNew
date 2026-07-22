@@ -14,9 +14,9 @@ from app.agents.ledger import (
     funnel,
     indicator_ledger,
     model_selection,
+    signoff_key,
 )
 from app.domain.models import (
-    ArtifactInstance,
     OlsConfig,
     OlsXCandidate,
     OlsYChoice,
@@ -82,28 +82,37 @@ def test_statistical_drop_rejects_and_is_excluded_from_the_selection() -> None:
     assert key in model_selection(st).exclude
 
 
-def test_unsigned_factor_rejects_its_indicators_but_blank_signoff_does_not() -> None:
+def test_signoff_rejects_one_indicator_without_taking_its_siblings() -> None:
     st = _state()
     rows = indicator_ledger(st)
     target = next(r for r in rows if r.l3)
+    sibling = next((r for r in rows
+                    if r.l3 == target.l3 and r.key != target.key), None)
 
-    # A blank sign-off means "not individually reviewed" — it must not reject.
-    st.artifacts.append(_validation_artifact(target.l3, ""))
+    # Nothing recorded → "not individually reviewed" must not reject.
     assert next(r for r in indicator_ledger(st) if r.key == target.key).adopted
 
-    # An explicit "no" is a rejection, and it takes the whole L3 factor with it.
-    st.artifacts[-1].body = {"groups": [{"l3": target.l3, "signoff": "no"}]}
+    # A "yes" is not a rejection either.
+    st.signoffs = {signoff_key(target.l4, target.indicator): "yes"}
+    assert next(r for r in indicator_ledger(st) if r.key == target.key).adopted
+
+    # An explicit "no" rejects exactly that indicator.
+    st.signoffs = {signoff_key(target.l4, target.indicator): "no"}
     hit = next(r for r in indicator_ledger(st) if r.key == target.key)
     assert not hit.adopted and hit.rejected_at == "signoff"
     assert target.key in model_selection(st).exclude
+    if sibling is not None:
+        assert next(r for r in indicator_ledger(st) if r.key == sibling.key).adopted, \
+            "denying one indicator must not deny its L3 siblings"
 
 
-def _validation_artifact(l3: str, signoff: str):
-    return ArtifactInstance(
-        id="a-business-validation", name="Business Validation", taskRef="2.3",
-        type="report", stage="s2", format="validation",
-        body={"groups": [{"l3": l3, "signoff": signoff}]},
-    )
+def test_legacy_l3_signoff_still_rejects_the_whole_factor() -> None:
+    """Projects saved before sign-off became indicator-granular stored a bare L3."""
+    st = _state()
+    target = next(r for r in indicator_ledger(st) if r.l3)
+    st.signoffs = {target.l3.strip().lower(): "no"}
+    hit = next(r for r in indicator_ledger(st) if r.key == target.key)
+    assert not hit.adopted and hit.rejected_at == "signoff"
 
 
 def test_selection_layer_rejects_unticked_variables() -> None:
