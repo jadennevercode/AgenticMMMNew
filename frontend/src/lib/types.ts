@@ -133,6 +133,8 @@ export interface ValidationGroup {
   defaultIndicators: string[]
   interpretation: string
   signoff: string // '' | 'yes' | 'no'
+  /** The (l4, indicator) pairs this chart covers — the sign-off key space. */
+  pairs: { l4: string; indicator: string }[]
 }
 export interface ValidationAnomaly {
   channel: string

@@ -496,6 +496,14 @@ def _bv_groups(st: ProjectState, df: pd.DataFrame) -> list[dict]:
         l3 = row["l3"] or ""
         sub = df[vq._casefold_eq(df["l3"], l3)]
         indicators = vq._default_indicators(sub)
+        # The indicators this chart actually covers, in the ledger's (l4, metric)
+        # key space — this is what the per-indicator sign-off is recorded against.
+        sub_overlay = overlay[vq._casefold_eq(overlay["l3"], l3)]
+        pairs = sorted({
+            (str(a or "").strip(), str(b or "").strip())
+            for a, b in zip(sub_overlay["l4"], sub_overlay["metric"])
+            if str(b or "").strip()
+        })
         groups.append({
             "l1": row["l1"] or "", "l2": row["l2"] or "", "l3": l3,
             "rowIds": rows_by_l3.get(l3.casefold(), []),
@@ -505,6 +513,7 @@ def _bv_groups(st: ProjectState, df: pd.DataFrame) -> list[dict]:
             # sign-off the client already gave (`st.signoffs` is the truth —
             # this field is a rendering of it).
             "signoff": _signoff_for(st, l3),
+            "pairs": [{"l4": a, "indicator": b} for a, b in pairs],
         })
     return groups
 
