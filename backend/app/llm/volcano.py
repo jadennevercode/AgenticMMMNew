@@ -6,7 +6,9 @@ is obtained by instructing the model to emit JSON and parsing it robustly
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 import re
 from typing import Any, Optional
 
@@ -20,6 +22,72 @@ class LLMError(RuntimeError):
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+# Gateways in front of this endpoint report throttling as an HTTP 400 whose body
+# carries the real 429 — so the status code alone cannot be trusted to detect it.
+_RATE_LIMITED_RE = re.compile(
+    r"\b429\b|too many requests|rate.?limit|请求频率过高|请求过于频繁", re.I)
+
+
+def is_rate_limited(err: object) -> bool:
+    """True when an error is the endpoint refusing us for rate reasons."""
+    return bool(_RATE_LIMITED_RE.search(str(err)))
+
+
+def _backoff_seconds(err: object, attempt: int) -> float:
+    """Delay before retry `attempt` (1-based after the first try).
+
+    Retrying a throttled endpoint immediately is worse than not retrying at all:
+    this provider answers a burst with a 10-minute penalty lockout, so three
+    back-to-back retries convert a transient 429 into ten dead minutes and every
+    grounded agent step silently degrades to an empty result. Rate-limit errors
+    therefore back off on a much longer curve than transport errors.
+    """
+    if is_rate_limited(err):
+        base = min(60.0 * (2 ** (attempt - 1)), 240.0)
+    else:
+        base = min(2.0 * (2 ** (attempt - 1)), 20.0)
+    return base * random.uniform(0.8, 1.2)  # jitter so parallel callers desynchronise
+
+
+class _AdaptivePacer:
+    """Process-wide minimum spacing between LLM requests, learned from 429s.
+
+    Starts fully out of the way (no delay) so a generous endpoint runs at full
+    speed. The first throttle response switches pacing on for the rest of the
+    process: a run makes dozens of grounded calls, and without spacing it trips
+    the quota again on the very next step, so every agent after the first one
+    degrades to an empty result. Backing off *after* the fact is not enough —
+    the limit has to stop being hit at all.
+    """
+
+    def __init__(self) -> None:
+        self._min_interval = 0.0
+        self._next_at = 0.0
+        self._lock = asyncio.Lock()
+
+    @property
+    def paced(self) -> bool:
+        return self._min_interval > 0
+
+    def observe_rate_limit(self) -> None:
+        interval = get_settings().llm_paced_interval
+        if interval > self._min_interval:
+            self._min_interval = float(interval)
+
+    async def wait(self) -> None:
+        if self._min_interval <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            delay = max(0.0, self._next_at - now)
+            self._next_at = max(now, self._next_at) + self._min_interval
+        if delay:
+            await asyncio.sleep(delay)
+
+
+_pacer = _AdaptivePacer()
 
 
 def _repair_truncated(s: str) -> str:
@@ -123,9 +191,14 @@ class VolcanoClient:
         last_err: Optional[Exception] = None
         async with httpx.AsyncClient(timeout=timeout if timeout is not None else self._timeout) as client:
             for attempt in range(self._max_retries):
+                if attempt:
+                    await asyncio.sleep(_backoff_seconds(last_err, attempt))
+                await _pacer.wait()
                 try:
                     resp = await client.post(self._url, headers=self._headers, json=payload)
                     if resp.status_code >= 400:
+                        if is_rate_limited(resp.text):
+                            _pacer.observe_rate_limit()
                         raise LLMError(f"HTTP {resp.status_code}: {resp.text[:300]}")
                     try:
                         data = resp.json()

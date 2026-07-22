@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     # the user fills once in Settings (see app/store/model_service.py).
     llm_timeout: int = 120
     llm_max_retries: int = 3
+    # Minimum seconds between LLM requests once the endpoint has answered with a
+    # rate-limit error. Zero pacing is applied until that happens, so endpoints
+    # without a quota run at full speed. 7s ≈ 17 requests/2min, just under the
+    # 20/2min ceiling the current gateway enforces (it answers a burst with a
+    # 10-minute lockout, which silently empties every grounded agent step).
+    llm_paced_interval: float = 7.0
     asr_timeout: int = 600
 
     # Storage / data
