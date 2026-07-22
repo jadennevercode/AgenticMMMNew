@@ -41,30 +41,15 @@ def _default_choice(asg: dict) -> str:
     return str(opts[0].get("id", "")) if opts else ""
 
 
-def _mapping_complete(st: ProjectState) -> bool:
-    """Every active factor row is mapped to a published asset or ignored."""
-    try:
-        from app.dataeng.mapping import mapping_complete
-        return mapping_complete(st)
-    except Exception:  # noqa: BLE001 — never let a mapping error hard-block the engine
-        return False
-
-
 def data_intake_ready(st: ProjectState, asg: dict) -> bool:
-    """The 2.1 data gate. Clears when the FactorTree↔DataAssets mapping is fully
-    resolved (Data-Engine path, ``requiresMapping``) OR the legacy per-L3 manifest
-    validates (slot-upload path, ``requiresManifest``). A gate with only one flag
-    is judged only by that flag."""
-    ready = False
-    if asg.get("requiresMapping") and _mapping_complete(st):
-        ready = True
-    if asg.get("requiresManifest") and not ready:
-        try:
-            from app.agents.data_request import manifest_satisfied
-            ready = manifest_satisfied(st)
-        except Exception:  # noqa: BLE001
-            ready = True
-    return ready
+    """The 2.1 data gate — see `app.agents.intake_status`, the single judge.
+
+    Deliberately has no ``except: return True``: a gate that cannot evaluate
+    itself must block, not open. The UI reads the same status object, so the two
+    sides can no longer disagree about whether 2.1 is satisfied.
+    """
+    from app.agents.intake_status import intake_status
+    return intake_status(st, asg).ready
 
 
 
@@ -208,15 +193,15 @@ class Engine:
             if t.get("assignment", {}).get("id") == assignment_id:
                 asg = t["assignment"]
                 from app.store.files import get_files
-                # Data Engine: a resolved FactorTree↔DataAssets mapping (or published
-                # indicators) satisfies the S2 data gate (2.1) in lieu of per-L3 slot
-                # uploads. Additive — projects without indicators keep the original
-                # upload/manifest flow unchanged.
-                indicators_provide_data = bool(getattr(st, "indicators", None)) or _mapping_complete(st)
                 if asg.get("requiresUpload"):
                     category = asg.get("category")
                     has_files = bool(category) and get_files().has_category(st.project_id, category)
-                    if not has_files and not (category == "data" and indicators_provide_data):
+                    # The S2 data gate (2.1) is judged by `data_intake_ready` below,
+                    # which accepts the Data-Engine mapping path in lieu of slot
+                    # uploads. Merely *having* indicators is no longer a shortcut —
+                    # that let a project through with rows still unmapped.
+                    judged_by_intake = asg.get("requiresMapping") or asg.get("requiresManifest")
+                    if not has_files and not judged_by_intake:
                         return False
                 # Optional source-choice gate (e.g. 1.1a factor-tree origin). Persist the
                 # pick; the upload-option additionally requires a real file in its category.

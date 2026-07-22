@@ -51,7 +51,7 @@ def test_master_table_acceptance():
     import app.agents.master_data as md
 
     df = _long_df()
-    dc._PROJECT_CACHE["mock-test"] = df
+    dc.set_project_dataset("mock-test", df)
     st = types.SimpleNamespace(project_id="mock-test", indicators=[])
 
     # No drops → all four indicators adopted; period key unique; NDWD averaged.
@@ -72,7 +72,7 @@ def test_master_table_acceptance():
     dropped = md.master_table(st, brand=["b"], channel_type=["MT"], grain="month")
     assert "投放花费" not in dropped["columns"], "a rejected indicator must not reach the table"
 
-    dc._PROJECT_CACHE.pop("mock-test", None)
+    dc.invalidate_project("mock-test")
 
 
 if __name__ == "__main__":

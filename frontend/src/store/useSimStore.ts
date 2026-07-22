@@ -72,6 +72,11 @@ export interface BackendAssignment {
   category?: FileCategory
   /** When true, real parsed files must exist in `category` before submit. */
   requiresUpload?: boolean
+  /** S2 data gate (2.1): the legacy per-L3 manifest path. */
+  requiresManifest?: boolean
+  /** S2 data gate (2.1): the Data-Engine FactorTree↔DataAssets mapping path.
+   *  Either flag means the backend judges this gate — see `useIntakeStatus`. */
+  requiresMapping?: boolean
   /** Optional source-choice gate (e.g. 1.1a factor-tree origin). */
   choicePrompt?: string
   choiceOptions?: Array<{ id: string; label: string; detail?: string; recommended?: boolean }>

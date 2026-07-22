@@ -1620,6 +1620,26 @@ export interface FactorMapRow {
   suggestions: FactorMapSuggestion[]
 }
 
+/**
+ * The 2.1 gate verdict, decided by the backend (`app/agents/intake_status.py`).
+ *
+ * The UI renders `ready` and `blockers` directly and must NOT re-derive
+ * readiness from Project-Folder file counts: the two rules disagreed, and a
+ * project that had resolved its whole factor map in the Data Engine stayed
+ * blocked in the UI forever because its raw uploads live under `raw_data`.
+ */
+export interface DataIntakeStatus {
+  ready: boolean
+  /** Which rule cleared the gate: 'mapping' | 'manifest' | 'upload' | 'none'. */
+  path: string
+  total: number
+  mapped: number
+  ignored: number
+  pending: number
+  /** Human-readable reasons the gate is shut. Empty when `ready`. */
+  blockers: string[]
+}
+
 export interface FactorMap {
   rows: FactorMapRow[]
   total: number
@@ -1628,8 +1648,11 @@ export interface FactorMap {
   pending: number
   /** How many pending rows the AI could propose a match for. */
   suggested: number
-  /** true when total > 0 and pending === 0 — the 2.1 gate is clearable. */
+  /** true when total > 0 and pending === 0 — the mapping path is resolved. */
   complete: boolean
+  /** The gate verdict. `complete` only covers the mapping path; this also
+   *  accounts for the legacy manifest path and modeling readiness. */
+  intake: DataIntakeStatus
 }
 
 export type MasterDataKind = 'product' | 'geo' | 'channel' | 'time'

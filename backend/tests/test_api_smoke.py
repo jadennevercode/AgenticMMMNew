@@ -36,6 +36,31 @@ def _seed_s1_uploads(project_id: str) -> None:
         get_files().add(project_id, cat, f"{cat}.csv", csv, content_type="text/csv")
 
 
+def _seed_s2_intake(st) -> None:  # noqa: ANN001
+    """Make the 2.1 data gate satisfiable: one active factor row, one published
+    indicator covering it, and the reference table standing in for project data.
+
+    The gate is deliberately strict now — an unmapped factor tree, an unbuildable
+    manifest and a table with no modelable taxonomy all block. A control-flow test
+    therefore has to look like a project that really did its data intake.
+    """
+    from app.config import get_settings
+    from app.domain.models import FactorRow, FactorTree, Indicator
+
+    st.factor_tree = FactorTree(rows=[FactorRow(
+        id="fr-1", l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
+        indicator="TV spend", status="baseline",
+    )])
+    st.indicators = [Indicator(
+        id="ind-1", metric="TV spend", metricType="spending",
+        l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
+        assetId="a-1", assetName="Media asset", treeGrounded=True, treeRowId="fr-1",
+    )]
+    # No published parquet in a stub run — let the reference table serve as the
+    # project's data so the gate's modeling-readiness check has something real.
+    get_settings().allow_reference_fallback = True
+
+
 def test_blueprint_integrity() -> None:
     ids = {t["id"] for t in bp.TASKS}
     assert len(ids) == len(bp.TASKS), "duplicate task ids"
@@ -89,9 +114,35 @@ def test_dag_runs_with_stub_handlers() -> None:
     eng = _stub_engine()
     try:
         _seed_s1_uploads(pid)
+        _seed_s2_intake(st)
         status = asyncio.run(run_until_blocked(eng, st, autopilot=True, max_steps=500))
         assert status["complete"], status
         assert status["tasks_done"] == len(bp.TASKS)
+    finally:
+        get_files().purge(pid)
+
+
+def test_s2_blocks_without_data_intake() -> None:
+    """2.1 blocks when the factor map is unresolved — even with files uploaded.
+
+    Regression for the three escape hatches that used to open the gate on a
+    project with no data at all: an empty manifest (`total == 0`), an unreadable
+    manifest, and merely *having* published indicators.
+    """
+    pid = "smoke-s2-gate"
+    get_files().purge(pid)
+    st = initial_state(_test_meta(pid))
+    eng = _stub_engine()
+    try:
+        _seed_s1_uploads(pid)  # S1 satisfied, S2 intake deliberately not seeded
+        status = asyncio.run(run_until_blocked(eng, st, autopilot=True, max_steps=500))
+        assert not status["complete"], status
+        assert status["awaiting_human"] == ["2.1"], status
+
+        from app.agents.intake_status import intake_status
+        s = intake_status(st, bp.TASK_MAP["2.1"]["assignment"])
+        assert not s.ready and s.path == "none"
+        assert s.blockers, "a blocked gate must say why"
     finally:
         get_files().purge(pid)
 
@@ -377,6 +428,7 @@ if __name__ == "__main__":
     test_initial_state()
     test_industry_taxonomy()
     test_json_repair()
+    test_s2_blocks_without_data_intake()
     test_dag_runs_with_stub_handlers()
     test_s1_blocks_without_uploads()
     test_project_data_binding()

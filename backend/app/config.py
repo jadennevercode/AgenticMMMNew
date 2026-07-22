@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     db_path: str = "./data/mmm.db"
     reference_dir: str = "../reference"
+    # The Danone reference dataset stands in for a project's own data only for the
+    # seeded demo. Set this to run any project against the reference table (local
+    # debugging) — in normal operation a project without usable data must BLOCK,
+    # not silently score someone else's numbers.
+    allow_reference_fallback: bool = False
 
     # dbt Fusion engine (Data Engine transform layer). Empty ⇒ auto-detect the
     # binary (env DBT_BIN, then ~/.local/bin/dbt, then PATH). See app/dataeng/dbt.

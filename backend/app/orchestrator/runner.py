@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 from app.agents.common import agent_system, artifact_text, llm_recommendation
 from app.domain import blueprint as bp
-from app.orchestrator.engine import Engine, _default_choice, _mapping_complete
+from app.orchestrator.engine import Engine, _default_choice
 from app.store.files import get_files
 from app.store.state import ProjectState
 
@@ -72,7 +72,7 @@ async def run_until_blocked(eng: Engine, st: ProjectState, *, autopilot: bool, m
                             st.project_id, asg.get("category")):
                         # The 2.1 data gate also clears on a resolved Data-Engine
                         # mapping (no raw files needed) — let submit_assignment judge it.
-                        if not (asg.get("requiresMapping") and _mapping_complete(st)):
+                        if not (asg.get("requiresMapping") or asg.get("requiresManifest")):
                             continue  # blocked: needs a real upload
                     # Source-choice gates auto-pick the recommended option (template),
                     # so autopilot never depends on an uploaded-own-tree file.

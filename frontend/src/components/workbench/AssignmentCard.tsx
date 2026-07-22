@@ -1,7 +1,9 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   AlertTriangle,
   CheckCircle2,
+  Database,
   Download,
   FileUp,
   FolderOpen,
@@ -12,8 +14,14 @@ import {
   X,
 } from 'lucide-react'
 import { useSimStore, type BackendAssignment } from '../../store/useSimStore'
+import { useIntakeStatus } from '../../hooks/useIntakeStatus'
 import { TASKS } from '../../lib/scenario'
-import { FILE_CATEGORIES, INTERVIEW_ACCEPT, type FileCategory } from '../../lib/types'
+import {
+  FILE_CATEGORIES,
+  INTERVIEW_ACCEPT,
+  type DataIntakeStatus,
+  type FileCategory,
+} from '../../lib/types'
 import { Button } from '../ui/button'
 import { AgentChip } from '../ui/primitives'
 import { cn } from '../../lib/cn'
@@ -61,6 +69,68 @@ export function AssignmentCard({
   )
 }
 
+/* ── S2 data gate (2.1): mapping progress + why the gate is shut ─────────── */
+
+function IntakeGatePanel({ status }: { status: DataIntakeStatus }) {
+  const projectId = useSimStore((s) => s.activeProjectId)
+  const resolved = status.mapped + status.ignored
+  const pct = status.total > 0 ? Math.round((resolved / status.total) * 100) : 0
+
+  return (
+    <section
+      className={cn(
+        'rounded-xl border px-4 py-3',
+        status.ready ? 'border-success/40 bg-success/5' : 'border-warning/40 bg-warning/5',
+      )}
+    >
+      <header className="flex items-center justify-between gap-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Factor coverage
+        </p>
+        {projectId && (
+          <Link
+            to={`/p/${projectId}/data`}
+            className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline"
+          >
+            <Database className="size-3.5" /> Open Data Engine
+          </Link>
+        )}
+      </header>
+
+      {status.total > 0 && (
+        <>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-lg font-semibold tabular-nums">{resolved}</span>
+            <span className="text-[13px] text-muted-foreground">of {status.total} factor rows resolved</span>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+            <div
+              className={cn('h-full rounded-full', status.ready ? 'bg-success' : 'bg-warning')}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <dl className="mt-2 flex gap-4 text-[11px] text-muted-foreground">
+            <div><dt className="inline">Mapped </dt><dd className="inline font-medium tabular-nums text-foreground">{status.mapped}</dd></div>
+            <div><dt className="inline">Ignored </dt><dd className="inline font-medium tabular-nums text-foreground">{status.ignored}</dd></div>
+            <div><dt className="inline">Pending </dt><dd className="inline font-medium tabular-nums text-foreground">{status.pending}</dd></div>
+          </dl>
+        </>
+      )}
+
+      {status.blockers.length > 0 && (
+        <ul className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2.5">
+          {status.blockers.map((b) => (
+            <li key={b} className="flex items-start gap-1.5 text-[12px] leading-relaxed">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
+              <span>{b}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 /* ── Real upload gate (S1: SOW / materials / minutes) ────────────────────── */
 
 function UploadGateBody({ assignment, taskId }: { assignment: BackendAssignment; taskId: string }) {
@@ -88,7 +158,14 @@ function UploadGateBody({ assignment, taskId }: { assignment: BackendAssignment;
   const factorFiles = factorCat ? files.filter((f) => f.category === factorCat) : []
   const needsFactorUpload = hasChoice && !!factorCat && choice === uploadOptionId
   const factorReady = factorFiles.some((f) => f.parsed)
-  const canSubmit = parsedCount > 0 && (!needsFactorUpload || factorReady)
+
+  // The S2 data gate (2.1) is judged by the backend, not by file counts: it also
+  // clears on a resolved FactorTree↔DataAssets mapping, whose raw uploads never
+  // land in this assignment's category. `intake` is that verdict plus its reasons.
+  const intake = useIntakeStatus(assignment)
+  const canSubmit = intake
+    ? intake.ready
+    : parsedCount > 0 && (!needsFactorUpload || factorReady)
 
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
@@ -148,6 +225,11 @@ function UploadGateBody({ assignment, taskId }: { assignment: BackendAssignment;
           </div>
         </fieldset>
       )}
+
+      {/* S2 data gate: the mapping progress and the real reasons it is shut.
+          Without this the user had a disabled button and a message about files
+          that this gate does not actually depend on. */}
+      {open && intake && <IntakeGatePanel status={intake} />}
 
       {open && (
         <label
@@ -298,11 +380,15 @@ function UploadGateBody({ assignment, taskId }: { assignment: BackendAssignment;
           />
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] text-muted-foreground">
-              {needsFactorUpload && !factorReady
-                ? 'Upload your factor-tree workbook to continue'
-                : parsedCount > 0
-                  ? `${parsedCount} file${parsedCount > 1 ? 's' : ''} ready`
-                  : 'Upload at least one readable file to continue'}
+              {intake
+                ? intake.ready
+                  ? `Data intake resolved (${intake.path})`
+                  : `${intake.blockers.length} blocker${intake.blockers.length === 1 ? '' : 's'} — see above`
+                : needsFactorUpload && !factorReady
+                  ? 'Upload your factor-tree workbook to continue'
+                  : parsedCount > 0
+                    ? `${parsedCount} file${parsedCount > 1 ? 's' : ''} ready`
+                    : 'Upload at least one readable file to continue'}
             </span>
             <Button
               size="sm"

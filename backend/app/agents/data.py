@@ -22,6 +22,8 @@ from app.agents.ledger import (
 from app.agents.master_data import dimensions
 from app.agents.ols_review import build_ols_proposal, build_ols_review
 from app.agents.stat_scoring import (
+    DETREND_PERIOD,
+    MIN_DETRENDED_POINTS,
     accepted_stat_labels,
     build_stat_scorecard,
     stat_sheet,
@@ -107,9 +109,8 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
     every active factor row is either mapped to a published data asset or ignored.
     The artifact IS that mapping matrix; it also summarizes the referenced assets and
     the resulting modeling long table the rest of the stage filters down from."""
-    from app.agents.dataset_cache import uses_project_data
+    from app.agents.dataset_cache import diagnose_taxonomy, resolve_dataset
     from app.dataeng.mapping import resolve_factor_map
-    from app.store.files import get_files
 
     fmap = resolve_factor_map(st)
     published = [a for a in st.data_assets if a.status == "published"]
@@ -128,15 +129,17 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
     ] for r in fmap.rows]
     pending_rows = [r for r in fmap.rows if r.status == "pending"]
 
-    df = model_df(st)
-    if published and uses_project_data(st):
-        source = "Data Engine published assets"
-    elif uses_project_data(st):
-        source = "Uploaded data-request workbooks"
-    else:
-        n_files = len([f for f in get_files().list(st.project_id) if f.category == "data"])
-        source = ("Reference dataset (no published assets"
-                  + (f"; {n_files} raw data files pending)" if n_files else ")"))
+    # The data source is *declared*, never guessed: `resolve_dataset` is the one
+    # place that decides where the modeling table came from, and it reports "none"
+    # rather than silently substituting the reference table.
+    res = resolve_dataset(st)
+    source = {
+        "published": "Data Engine published assets",
+        "slot": "Uploaded data-request workbooks",
+        "reference": "Danone reference dataset",
+        "none": "No usable project data",
+    }.get(res.source, res.source)
+    df = res.df if res.usable else model_df(st)
     months = pd.to_numeric(df["month"], errors="coerce").dropna()
     axis = (f"{int(months.min())} – {int(months.max())}" if not months.empty else "—")
     dims_rows = [
@@ -168,6 +171,20 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
         ["Ignored (no data source)", str(fmap.ignored)],
         ["Pending (unresolved)", str(fmap.pending)],
     ]
+    # Modeling readiness: does this table carry the roles the OLS engine needs?
+    # Checked here, at the gate, because a table with no Y (or no channel_type)
+    # lets every downstream S2 task report success over an empty universe.
+    diag = diagnose_taxonomy(st)
+    ready_rows = [
+        ["Model objects (channel_type)", ", ".join(diag.objects) or "— none —"],
+        ["channel_type coverage", f"{diag.channel_type_coverage:.0%}"],
+        ["Rows recognised as the response (Y)", f"{diag.y_rows:,}"],
+        ["Rows recognised as drivers (X)", f"{diag.x_rows:,}"],
+        ["Verdict", "Ready to model" if diag.modelable else "Not modelable"],
+    ] + [["Problem", p] for p in diag.problems]
+    if not res.usable:
+        ready_rows.insert(0, ["Blocked", res.reason])
+
     body = {"sheets": [
         {"name": "FactorTree↔DataAssets", "columns":
             ["L1", "L2", "L3", "L4", "Indicator", "Status", "Asset", "Metric", "Coverage", "Note"],
@@ -176,6 +193,7 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
         {"name": "Referenced data assets", "columns": ["Asset", "Version", "Indicators", "Description"],
          "rows": asset_rows or [["—", "—", "0", "(no published assets)"]]},
         {"name": "Modeling long table", "columns": ["Item", "Value"], "rows": dims_rows},
+        {"name": "Modeling readiness", "columns": ["Check", "Result"], "rows": ready_rows},
         {"name": "Intake by source", "columns": ["Source", "Rows", "Metrics", "Months"],
          "rows": src_rows or [["—", "0", "0", "—"]]},
     ]}
@@ -198,9 +216,17 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
             tone="flag", evidence=[EvidenceRef(artifactId="a-data-processing")]))
     elif fmap.mapped == 0 and fmap.total > 0:
         findings.append(TaskFinding(
-            text="All factor indicators were ignored — no mapped data source; "
-            "the model will fall back to the reference dataset.",
+            text="All factor indicators were ignored — there is no mapped data source, "
+            "so the stage has nothing of this project's own to model.",
             tone="flag", evidence=[EvidenceRef(artifactId="a-data-processing")]))
+    if not res.usable:
+        findings.append(TaskFinding(
+            text=f"No usable project data: {res.reason}",
+            tone="flag", evidence=[EvidenceRef(artifactId="a-data-processing")]))
+    for problem in diag.problems:
+        findings.append(TaskFinding(
+            text=f"Modeling readiness: {problem}", tone="flag",
+            evidence=[EvidenceRef(artifactId="a-data-processing")]))
     eng.add_findings(st, task["id"], findings)
 
 
@@ -721,8 +747,16 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     # whole indicator set at once (p ≥ n), so it never forces a blanket drop.
     drop_candidates = [_label(r) for r in card.rows if r.auto_verdict == "unconsiderable"]
     acceptable = [_label(r) for r in card.rows if r.auto_verdict == "Acceptable"]
-    n_obs = _stat_n_obs(st)
-    proxy_vif = 0 < n_obs <= len(card.rows) + 1
+    # VIF runs on the year-over-year DIFFERENCED frame (see stat_scoring._yoy), not
+    # the raw monthly one, so the identified-vs-proxy regime (data_rules.vif_all)
+    # has to be decided from that same row count — comparing the raw monthly count
+    # against p understated how often the whole-set proxy actually fires.
+    p = len(card.rows)
+    raw_n_obs = _stat_n_obs(st)
+    detrended_n = raw_n_obs - DETREND_PERIOD
+    if detrended_n < MIN_DETRENDED_POINTS:  # too short to detrend — vif_all saw the raw levels
+        detrended_n = raw_n_obs
+    proxy_vif = 0 < detrended_n <= p + 1
     eng.set_analysis(st, "screening_drops", drop_candidates[:20])
     eng.set_analysis(st, "screening_acceptable", acceptable[:20])
     eng.set_analysis(st, "screening", {
@@ -737,7 +771,7 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     if dec and dec["id"] in st.decisions:
         n = len(acceptable)
         st.decisions[dec["id"]].question = (
-            f"{n} indicator(s) scored Acceptable (1.5–3) — neither clearly in nor out"
+            f"{n} indicator(s) scored Acceptable (0 < Total ≤ 0.5) — neither clearly in nor out"
             + (f" (e.g. {acceptable[0]})" if acceptable else "")
             + ". How should they enter the model?"
         )
@@ -750,14 +784,34 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
             diff=[DiffLine(kind="remove", text=d) for d in drop_candidates[:5]],
             evidence=[EvidenceRef(artifactId="a-stat-tests")], confidence=0.72,
             sourceAgent="data", sourceMode="pipeline", afterTask="2.4"))
-    vif_note = (" VIF uses the pairwise-collinearity proxy (more indicators than "
-                "monthly observations, so a full multivariate VIF is unidentified)."
+    vif_note = (" VIF uses the pairwise-collinearity proxy (more indicators than the "
+                "year-over-year periods it was computed on, so a full multivariate VIF "
+                "is unidentified)."
                 if proxy_vif else "")
-    eng.add_findings(st, task["id"], [TaskFinding(
+
+    # A zero total means one test failed outright. Say WHICH one — "unconsiderable"
+    # on its own gives the reviewer nothing to act on.
+    def _zero_reason(r: StatScoreRow) -> str:
+        failed = [name for name, score in
+                  (("volatility", r.cv_score), ("correlation", r.pearson_score),
+                   ("collinearity", r.vif_score)) if score == 0.0]
+        return " and ".join(failed) or "screening"
+
+    findings: list[TaskFinding] = []
+    zeroed = [r for r in card.rows if r.total == 0.0]
+    if zeroed:
+        labels = [f"{_label(r)} (failed {_zero_reason(r)})" for r in zeroed]
+        findings.append(TaskFinding(
+            text="Zero statistical score — these indicators cannot enter the model: "
+                 + "; ".join(labels[:5])
+                 + (f" +{len(labels) - 5} more" if len(labels) > 5 else ""),
+            tone="flag", evidence=[EvidenceRef(artifactId="a-stat-tests")]))
+    findings.append(TaskFinding(
         text=f"Statistical screening scored {len(card.rows)} indicator(s) on CV/Pearson/VIF; "
         f"{len(drop_candidates)} flagged to drop, {len(acceptable)} need review." + vif_note,
         tone="flag" if drop_candidates else "info",
-        evidence=[EvidenceRef(artifactId="a-stat-tests")])])
+        evidence=[EvidenceRef(artifactId="a-stat-tests")]))
+    eng.add_findings(st, task["id"], findings)
 
 
 async def propose_ols_setup(eng: Engine, st: ProjectState, task: dict) -> None:

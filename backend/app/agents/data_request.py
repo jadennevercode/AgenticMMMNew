@@ -150,10 +150,15 @@ def build_manifest(st: ProjectState) -> DataRequestManifest:
                 _score_slot(slot, l4s, headers)
         if slot.status != "validated" and _norm(l3) in indicator_l3:
             covering = indicator_l3[_norm(l3)]
-            slot.status = "validated"
             slot.covered_indicators = max(slot.covered_indicators, len(covering))
             if not slot.filename:
                 slot.filename = f"(published indicators: {covering[0].asset_name})"
+            # Only count the slot covered when the published indicators actually
+            # reach every expected indicator. One indicator sharing the L3 used to
+            # validate the whole slot, so a slot could be "validated" with most of
+            # its L4s carrying no data at all.
+            if len(covering) >= expected:
+                slot.status = "validated"
         if slot.status == "validated":
             validated += 1
         slots.append(slot)
@@ -165,15 +170,16 @@ def build_manifest(st: ProjectState) -> DataRequestManifest:
 def manifest_satisfied(st: ProjectState) -> bool:
     """True when the data-request manifest's per-L3 coverage is met.
 
-    Drives the 2.1 gate (``requiresManifest``): when a manifest exists (the factor
-    tree produced L3 slots), every slot must be ``validated``. When there is no
-    manifest to validate against (no slots), the gate degrades to the upstream
-    ``requiresUpload`` file-presence check — it does not hard-block."""
+    Drives the 2.1 gate (``requiresManifest``): every L3 slot must be
+    ``validated``. A manifest that cannot be built, or that has no slots at all,
+    does **not** satisfy the gate — both used to return True, which is how 2.1
+    could open on a project with no data. See `app.agents.intake_status` for the
+    blocker text the UI shows in each case."""
     try:
         m = build_manifest(st)
-    except Exception:  # noqa: BLE001 — never let manifest errors hard-block the engine
-        return True
-    return m.total == 0 or m.validated == m.total
+    except Exception:  # noqa: BLE001 — an unreadable manifest blocks, it does not pass.
+        return False
+    return m.total > 0 and m.validated == m.total
 
 
 # ── Export: one .xlsx workbook per L3, one sheet per L4 ──────────────────────

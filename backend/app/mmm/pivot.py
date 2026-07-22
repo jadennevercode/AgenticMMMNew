@@ -135,6 +135,16 @@ def _is_y_row(g: pd.DataFrame) -> pd.Series:
     return by_kpi | by_tag | (by_kw & by_type)
 
 
+def is_driver_row(g: pd.DataFrame) -> pd.Series:
+    """Boolean mask selecting rows eligible to be an X driver (before the
+    per-metric quality filters). The one definition of "this row is a driver",
+    shared by `driver_candidates` and the taxonomy diagnosis so the two cannot
+    disagree about whether a table has any drivers at all."""
+    l1u = g["l1"].astype("string").str.upper()
+    mtype = g["metric_type"].astype("string").str.strip().str.lower()
+    return l1u.isin(["MARKETING FACTOR", "COMMERCIAL FACTOR"]) | mtype.isin(_DRIVER_TAGS)
+
+
 def is_volume_metric_type(metric_type: object) -> bool:
     """True for a volume/unit response (箱数 / volume / unit)."""
     t = str(metric_type).strip().lower()
@@ -242,9 +252,7 @@ def driver_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
     y_rows = obj[_is_y_row(obj)]
     y_metric = _pick_y_metric(y_rows) if not y_rows.empty else ""
 
-    l1u = obj["l1"].astype("string").str.upper()
-    mtype = obj["metric_type"].astype("string").str.strip().str.lower()
-    drv = obj[l1u.isin(["MARKETING FACTOR", "COMMERCIAL FACTOR"]) | mtype.isin(_DRIVER_TAGS)]
+    drv = obj[is_driver_row(obj)]
     drv = drv[~_is_y_row(drv) & (drv["metric"] != y_metric)]
 
     out: list[dict] = []
@@ -360,9 +368,7 @@ def build_model_frame(
 
     # --- X drivers: Marketing + Commercial factors (reference taxonomy) OR rows
     # carrying an explicit driver/spend metric_type tag (per-project binding). ---
-    l1u = obj["l1"].astype("string").str.upper()
-    mtype = obj["metric_type"].astype("string").str.strip().str.lower()
-    drv = obj[l1u.isin(["MARKETING FACTOR", "COMMERCIAL FACTOR"]) | mtype.isin(_DRIVER_TAGS)]
+    drv = obj[is_driver_row(obj)]
     drv = drv[~_is_y_row(drv) & (drv["metric"] != y_metric)]
 
     # Physically exclude indicators flagged/dropped upstream (2.2/2.4/2.5), keyed

@@ -873,7 +873,17 @@ def _factor_map_payload(st) -> dict:
         "total": fmap.total, "mapped": fmap.mapped, "ignored": fmap.ignored,
         "pending": fmap.pending, "complete": fmap.complete,
         "suggested": sum(1 for r in fmap.rows if sugg.get(r.row_id)),
+        # The 2.1 gate verdict, from the same judge the engine uses. The UI renders
+        # `ready` and `blockers` directly instead of re-deriving readiness from
+        # Project-Folder file counts (which disagreed with the server).
+        "intake": _intake_payload(st),
     }
+
+
+def _intake_payload(st) -> dict:
+    from app.agents.intake_status import intake_status
+    asg = bp.TASK_MAP["2.1"].get("assignment") or {}
+    return intake_status(st, asg).to_payload()
 
 
 @app.get("/api/projects/{project_id}/factor-map")
