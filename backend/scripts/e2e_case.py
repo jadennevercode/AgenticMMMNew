@@ -290,6 +290,50 @@ def publish_asset(project_id: str, asset_id: str, instruction: str = "") -> dict
     return steps
 
 
+def resolve_factor_map(project_id: str) -> dict:
+    """Clear the 2.1 gate: accept every AI suggestion, ignore the rest.
+
+    This is the human step at 2.1, executed honestly — a row is only *bound* when
+    the resolver actually proposed an indicator for it. Rows with no candidate are
+    *ignored* with the reason recorded, never bound to a lookalike, because an
+    invented binding would put someone else's series under a factor name and no
+    later gate would ever catch it.
+    """
+    fm = get(f"/api/projects/{project_id}/factor-map")
+    bound = ignored = 0
+    for row in fm.get("rows", []):
+        if row["status"] != "pending":
+            continue
+        cand = row.get("suggestions") or []
+        if cand:
+            top = cand[0]
+            put(f"/api/projects/{project_id}/factor-map/bind",
+                {"rowId": row["rowId"],
+                 "indicatorId": top.get("indicatorId") or top.get("id")})
+            bound += 1
+        else:
+            put(f"/api/projects/{project_id}/factor-map/ignore", {
+                "rowId": row["rowId"], "ignored": True,
+                "note": "No published indicator covers this factor in the restored "
+                        "2.32 dataset (planned-only factor)."})
+            ignored += 1
+    fm = get(f"/api/projects/{project_id}/factor-map")
+    print(f"  factor map: bound={bound} ignored={ignored} -> "
+          f"mapped={fm['mapped']} ignored={fm['ignored']} pending={fm['pending']} "
+          f"complete={fm['complete']}")
+    return fm
+
+
+def ols_report(project_id: str) -> None:
+    st = state(project_id)
+    cfg = st.get("ols_config") or {}
+    print(f"  ols_config: y={cfg.get('yMetric')!r} object={cfg.get('modelObject')!r} "
+          f"include={len(cfg.get('include') or [])} exclude={len(cfg.get('exclude') or [])}")
+    led = get(f"/api/projects/{project_id}/indicator-ledger")
+    rows = led if isinstance(led, list) else led.get("rows", [])
+    print(f"  ledger rows: {len(rows)}")
+
+
 def main() -> int:
     print("== health")
     print(" ", get("/api/health"))
