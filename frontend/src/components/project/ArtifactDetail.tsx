@@ -17,7 +17,6 @@ import { TaskStepPanel } from './panels/TaskStepPanel'
 import { ToolTrace } from '../tools/ToolTrace'
 import { ProfileEditor } from './ProfileEditor'
 import { FactorTreeEditor } from './FactorTreeEditor'
-import { StatScoreEditor } from './StatScoreEditor'
 import { AgentChip, TaskBadge, StatusPill, DeliverableBadge, SparkleIcon } from '../ui/primitives'
 import { Button } from '../ui/button'
 import { cn } from '../../lib/cn'
@@ -444,7 +443,6 @@ function EditChat({ artifactId, produced, layout = 'docked' }: { artifactId: str
 const STRUCTURED_EDITORS: Record<string, () => ReactElement> = {
   'a-scope': () => <ProfileEditor />,
   'a-factor-tree': () => <FactorTreeEditor />,
-  'a-stat-tests': () => <StatScoreEditor />,
 }
 
 /** The canvas surface (document/edit renderer or placeholder) */

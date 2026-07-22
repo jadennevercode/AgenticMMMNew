@@ -324,7 +324,7 @@ export const TASKS: TaskBlueprint[] = [
   {
     id: '2.4', name: 'Statistical Score', agent: 'data', stage: 's2', class: 'A',
     summary: 'Variability, correlation and collinearity tests per indicator (CV / Pearson / VIF); the combined score decides model entry. Indicators already rejected at 2.2 or 2.3 are not scored — that call is settled.',
-    how: 'CV, Pearson and VIF are computed per indicator still in play and combined into an entry score (≥3 good, <1.5 dropped); the AI then writes the case for or against each borderline indicator. Excluding the already-rejected ones is not bookkeeping — VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.',
+    how: 'CV, Pearson and VIF are each banded 0 / 0.5 / 1 and multiplied into an entry score (Total > 0.5 good, 0 < Total ≤ 0.5 acceptable, 0 dropped); the AI then writes the case for or against each borderline indicator. Excluding the already-rejected ones is not bookkeeping — VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.',
     basisNote: '统计筛选规则 + 上游裁决（2.2 质量 / 2.3 签核）。',
     workNote: 'CV / Pearson / VIF computed on the indicators still in play.',
     dependsOn: ['2.3s'], duration: 2, produces: ['a-stat-tests'],

@@ -1141,10 +1141,10 @@ export interface StatScoreRow {
   cv: number // reference CV (scaled variance / mean)
   pearson: number // Pearson r vs KPI (signed)
   vif: number // variance inflation factor
-  cvScore: number // 0 / 0.5 / 1 / 2
+  cvScore: number // 0 / 0.5 / 1
   pearsonScore: number
   vifScore: number
-  total: number // cvScore + pearsonScore + vifScore
+  total: number // cvScore * pearsonScore * vifScore
   autoVerdict: string // Good | Acceptable | unconsiderable
   disposition: StatDisposition
   note: string

@@ -22,29 +22,19 @@ const VERDICT_LABEL: Record<string, string> = {
   unconsiderable: 'Unconsiderable',
 }
 
-/** The 2.33 rule legend — three tests, each banded 0 / 0.5 / 1 / 2. */
+/** The 2.4 rule legend — three tests, each banded 0 / 0.5 / 1. */
 const RULES: { test: string; metric: string; bands: string[] }[] = [
-  {
-    test: 'Volatility · CV',
-    metric: 'Scale series to [0,1], then variance / mean',
-    bands: ['0 · CV ≤ 0.05', '0.5 · 0.05–0.1', '1 · 0.1–0.2', '2 · CV ≥ 0.2'],
-  },
-  {
-    test: 'Correlation · Pearson r',
-    metric: '|r| between the indicator and the KPI (univariate)',
-    bands: ['0 · |r| < 0.1', '0.5 · 0.1–0.3', '1 · 0.3–0.5', '2 · |r| ≥ 0.5'],
-  },
-  {
-    test: 'Collinearity · VIF',
-    metric: 'Variance inflation vs the other indicators',
-    bands: ['0 · VIF = 1', '0.5 · 1–5', '1 · VIF ≥ 5', '2 · VIF ≥ 10'],
-  },
+  { test: 'Volatility · CV', metric: 'Scale series to [0,1], then variance / mean',
+    bands: ['0 · CV ≤ 0.05', '0.5 · 0.05–0.1', '1 · CV ≥ 0.1'] },
+  { test: 'Correlation · Pearson r', metric: '|r| between the indicator and the KPI (univariate)',
+    bands: ['0 · |r| < 0.1', '0.5 · 0.1–0.3', '1 · |r| ≥ 0.3'] },
+  { test: 'Collinearity · VIF', metric: 'Variance inflation vs the other indicators',
+    bands: ['0 · VIF ≥ 5', '0.5 · 1–5', '1 · VIF = 1'] },
 ]
 
-/** Color a 0 / 0.5 / 1 / 2 band score — red → amber → blue → green. */
+/** Color a 0 / 0.5 / 1 band score — red → amber → green. */
 function scoreClass(score: number): string {
-  if (score >= 2) return 'bg-emerald-600/15 text-emerald-700'
-  if (score >= 1) return 'bg-sky-600/15 text-sky-700'
+  if (score >= 1) return 'bg-emerald-600/15 text-emerald-700'
   if (score >= 0.5) return 'bg-amber-500/15 text-amber-700'
   return 'bg-destructive/15 text-destructive'
 }
@@ -92,11 +82,11 @@ export function StatScoreEditor() {
     <Card className="space-y-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-sm font-semibold">Statistical Score · 2.33 CV / Pearson / VIF</h3>
+          <h3 className="text-sm font-semibold">Statistical Score · 2.4 CV / Pearson / VIF</h3>
           <p className="text-[11px] text-muted-foreground">
             Every FactorTree indicator is scored on volatility (CV), correlation with the KPI (Pearson) and collinearity (VIF), each
-            0 / 0.5 / 1 / 2. Total = the sum — Good ≥ 3, Acceptable 1.5–3, Unconsiderable &lt; 1.5. Disposition each indicator to admit
-            it into the OLS regression test.
+            0 / 0.5 / 1. Total = CV × Pearson × VIF — Good &gt; 0.5, Acceptable 0 &lt; Total ≤ 0.5, unconsiderable at 0. A single failing
+            test zeroes the total and drops the indicator. Disposition each indicator to admit it into the OLS regression test.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -149,6 +139,11 @@ export function StatScoreEditor() {
               </div>
             ))}
           </div>
+        )}
+        {rulesOpen && (
+          <p className="border-t border-border px-3 py-2 text-[10.5px] text-muted-foreground">
+            Total = CV × Pearson × VIF. A single failing test zeroes the total and drops the indicator.
+          </p>
         )}
       </div>
 
