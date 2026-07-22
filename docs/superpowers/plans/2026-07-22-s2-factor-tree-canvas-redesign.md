@@ -339,6 +339,293 @@ git commit -m "feat: realign 2.4 statistical scoring with reference 2.33 (three 
 
 ---
 
+## Task 1b: Compute the two correlation tests on detrended series
+
+**Why this task exists (added after Task 1 measured the reference dataset):**
+
+Task 1 corrected the band directions, and that exposed a defect the old inverted VIF band
+had been masking. Measured on the seeded Danone dataset (24 monthly points, 93 indicators):
+
+- Every indicator scored 1 on CV **and** 1 on Pearson, and 0 on VIF → every total was 0 →
+  all 93 indicators auto-dropped.
+- VIF ran 42–202 because with p=93 predictors and n=24 observations the multivariate VIF is
+  undefined (any predictor is an exact linear combination of the others), so `vif_all` falls
+  back to its pairwise-max proxy. The proxy's inputs were themselves spurious: OOH·曝光量
+  correlates 0.9975 with 场景化趋势·高铁客运量, POSM·花费 correlates 0.9968 with 社群互动·社群数.
+  Every one of the 93 indicators has some peer correlating at ≥0.988.
+- Pearson had the same disease in the other direction: on raw levels **all 93** scored
+  |r| ≥ 0.3 against the KPI. A screen that passes 100% of candidates is not screening.
+
+Both symptoms have one cause: the series are raw monthly **levels** that all share the same
+level, trend and seasonal signal, so the correlations measure that shared signal rather than
+each indicator's own relationship to sales or to its peers.
+
+Measured alternatives (all per-L4 grouped, which is what makes VIF identified at p=2–7 < n):
+
+| Input | VIF median | band 1 / 0.5 / 0 |
+|---|---|---|
+| raw levels (n=24) | 51.97 | 10 / 0 / 83 |
+| linear detrend only (n=24) | 46.62 | 10 / 0 / 83 |
+| **year-over-year differences (n=12)** | **1.06** | **10 / 79 / 4** |
+
+Linear detrending does not work — the confound is seasonal, not just a trend. YoY differencing
+removes level, trend and seasonality in one step. On YoY differences Pearson also starts
+discriminating: 40 indicators at |r| ≥ 0.3, 30 in the middle band, 23 below 0.1.
+
+**Two things were investigated and ruled out, so nobody re-opens them:**
+
+1. *Is the Y wrong or leaking into the X set?* No. The dataset has exactly one Y metric
+   (`本品月度销量`, `metric_type = "Y"`, 360 rows, single brand), zero mixed Y/non-X groups,
+   and the nine X indicators with sales-like names (品类全渠道销量, 现调饮料外卖销量, the
+   sales-rep execution metrics) are genuinely not the brand's own sales.
+2. *Should the tests run on the disaggregated panel (24 months × 5 channels × 3 regions = 360
+   cells) instead of the national aggregate?* No. The disaggregated series are near-duplicates
+   of each other: the same indicator across channels correlates at median r = 0.951, across
+   regions 0.970; the **Y** across channels correlates at 0.986 and across regions at 0.994.
+   360 rows would not be 360 independent observations — the effective sample stays near 24, and
+   fitting on them would compute standard errors as if there were 360, manufacturing precision
+   that does not exist. `MAX_DRIVERS = 12` is therefore correct and stays: the data holds about
+   24 independent time points however it is sliced.
+
+**Scope decision:** only the two correlation-based tests are detrended. CV is left on raw
+levels — it asks "does this indicator move at all?", which is a property of the level series;
+differencing it would change what the test means.
+
+**Files:**
+- Modify: `backend/app/agents/stat_scoring.py` (`build_stat_scorecard`, new `_yoy` helper)
+- Modify: `backend/app/tools/registry.py:72-75` (`_run_vif` batches over groups)
+- Modify: `backend/app/tools/_test_tools.py:93` (batched VIF wrapper assertion)
+- Test: `backend/tests/test_stat_scoring.py`
+
+**Interfaces:**
+- Consumes: `score_statistical` from Task 1 (three bands, multiplicative total).
+- Produces:
+  - `stat_scoring.DETREND_PERIOD: int = 12` and
+    `stat_scoring._yoy(a: np.ndarray, period: int = DETREND_PERIOD) -> np.ndarray` —
+    year-over-year difference along axis 0; returns the input unchanged when there are not
+    more than `period` rows.
+  - `registry._run_vif(matrices: list) -> list[float]` — now takes a **list** of matrices
+    (one per L4 group) and returns their `vif_all` outputs concatenated in order, matching how
+    `_run_cv` / `_run_pearson` already batch. Still a pure identity wrapper: it calls
+    `vif_all` once per matrix and does no arithmetic of its own.
+  - `StatScoreRow.cv` still reports the raw-level CV; `.pearson` and `.vif` now report the
+    detrended values.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `backend/tests/test_stat_scoring.py` (and register both in the `__main__` block):
+
+```python
+def test_yoy_removes_level_trend_and_season() -> None:
+    """A pure seasonal-plus-trend series carries no year-over-year signal beyond its
+    growth — which is exactly the confound that made every indicator correlate."""
+    from app.agents.stat_scoring import _yoy
+
+    t = np.arange(24, dtype=float)
+    season = np.sin(2 * np.pi * t / 12.0)
+    a = 100.0 + 3.0 * t + 10.0 * season          # level + linear trend + seasonality
+    d = _yoy(a)
+    assert d.shape[0] == 12, "24 monthly points yield 12 year-over-year differences"
+    # Trend growth over 12 months is constant (3 * 12) and the seasonal term cancels.
+    assert np.allclose(d, 36.0, atol=1e-9), f"expected a flat 36.0, got {d[:3]}"
+    # Too short to difference → returned unchanged rather than emptied.
+    short = np.arange(8, dtype=float)
+    assert np.array_equal(_yoy(short), short)
+    print("✓ YoY differencing removes level, trend and seasonality")
+
+
+def test_detrending_makes_the_screening_discriminate() -> None:
+    """The regression this task exists to prevent: on raw levels every indicator
+    passed CV and Pearson and failed VIF, so every total was 0 and 2.4 dropped
+    everything. After detrending the verdicts must actually vary."""
+    from app.agents.stat_scoring import build_stat_scorecard
+    from app.store.state import danone_meta, initial_state
+
+    card = build_stat_scorecard(initial_state(danone_meta()))
+    assert card.rows, "the reference dataset must yield scored indicators"
+    verdicts = {r.auto_verdict for r in card.rows}
+    assert len(verdicts) > 1, f"screening must discriminate, got only {verdicts}"
+    assert any(r.total > 0 for r in card.rows), "not every indicator can score zero"
+    vifs = [r.vif for r in card.rows]
+    assert min(vifs) < 5.0, f"detrended VIF should not start at {min(vifs):.1f}"
+    print(f"✓ screening discriminates — verdicts {sorted(verdicts)}, "
+          f"median VIF {float(np.median(vifs)):.2f}")
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+```bash
+cd "backend" && PYTHONPATH=. .venv/bin/python tests/test_stat_scoring.py
+```
+Expected: FAIL — `ImportError: cannot import name '_yoy'`. After the helper exists but before
+the wiring, `test_detrending_makes_the_screening_discriminate` fails with
+`screening must discriminate, got only {'unconsiderable'}`.
+
+- [ ] **Step 3: Add the detrending helper**
+
+In `backend/app/agents/stat_scoring.py`, after the imports:
+
+```python
+# Monthly data: a year-over-year difference removes the level, the trend and the
+# seasonality in one step. Both correlation-based tests need this — on raw levels
+# every indicator correlates with the KPI and with every other indicator, because
+# they all ride the same seasonal trend, and the tests measure that instead of the
+# indicator. CV is deliberately NOT differenced: it asks whether the series moves
+# at all, which is a property of the level series.
+DETREND_PERIOD = 12
+
+
+def _yoy(a: np.ndarray, period: int = DETREND_PERIOD) -> np.ndarray:
+    """Year-over-year difference along axis 0.
+
+    Series with no more than ``period`` observations are returned unchanged — a
+    short project should still be screened, just without the seasonal correction.
+    """
+    if a.shape[0] <= period:
+        return a
+    return a[period:] - a[:-period]
+```
+
+- [ ] **Step 4: Wire it into `build_stat_scorecard`**
+
+In `build_stat_scorecard`, keep the CV call exactly as it is (raw `wide[c]` columns). Replace
+the VIF and Pearson calls so both run on differenced data, and group VIF by L4:
+
+```python
+    # CV stays on raw levels — see DETREND_PERIOD. The two correlation tests run on
+    # year-over-year differences.
+    detr = _yoy(wide[cols].to_numpy(dtype=float))
+    y_aligned = y.reindex(wide.index)
+    y_detr = _yoy(y_aligned.to_numpy(dtype=float))
+
+    # VIF is grouped by L4. Across all candidates it is not merely noisy but
+    # undefined — p indicators over n months with p >= n makes every column an exact
+    # combination of the others. Within one leaf factor p is 2-7 against n months, so
+    # the standard VIF is identified, and "do this factor's indicators duplicate each
+    # other?" is the question 2.33 actually poses ("同因子多指标时淘汰不达标者").
+    by_l4: dict[str, list[int]] = {}
+    for i, m in enumerate(metas):
+        by_l4.setdefault(m["l4"], []).append(i)
+    group_order = list(by_l4.values())
+    vif_groups = traced(
+        eng, st, task_id, "stat.vif",
+        f"{n} indicators in {len(group_order)} L4 groups × {len(detr)} periods",
+        get_tool("stat.vif").run, [detr[:, idx] for idx in group_order],
+        summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
+                            f"{int(np.nansum(np.asarray(v) >= 5))} at or above 5"
+                            if len(v) else "no indicators",
+    )
+    vif_by_col: dict[str, float] = {}
+    pos = 0
+    for idx in group_order:
+        for i in idx:
+            vif_by_col[cols[i]] = float(vif_groups[pos])
+            pos += 1
+```
+
+and the Pearson call becomes:
+
+```python
+    rs = traced(
+        eng, st, task_id, "stat.pearson",
+        f"{n} indicators vs KPI ({len(y_detr)} year-over-year periods)",
+        get_tool("stat.pearson").run,
+        [pd.Series(detr[:, i]) for i in range(len(cols))], pd.Series(y_detr),
+        summarize=lambda vals: f"|r| up to {max(abs(v) for v in vals):.2f} · "
+                               f"{sum(1 for v in vals if abs(v) >= 0.3)} at or above 0.3"
+                               if vals else "no indicators",
+    )
+    r_by_col = dict(zip(cols, rs))
+```
+
+Leave the `cvs` / `cv_by_col` block untouched, and leave the row construction and sorting
+untouched — only the three inputs change.
+
+- [ ] **Step 5: Batch the VIF tool wrapper**
+
+In `backend/app/tools/registry.py`, replace `_run_vif` (lines 72-75):
+
+```python
+def _run_vif(matrices: list):
+    """One VIF vector per matrix, concatenated — batched like _run_cv/_run_pearson.
+
+    2.4 calls this once per task run with one matrix per L4 group; the wrapper adds
+    no arithmetic of its own beyond concatenation.
+    """
+    from app.agents.data_rules import vif_all
+
+    return [v for m in matrices for v in vif_all(m)]
+```
+
+Update the `stat.vif` entry's `inputSummary` to
+`"One (months × indicators) matrix per L4 group of candidates still in play"`, and add this
+bullet at the top of its `logic` list:
+
+```python
+            "Called once per L4 group: across all candidates VIF is undefined (p >= n), "
+            "while within a leaf factor p is 2-7 against n months and the standard VIF holds.",
+```
+
+- [ ] **Step 6: Update the tool identity test**
+
+In `backend/app/tools/_test_tools.py`, replace line 93:
+
+```python
+    assert np.array_equal(get("stat.vif").run([matrix]), vif_all(matrix), equal_nan=True)
+```
+
+If that file builds a second matrix, also assert the concatenation order over two groups:
+
+```python
+    m2 = matrix[:, :2]
+    assert np.array_equal(get("stat.vif").run([matrix, m2]),
+                          list(vif_all(matrix)) + list(vif_all(m2)), equal_nan=True)
+```
+
+- [ ] **Step 7: Run the tests**
+
+```bash
+cd "backend" && PYTHONPATH=. .venv/bin/python tests/test_stat_scoring.py
+```
+Expected: PASS. The final line should report more than one verdict and a median VIF near 1.
+
+```bash
+cd "backend" && PYTHONPATH=. .venv/bin/python app/tools/_test_tools.py
+```
+Expected: PASS.
+
+```bash
+cd "backend" && PYTHONPATH=. .venv/bin/python tests/test_data_rules.py
+cd "backend" && PYTHONPATH=. .venv/bin/python tests/test_s2_roundtrip.py
+cd "backend" && PYTHONPATH=. .venv/bin/python tests/test_ledger.py
+```
+Expected: all PASS.
+
+- [ ] **Step 8: Report the resulting distribution**
+
+```bash
+cd "backend" && PYTHONPATH=. .venv/bin/python -c "
+from app.agents.stat_scoring import build_stat_scorecard
+from app.store.state import danone_meta, initial_state
+from collections import Counter
+c = build_stat_scorecard(initial_state(danone_meta()))
+print(Counter(r.auto_verdict for r in c.rows))
+print(Counter(r.disposition for r in c.rows))
+"
+```
+Record the output in your report. Expect a mix of verdicts, not a single bucket. If it still
+comes back as one bucket, stop and report — the wiring is wrong.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add backend/app/agents/stat_scoring.py backend/app/tools/registry.py \
+        backend/app/tools/_test_tools.py backend/tests/test_stat_scoring.py
+git commit -m "fix: screen 2.4 correlation tests on detrended series, group VIF by L4"
+```
+
+---
+
 ## Task 2: Propagate the new 2.4 scoring to text, findings and tool docs
 
 **Files:**
