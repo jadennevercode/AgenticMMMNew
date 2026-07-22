@@ -19,8 +19,8 @@
 
 | Sheet | 形状 | 内容 |
 |---|---|---|
-| `模型颗粒度参考表` | 96 行 × 8 列（表头在第 2 行） | 规划态因子树：`生意因子-Level 1/2/3` · `生意影响因子-Level 4` · `指标选择` · `渠道` · `区域`。层级列为合并单元格式的稀疏填充，需前向填充。65 个唯一指标。 |
-| `D.Data Station` | 23,813 行 × 22 列 | 实际长表：`Task name`·`品牌`·`省份组别`·`渠道类型`·`渠道`·`年`·`月`·`数据源`·`数据类型Level1..Level8`·`METRICS类型`·`METRICS`·`VALUE`，外加 `Variable`·`Variable no.`·`Metric no.` 三列命名元数据。57 个唯一 `Level5`，77 个 `Variable`，119 个 `Metric no.`，时间跨度 202301–202512。 |
+| `模型颗粒度参考表` | 97 行 × 8 列（表头在第 1 行，首列为空列） | 规划态因子树：`生意因子-Level 1/2/3` · `生意影响因子-Level 4` · `指标选择` · `渠道` · `区域`。层级列为合并单元格式的稀疏填充，需前向填充。97 个有效行、66 个唯一指标（31 行是同一指标的多条粒度记录）。 |
+| `D.Data Station` | 23,813 行 × 22 列 | 实际长表：`Task name`·`品牌`·`省份组别`·`渠道类型`·`渠道`·`年`·`月`·`数据源`·`数据类型Level1..Level8`·`METRICS类型`·`METRICS`·`VALUE`，外加 `Variable`·`Variable no.`·`Metric no.` 三列命名元数据。57 个唯一 `Level5`（含 `KPI` 自身，非 KPI 的实际指标 56 个），77 个 `Variable`，119 个 `Metric no.`，时间跨度 202301–202512。 |
 
 其他实测量：29 个 `数据源`、25 个 `Task name`、7 个 `渠道类型`（EC/O2O/MT/TT/AFH/社区团购/WS）、6 个 `省份组别`（National/A/B/C/D/E）、25 个 `METRICS类型`。
 
@@ -105,7 +105,7 @@ restored/model-input-2.32/
     factor-tree.json           FactorTree{rows:[FactorRow]}，可直接 PUT /factor-tree
     factor-tree.xlsx           人看的视图：L1-L4 + Indicator + 渠道 + 区域
                                + origin(planned/data/both) + hasData + rows + monthsCovered
-    reconciliation.md          29 条规划无数据 + 21 条有数据未入树，逐条列明
+    reconciliation.md          29 条规划无数据 + 19 条有数据未入树，逐条列明
   raw/                         29 个 workbook，按 数据源 拆，中文列名，明细粒度
     SIA.xlsx  MI.xlsx  Media.xlsx  Trade ANP 线下数据-Sandro.xlsx  ...
                                每个 workbook: sheet = Task name
@@ -125,11 +125,11 @@ restored/model-input-2.32/
 
 ### 因子树口径：并集，保留差异
 
-因子树 = 规划态（65 指标）∪ 实际态（57 指标）= 86 行，每行标注 `origin`：
+因子树 = 规划态（66 指标）∪ 实际态（56 个非 KPI 指标）= 85 行，每行标注 `origin`：
 
 - `planned` — 只在颗粒度参考表里，无数据（29 条）。在 2.1 因子映射门禁里自然进入 `pending`，需要人工 `ignore`，完整跑通 Data Intake 的人机环节。
-- `data` — 只在 D.Data Station 里，未入规划树（21 条）。补回树里，`l1–l4` 取该指标在长表中的实际层级路径。
-- `both` — 两边都有（36 条）。
+- `data` — 只在 D.Data Station 里，未入规划树（19 条）。补回树里，`l1–l4` 取该指标在长表中的实际层级路径。
+- `both` — 两边都有（37 条）。
 
 `FactorRow.dimension` 从颗粒度参考表的 `渠道` + `区域` 两列合成（如 `全渠道, National`）；`origin=data` 的行从长表里该指标实际出现的 `渠道类型` / `省份组别` distinct 值推导。`FactorRow.source` 一律 `"template"`，`status` 一律 `"baseline"`（还原产物不预设人工判定）。
 
@@ -146,7 +146,9 @@ restored/model-input-2.32/
 
 幂等重建全部产物。执行顺序：
 
-1. 读 `模型颗粒度参考表`（`header=1`），前向填充 L1–L4 层级列。
+1. 读 `模型颗粒度参考表`（`header=0`，丢掉首列空列），前向填充 L1–L4 层级列，丢掉 `指标选择` 为空的行。
+
+   注意 `header=1` 会静默吃掉第一条数据行（`品类全渠道销量`），把规划指标数从 66 误算成 65，进而把并集从 85 误算成 86。
 2. 读 `D.Data Station`，清洗字符串列（trim、空串归 NA，与 `ingest.dataset.load_model_dataset` 同口径）。
 3. **推导分类映射**：join 2.32 ↔ 2.24 得到 L1 与 `METRICS类型` 的映射。若出现映射冲突（同一业务 L1 对应多个引擎 L1），或出现 join 未覆盖的 L1 取值，**直接报错退出**，不静默套用默认值。
 4. 按规则 1 建因子树（并集，标 origin），输出 `factor-tree.json` / `.xlsx` / `reconciliation.md`。
