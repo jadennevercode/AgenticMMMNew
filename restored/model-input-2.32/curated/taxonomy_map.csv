@@ -1,0 +1,21 @@
+﻿kind,source,target,evidenceRows
+l1,KPI,KPI,4459
+l1,促销优惠,Commercial Factor,1076
+l1,消费者需求驱动,Marketing Factor,662
+l1,渠道成交驱动,Marketing Factor,519
+l1,生意基本盘,Baseline Factor,338
+metric_type,Impression,Impression,157
+metric_type,RMB,RMB,2065
+metric_type,RMB ,RMB ,68
+metric_type,Temperature,Temperature,68
+metric_type,Traffic,Traffic,68
+metric_type,Unit,Unit,34
+metric_type,Value,Value,664
+metric_type,Volume,Volume,753
+metric_type,volume,volume,167
+metric_type,天数,天数,161
+metric_type,百分比,百分比,1076
+metric_type,箱数,箱数,1308
+metric_type,花费,Spending,0
+metric_type,车辆数量,车辆数量,61
+metric_type,门店数量,门店数量,404

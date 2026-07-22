@@ -1,0 +1,84 @@
+﻿l1,l2,l3,l4,l5,metric,metricType,rows,coverageStart,coverageEnd,monthsCovered,nullRate,valueMin,valueMax,Variable,Variable no.,Metric no.
+,S,,,,,,23,0,0,0,1.0,,,,,
+Baseline Factor,内部因素,动销,产品吸引力,本品新品上市SKU个数,本品新品上市SKU个数,SKU数量,93,202301,202509,33,0.0,1.0,14.0,SKU_No_Lunch,16.0,16.1
+Baseline Factor,内部因素,动销,产品吸引力,本品老品下市SKU个数,本品老品下市SKU个数,SKU数量,76,202301,202508,32,0.0,1.0,10.0,SKU_No_OutOfShelf,17.0,17.1
+Baseline Factor,内部因素,动销,价格变动,本品标价,本品标价,RMB,294,202301,202510,34,0.0,4.4,6.67,Price,15.0,15.1
+Baseline Factor,内部因素,动销,品牌资产,品牌力指数,品牌力指数,百分比,10,202303,202509,10,0.0,0.12,0.14,Brand_Power,13.0,13.1
+Baseline Factor,内部因素,竞争格局,竞品渠道扩张,本品相对竞品ND,本品相对竞品ND,百分比,680,202301,202510,34,0.0,40.08,88.34,本品相对竞品ND,14.0,14.1
+Baseline Factor,内部因素,竞争格局,竞品渠道扩张,本品相对竞品WD,本品相对竞品WD,百分比,680,202301,202510,34,0.0,63.64,98.6,WD,14.0,14.2
+Baseline Factor,外部因素,品类趋势,场景化趋势,民航客运量,民航客运量,Traffic,34,202301,202510,34,0.0,39770000.0,75360000.0,Macro_Airport_Traffic,2.0,2.2
+Baseline Factor,外部因素,品类趋势,场景化趋势,高铁客运量,铁路客运量,Traffic,34,202301,202510,34,0.0,236090000.0,504990000.0,Macro_Train_Traffic,2.0,2.1
+Baseline Factor,外部因素,品类趋势,季节性趋势,温度,温度,Temperature,34,202301,202510,34,0.0,-4.4,23.8,Temperature,3.0,3.1
+Baseline Factor,外部因素,品类趋势,季节性趋势,降水量,降水量,Temperature,34,202301,202510,34,0.0,4089.91,75458.87,Rain,3.0,3.2
+Baseline Factor,外部因素,品类趋势,市场规模,品类全渠道销量,品类全渠道销量,value,34,202301,202510,34,0.0,21142004826.0,33827171917.0,NAB_All_Channel_Offtake_Value,1.0,1.1
+Baseline Factor,外部因素,品类趋势,特定属性趋势,现调饮料外卖销量,sales value,RMB,34,202301,202510,34,0.0,856661571.4,1753886429.0,Premise_Drink_Val,5.0,5.2
+Baseline Factor,外部因素,品类趋势,特定属性趋势,现调饮料外卖销量,sales volume,Unit,34,202301,202510,34,0.0,55226052.86,147498921.4,Premise_Drink_Vol,5.0,5.1
+Baseline Factor,外部因素,宏观环境,结构性突变因素,新型平台影响 O2O NAB GMV,GMV,RMB,34,202301,202510,34,0.0,217634.71,979818.23,O2O_NAB_Sales,4.0,4.2
+Baseline Factor,外部因素,宏观环境,结构性突变因素,新型平台影响 EC NAB GMV,Value,RMB,34,202301,202510,34,0.0,635128.34,1738235.4,EC_NAB_Sales,4.0,4.1
+Baseline Factor,外部因素,竞争格局,同一品类内竞争对手的渠道表现-线上,EC竞品GMV（不含O2O，可区分官旗和平台自营）,Smartpath sales,RMB,34,202301,202510,34,0.0,88988.08,241734.27,EC_GMV_Competition,10.0,10.1
+Baseline Factor,外部因素,竞争格局,竞品产品变化,竞品下市的SKU个数,竞品下市的SKU个数,SKU数量,96,202301,202508,32,0.0,4.0,48.0,SKU_NO_OffShelf_Competition,8.0,8.1
+Baseline Factor,外部因素,竞争格局,竞品产品变化,竞品新上市的SKU个数,竞品新上市的SKU个数,SKU数量,99,202301,202509,33,0.0,7.0,79.0,SKU_NO_Lunch_Competition,7.0,7.1
+Baseline Factor,外部因素,竞争格局,竞品价格变化,本品相对竞品标价,本品相对竞品标价,RMB,136,202301,202510,34,0.0,6.68,7.68,NAB_total_average_RSP_Price_Competition,6.0,6.1
+Baseline Factor,外部因素,竞争格局,竞品价格变化,竞品平均标价,竞品平均标价,RMB,136,202301,202510,34,0.0,5.7,6.98,NAB_Price_Change_Competition,6.0,6.2
+Baseline Factor,外部因素,竞争格局,竞品消费者需求驱动变化,NAB Media Spending加总,Spending,RMB,32,202302,202509,32,0.0,285295682.9,1891649076.0,NAB_Media_Spending,11.0,11.2
+Baseline Factor,外部因素,竞争格局,竞品消费者需求驱动变化,竞品品牌媒体花费,竞品品牌媒体花费,RMB,34,202301,202509,33,0.0,119044434.3,839485156.6,Media_competitor_Spending,11.0,11.1
+Baseline Factor,外部因素,竞争格局,竞品消费者需求驱动变化,竞品社交媒体声量,竞品社交媒体声量,Engagement,34,202301,202510,34,0.0,12381176.0,145605686.0,Competitors_Social_Engagement,12.0,12.1
+Baseline Factor,外部因素,竞争格局,竞品渠道扩张,竞品ND,竞品ND,百分比,680,202301,202510,34,0.0,445.32,900.11,ND_Change_Competition,9.0,9.1
+Baseline Factor,外部因素,竞争格局,竞品渠道扩张,竞品WD,竞品WD,百分比,680,202301,202510,34,0.0,607.42,1197.95,WD_Change_Competition,9.0,9.2
+Commercial Factor,促销优惠,促销优惠,促销优惠,PPI,PPI,百分比,1319,202301,202510,34,0.0,0.0,13.47,MT_Promotional_Offers,39.0,39.1
+Commercial Factor,促销优惠,促销优惠,促销优惠,O2O渠道促销深度,PPI 不区分,百分比,34,202301,202510,34,0.0,0.09563856677132054,0.24359392536463173,,,
+Commercial Factor,促销优惠,促销优惠,促销优惠,花费,花费,Spending,486,202301,202510,34,0.0,-548181.59,10565445.77,Consumer_Promotion_Offline_Spending,20.0,20.2
+KPI,KPI,KPI,KPI,KPI,Compass完成箱数,箱数,510,202301,202510,34,0.0,76901.0,1458402.0,SalesVol,51.0,51.1.1
+KPI,KPI,KPI,KPI,KPI,Compass完成金额,RMB,510,202301,202510,34,0.0,3360114.502,64064143.71,SalesValue,51.0,51.1.2
+KPI,KPI,KPI,KPI,KPI,GMV,Value,924,202301,202510,34,0.0022,0.0,35319748.68999964,SalesValue,53.0,53.1.2
+KPI,KPI,KPI,KPI,KPI,Volume,Volume,260,202301,202510,34,0.0,0.0,231599.98220109212,SalesVol,53.0,53.1.1
+KPI,KPI,KPI,KPI,KPI,箱数,Volume,662,202301,202510,34,0.003,0.0,427108.412,SalesVol,54.0,54.1.1
+KPI,KPI,KPI,KPI,KPI,谈判点出货箱数,箱数,798,202301,202510,34,0.0,79.0,454776.51,SalesVol,50.0,50.1.1
+KPI,KPI,KPI,KPI,KPI,谈判点出货金额,RMB,798,202301,202510,34,0.0,3642.48,19593801.18,SalesValue,50.0,50.1.2
+Marketing Factor,品牌广告/内容种草,品牌传播,Digital Display,曝光量,曝光量,曝光量,68,202304,202509,16,0.0,184328.0,341852267.0,OTV_Impression,26.0,26.1
+Marketing Factor,品牌广告/内容种草,品牌传播,Digital Display,花费,花费,Spending,68,202304,202509,16,0.0,0.0,5700000.0,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,品牌传播,OOH,曝光量,曝光量,曝光量,62,202305,202509,13,0.0,146123.14,505228256.8,OTV_Impression,26.0,26.1
+Marketing Factor,品牌广告/内容种草,品牌传播,OOH,花费,花费,Spending,62,202305,202509,13,0.0,8777.63,9788147.49,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,品牌传播,OOH-Non Lift Busshelter,Bus shelter,Impression,Impression,23,202407,202508,7,0.0,961035.2,822791441.7,,32.0,32.1.1
+Marketing Factor,品牌广告/内容种草,品牌传播,OOH-Non Lift Busshelter,Bus shelter,Spending,RMB,23,202407,202508,7,0.0,12624.59,5973463.81,,32.0,32.2.1
+Marketing Factor,品牌广告/内容种草,品牌传播,OOH-Non Lift Non Busshelter,Stadium,Impression,Impression,134,202304,202510,21,0.0,4525.46,64944097.38,,32.0,32.1.2
+Marketing Factor,品牌广告/内容种草,品牌传播,OOH-Non Lift Non Busshelter,Stadium,Spending,RMB,134,202304,202510,21,0.0,4508.78,2411933.96,,32.0,32.2.2
+Marketing Factor,品牌广告/内容种草,品牌传播,OTT,曝光量,曝光量,曝光量,62,202304,202509,22,0.0,3518591.59,1146067727.0,OTV_Impression,26.0,26.1
+Marketing Factor,品牌广告/内容种草,品牌传播,OTT,花费,花费,Spending,62,202304,202509,22,0.0,61208.4,20689687.83,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,品牌传播,OTV,曝光量,曝光量,曝光量,22,202304,202509,22,0.0,58130187.0,1394268746.0,OTV_Impression,26.0,26.1
+Marketing Factor,品牌广告/内容种草,品牌传播,OTV,花费,花费,Spending,22,202304,202509,22,0.0,480598.63,8914021.08,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,品牌传播,TV,GRP,GRP,GRP,18,202304,202508,18,0.0,104804140.0,871984971.2,TV_Impression,25.0,25.1
+Marketing Factor,品牌广告/内容种草,品牌传播,TV,花费,花费,Spending,18,202304,202508,18,0.0,1305156.6,9775550.76,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,品牌传播,热剧,曝光量,曝光量,曝光量,64,202304,202510,25,0.0,1649174.0,1893168979.0,OTV_Impression,26.0,26.1
+Marketing Factor,品牌广告/内容种草,品牌传播,热剧,花费,花费,Spending,64,202304,202510,25,0.0,31544.66,16039992.34,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,社交媒体及线下路演,社媒,社媒活动互动量,社媒活动互动量,社媒活动互动量,829,202301,202510,34,0.0,0.0,19850550.0,Social_Engagement,34.0,34.1
+Marketing Factor,品牌广告/内容种草,社交媒体及线下路演,社媒,花费,花费,Spending,79,202301,202509,29,0.0,72000.0,11489583.0,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,社交媒体及线下路演,线下路演,参与人数,参与人数,参与人数,69,202301,202509,27,0.0,0.0,248853.0,Social_Buzz_Offline_Traffic_New2,33.0,33.1
+Marketing Factor,品牌广告/内容种草,社交媒体及线下路演,线下路演,花费,花费,Spending,12,202404,202506,8,0.0,440000.0,4834000.0,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,品牌广告/内容种草,社交媒体及线下路演,综艺及赛事的赞助,曝光量,曝光量,曝光量,10,202307,202509,10,0.0,116123840.0,3564239729.0,OTV_Impression,26.0,26.1
+Marketing Factor,品牌广告/内容种草,社交媒体及线下路演,综艺及赛事的赞助,花费,花费,Spending,10,202307,202509,10,0.0,2390296.5,16464150.94,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,渠道/终端营销,冰柜,自有冰柜,已投放冰柜个数,已投放冰柜个数,个数,1414,202301,202510,34,0.0,0.0,14039868.86,Branded_Fridge,24.0,24.1
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,POSM和陈列物料（POSM&Rack),销售业代稽查平均门店POSM个数,销售业代稽查平均门店POSM个数,个数,644,202301,202510,34,0.0,0.17,110.79,POSM_NO,18.0,18.1.a
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,POSM和陈列物料（POSM&Rack),销售业代稽查平均门店POSM花费,销售业代稽查平均门店POSM花费,RMB,170,202301,202510,34,0.0,24398.532,92369.0,POSM_Spending,18.0,18.2
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,POSM和陈列物料（POSM&Rack),销售业代稽查平均门店陈列架个数,销售业代稽查平均门店陈列架个数,个数,45,202302,202508,11,0.0,20.0,37920.0,Shelf_NO,18.0,18.1.b
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,POSM和陈列物料（POSM&Rack),销售业代稽查平均门店陈列架花费,销售业代稽查平均门店陈列架花费,RMB,170,202301,202510,34,0.0,20688.82,91748.37,POSM_Spending,18.0,18.2
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,品牌显现（Store Decoration）,执行门店,执行门店,门店数量,1130,202302,202510,33,0.0,1.0,238.0,Store_Decoration,19.0,19.1.a
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,品牌显现（Store Decoration）,花费,花费,RMB,1191,202302,202510,33,0.0,42.0,1958814.83,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,渠道/终端营销,品牌显现及陈列展示,品牌显现（Store Decoration）,车辆数量,车辆数量,车辆数量,61,202304,202507,15,0.0,1.0,92.0,Bus_Decoration,19.0,19.1.b
+Marketing Factor,渠道/终端营销,店内促销,MT/TT/AFH 线上促销（微信/支付宝立减）,TT/AFH-spending,Spending,RMB,278,202302,202510,27,0.0,0.0,1485968.75,EC_Payment_Spending_New,22.0,22.2
+Marketing Factor,渠道/终端营销,店内促销,MT/TT/AFH 线上促销（微信/支付宝立减）,TT/AFH-spending,签约门店数,门店数量,254,202308,202507,12,0.0,1.75,12619.0,EC_Payment_Spending_New,22.0,22.1.b
+Marketing Factor,渠道/终端营销,店内促销,旺点促销,执行门店数,执行门店数,执行门店数,980,202301,202510,33,0.0,1.0,1872.0,UTC_Bottles,21.0,21.1
+Marketing Factor,渠道/终端营销,店内促销,旺点促销,花费,花费,RMB,965,202301,202510,33,0.0,21.39,3546873.6,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,渠道/终端营销,店内促销,礼赠,花费,花费,RMB,71,202302,202510,33,0.0,2000.0,3167459.54,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,渠道/终端营销,店内促销,试饮,执行门店数,执行门店数,执行门店数,20,202507,202510,4,0.0,186722.0,2150987.0,UTC_Bottles,21.0,21.1
+Marketing Factor,渠道/终端营销,店内促销,试饮,花费,花费,Spending,20,202507,202510,4,0.0,197103.04,2207586.48,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,渠道执行,渠道执行,销售业代对于产品上架的执行 - 产品全,销售业代稽查平均门店必分销SKU数,销售业代稽查平均门店必分销SKU数,平均数,497,202301,202510,34,0.0,1.0,172.81,Salesforce_SKUs_Onshelf,42.0,42.1
+Marketing Factor,渠道执行,渠道执行,销售业代对于产品陈列的执行 - 位置好,销售业代稽查视平线达成率,销售业代稽查视平线达成率,达成率,523,202301,202510,34,0.0,0.06,28.09,Salesforce_Shelf_EyeLine,44.0,44.1.b
+Marketing Factor,渠道执行,渠道执行,销售业代对于产品陈列的执行 - 数量多,销售业代稽查冰柜纯度达成率,销售业代稽查冰柜纯度达成率,达成率,534,202301,202510,34,0.0,0.25,29.45,Salesforce_Freezer_EyeLine,44.0,44.1.a
+Marketing Factor,渠道执行,渠道执行,销售业代对于产品陈列的执行 - 数量多,销售业代稽查平均门店必分销SKU排面数,销售业代稽查平均门店必分销SKU排面数,平均数,534,202301,202510,34,0.0,0.33,756.73,Salesforce_Shelfs_No,43.0,43.1.b
+Marketing Factor,渠道执行,渠道执行,销售业代对于产品陈列的执行 - 数量多,销售业代稽查平均门店整体排面数,销售业代稽查平均门店整体排面数,平均数,542,202301,202510,34,0.0,1.0,508.77,Salesforce_Frozen_No,43.0,43.1.a
+Marketing Factor,电商平台媒体及促销,电商买赠,电商买赠,O2O消费者促销,执行门店数,门店数量,194,202301,202512,36,0.0,1.0,26197.0,O2O_Stores_No,36.0,36.1
+Marketing Factor,电商平台媒体及促销,电商买赠,电商买赠,满减,活动天数,天数,162,202302,202510,24,0.0,0.5,91.0,Group_Deal,37.0,37.1
+Marketing Factor,电商平台媒体及促销,电商买赠,电商买赠,花费,花费,Spending,422,202301,202510,34,0.0,0.0,1136985.1,Consumer_Promotion_Offline_Spending,20.0,20.2
+Marketing Factor,电商平台媒体及促销,电商站内投流,站内投流,曝光量,曝光量,曝光量,51,202301,202510,32,0.0,212186.0,2015890473.0,OTV_Impression,26.0,26.1
+Marketing Factor,电商平台媒体及促销,电商站内投流,站内投流,花费,花费,Spending,602,202301,202510,34,0.0,0.0,2049848.0,Consumer_Promotion_Offline_Spending,20.0,20.2
