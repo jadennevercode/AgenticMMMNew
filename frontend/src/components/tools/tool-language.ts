@@ -32,3 +32,30 @@ export function formatDuration(ms: number | null | undefined): string {
 export function invocationsForTask(all: ToolInvocation[], taskId: string): ToolInvocation[] {
   return all.filter((v) => v.taskId === taskId)
 }
+
+/**
+ * The registered tools each step is expected to call, in call order.
+ *
+ * Used only to seed queued placeholders while a task runs — the real timeline is
+ * whatever `tool_invocations` reports, so a step that calls something not listed
+ * here still renders it, and a step that skips a listed tool just leaves it
+ * queued until the run ends.
+ */
+export const EXPECTED_TOOLS: Record<string, string[]> = {
+  '2.2': ['quality.consistency', 'quality.accuracy', 'quality.completeness', 'quality.granularity'],
+  '2.4': ['stat.cv', 'stat.pearson', 'stat.vif'],
+  '2.5': ['model.ols'],
+  '2.5r': ['model.ols'],
+}
+
+/** Display name for a tool id we have not seen an invocation for yet. */
+export const TOOL_DISPLAY_NAME: Record<string, string> = {
+  'quality.consistency': 'Consistency Check',
+  'quality.accuracy': 'Accuracy Check',
+  'quality.completeness': 'Completeness Check',
+  'quality.granularity': 'Granularity Check',
+  'stat.cv': 'CV (Volatility)',
+  'stat.pearson': 'Pearson Correlation',
+  'stat.vif': 'VIF (Collinearity)',
+  'model.ols': 'OLS MMM Fit',
+}
