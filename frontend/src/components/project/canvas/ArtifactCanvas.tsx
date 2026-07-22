@@ -355,7 +355,7 @@ export function ArtifactCanvas({ inst, editing }: { inst: ArtifactInstance; edit
     case 'review':
       return <ReviewView inst={inst} editing={editing} />
     case 'validation':
-      return <BusinessValidationView inst={inst} editing={editing} />
+      return <BusinessValidationView inst={inst} />
     case 'olsTree':
       // Legacy projects saved a sheet body before the olsTree upgrade — fall back
       // to the sheet grid until they re-run 2.5.

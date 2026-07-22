@@ -250,12 +250,11 @@ function ComparisonBlock({ res }: { res: ValidationSeriesResponse }) {
 interface FactorCardProps {
   group: ValidationGroup
   projectId: string
-  editing: boolean
   timeWindowId: string
   onSignoff: (l3: string, value: 'yes' | 'no') => void
 }
 
-function FactorCard({ group, projectId, editing, timeWindowId, onSignoff }: FactorCardProps) {
+function FactorCard({ group, projectId, timeWindowId, onSignoff }: FactorCardProps) {
   const ref = useRef<HTMLElement>(null)
   const [inView, setInView] = useState(false)
   const [grain, setGrain] = useState('month')
@@ -367,7 +366,6 @@ function FactorCard({ group, projectId, editing, timeWindowId, onSignoff }: Fact
             <button
               key={v}
               type="button"
-              disabled={!editing}
               onClick={() => onSignoff(group.l3, v)}
               className={cn(
                 'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
@@ -376,7 +374,6 @@ function FactorCard({ group, projectId, editing, timeWindowId, onSignoff }: Fact
                     ? 'bg-emerald-500/15 text-emerald-600'
                     : 'bg-rose-500/15 text-rose-600'
                   : 'border border-border text-muted-foreground hover:bg-muted',
-                !editing && 'cursor-not-allowed opacity-60',
               )}
             >
               {v === 'yes' ? 'Y' : 'N'}
@@ -576,8 +573,8 @@ function TimeWindowBar({
   )
 }
 
-export function BusinessValidationView({ inst, editing }: { inst: ArtifactInstance; editing: boolean }) {
-  const editArtifact = useSimStore((s) => s.editArtifact)
+export function BusinessValidationView({ inst }: { inst: ArtifactInstance }) {
+  const signoff = useSimStore((s) => s.setSignoff)
   const projectId = useSimStore((s) => s.activeProjectId)
   const [windowId, setWindowId] = useState('')  // DATA-005: shared across all cards
   const data = asValidation(inst.body)
@@ -590,15 +587,12 @@ export function BusinessValidationView({ inst, editing }: { inst: ArtifactInstan
     )
   }
 
-  const setSignoff = (l3: string, value: 'yes' | 'no') =>
-    editArtifact(inst.id, {
-      body: {
-        ...data,
-        groups: data.groups.map((g) =>
-          g.l3 !== l3 ? g : { ...g, signoff: g.signoff === value ? '' : value },
-        ),
-      },
-    })
+  // Persisted server-side: an explicit 'no' excludes the factor and all of its
+  // indicators from the model. Clicking the active verdict again clears it.
+  const setSignoff = (l3: string, value: 'yes' | 'no') => {
+    const current = data.groups.find((g) => g.l3 === l3)?.signoff
+    void signoff(l3, current === value ? '' : value)
+  }
 
   const signedOff = data.groups.filter((g) => g.signoff === 'yes').length
 
@@ -626,7 +620,7 @@ export function BusinessValidationView({ inst, editing }: { inst: ArtifactInstan
 
       {projectId &&
         data.groups.map((g) => (
-          <FactorCard key={g.l3} group={g} projectId={projectId} editing={editing} timeWindowId={windowId} onSignoff={setSignoff} />
+          <FactorCard key={g.l3} group={g} projectId={projectId} timeWindowId={windowId} onSignoff={setSignoff} />
         ))}
     </div>
   )

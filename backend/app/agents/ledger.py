@@ -151,14 +151,14 @@ def signoff_reject_l3(st: ProjectState) -> set[str]:
     Only an explicit ``no`` rejects: a blank sign-off means "not individually
     reviewed", which the global ``d-2.3`` gate covers. Treating blank as a
     rejection would empty the model before the human ever opened the deck.
+
+    Read from ``st.signoffs`` (durable state written by ``PUT /signoff``). This
+    used to read the ``a-business-validation`` artifact body, which no code path
+    ever persisted — so this whole layer was structurally incapable of rejecting
+    anything, while the funnel still credited it for indicators nobody reviewed.
     """
-    art = next((a for a in st.artifacts if a.id == "a-business-validation"), None)
-    body = getattr(art, "body", None) or {}
-    out: set[str] = set()
-    for g in body.get("groups") or []:
-        if isinstance(g, dict) and _norm(g.get("signoff")) == "no":
-            out.add(_norm(g.get("l3")))
-    return out
+    return {_norm(l3) for l3, verdict in (getattr(st, "signoffs", None) or {}).items()
+            if _norm(verdict) == "no"}
 
 
 def ols_flagged_pairs(st: ProjectState) -> set[tuple[str, str]]:

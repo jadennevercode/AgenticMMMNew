@@ -273,6 +273,8 @@ interface SimStore {
   updateOlsConfig: (cfg: OlsConfig) => Promise<void>
   /** Persist the 2.3a anomaly rulings; accepted handlings reach the fit. */
   updateAnomalyReview: (review: AnomalyReview) => Promise<void>
+  /** 2.3s — persist one L3 factor's business sign-off ('' clears it). */
+  setSignoff: (l3: string, verdict: 'yes' | 'no' | '') => Promise<void>
 
   /** Data Engine actions. */
   loadDataAssets: () => Promise<void>
@@ -903,6 +905,20 @@ export const useSimStore = create<SimStore>((set, get) => {
       set({ anomalyReview: review })
       try {
         await api.updateAnomalyReview(pid, review)
+        await get().refresh()
+      } catch (e) {
+        set({ error: errorMessage(e) })
+      }
+    },
+
+    setSignoff: async (l3, verdict) => {
+      const pid = get().activeProjectId
+      if (!pid) return
+      // A sign-off is a DECISION, not an artifact edit: it must reach the server
+      // or the ledger's signoff layer can never reject anything. (It used to go
+      // through `editArtifact`, which is local-only — the next poll erased it.)
+      try {
+        await api.setSignoff(pid, l3, verdict)
         await get().refresh()
       } catch (e) {
         set({ error: errorMessage(e) })

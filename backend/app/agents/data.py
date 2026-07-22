@@ -501,9 +501,21 @@ def _bv_groups(st: ProjectState, df: pd.DataFrame) -> list[dict]:
             "rowIds": rows_by_l3.get(l3.casefold(), []),
             "defaultIndicators": indicators,
             "interpretation": _bv_interpretation(df, l3, indicators),
-            "signoff": "",
+            # Reflect the durable verdict, so re-running 2.3 cannot erase a
+            # sign-off the client already gave (`st.signoffs` is the truth —
+            # this field is a rendering of it).
+            "signoff": _signoff_for(st, l3),
         })
     return groups
+
+
+def _signoff_for(st: ProjectState, l3: str) -> str:
+    """The client's recorded verdict for an L3 factor ("yes" / "no" / "")."""
+    key = str(l3).strip().casefold()
+    for stored, verdict in (getattr(st, "signoffs", None) or {}).items():
+        if str(stored).strip().casefold() == key:
+            return str(verdict or "")
+    return ""
 
 
 async def _bv_narrate(groups: list[dict]) -> None:

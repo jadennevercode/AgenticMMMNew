@@ -795,6 +795,36 @@ async def update_anomaly_review(project_id: str, body: AnomalyReview) -> dict:
     return body.model_dump(by_alias=True)
 
 
+class SignoffBody(BaseModel):
+    """One L3 factor's business sign-off. "" clears it back to un-reviewed."""
+    l3: str
+    verdict: str = ""  # "yes" | "no" | ""
+
+
+@app.put("/api/projects/{project_id}/signoff")
+async def put_signoff(project_id: str, body: SignoffBody) -> dict:
+    """Record the client's per-factor sign-off at 2.3s.
+
+    This is a *decision*, not an artifact edit: an explicit "no" excludes the
+    factor and every one of its indicators from the model, inherited by every
+    later ledger layer. It therefore lives on ProjectState — the artifact body is
+    rewritten each time 2.3 re-runs, so a verdict stored there could not survive.
+    """
+    verdict = body.verdict.strip().lower()
+    if verdict not in ("", "yes", "no"):
+        raise HTTPException(422, "verdict must be 'yes', 'no' or ''")
+    st = _require_state(project_id)
+    if verdict:
+        st.signoffs[body.l3] = verdict
+    else:
+        st.signoffs.pop(body.l3, None)
+    # Re-render the deck so the artifact and the ledger agree immediately.
+    if st.artifact("a-business-validation") is not None:
+        await _engine.handlers["2.3"](_engine, st, bp.TASK_MAP["2.3"])
+    get_store().save(project_id)
+    return {"signoffs": dict(st.signoffs)}
+
+
 # ── Master Data live slice (task 2.6) ────────────────────
 class MasterTableQuery(BaseModel):
     brand: list[str] = []

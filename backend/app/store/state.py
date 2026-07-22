@@ -95,6 +95,13 @@ class ProjectState(BaseModel):
     # snake_case (it is a plain BaseModel), and an aliased field here emits a
     # camelCase key the frontend's snake_case reader silently misses.
     ols_config: Optional[OlsConfig] = None
+    # S2 · 2.3s: the client's per-L3 business sign-off (normalised L3 -> "yes"|"no").
+    # Source of truth for the ledger's signoff layer. It lives HERE and not in the
+    # a-business-validation body because a producing handler rewrites that body on
+    # every run — a human verdict stored there is erased by the next re-render (and
+    # was never persisted at all: the UI only mutated its local copy).
+    # No alias — see the note on `ols_config`.
+    signoffs: dict[str, str] = Field(default_factory=dict)
     # 2.1 Data Processing: factor rows the user explicitly ignores in the
     # FactorTree↔DataAssets mapping (rowId → note). A row is resolved when it is
     # either mapped by a published indicator or listed here; the 2.1 gate blocks
