@@ -6,6 +6,7 @@ import { BusinessValidationView } from '../validation/BusinessValidationView'
 import { DataProcessingCanvas } from './DataProcessingCanvas'
 import { MasterDataView } from './MasterDataView'
 import { OlsTreeView } from './OlsTreeView'
+import { QualityCanvas } from './QualityCanvas'
 import { MiniMarkdown } from '../../ui/primitives'
 import { cn } from '../../../lib/cn'
 import type { ArtifactInstance, DocData, SheetData, SlidesData } from '../../../lib/types'
@@ -351,6 +352,7 @@ function ReviewView({ inst, editing }: { inst: ArtifactInstance; editing: boolea
  */
 const ID_CANVASES: Record<string, (inst: ArtifactInstance) => ReactElement> = {
   'a-data-processing': (inst) => <DataProcessingCanvas inst={inst} />,
+  'a-quality-scorecard': () => <QualityCanvas />,
 }
 
 /** Dispatch to the renderer for the artifact's format */
