@@ -8,7 +8,6 @@ from __future__ import annotations
 import numpy as np
 
 from app.agents.data_rules import (
-    STAT_ACCEPTABLE,
     STAT_GOOD,
     VIF_MAX,
     reference_cv,
@@ -29,36 +28,26 @@ def _approx(a: float, b: float, tol: float = 1e-9) -> bool:
 
 
 def test_band_boundaries() -> None:
-    """CV / Pearson / VIF map to the 0 / 0.5 / 1 / 2 bands at the KB thresholds."""
-    # CV bands (cv, expected cv_score) — boundaries are inclusive on the lower edge.
-    for cv, want in [(0.04, 0.0), (0.05, 0.0), (0.07, 0.5), (0.1, 1.0),
-                     (0.19, 1.0), (0.2, 2.0), (0.5, 2.0)]:
+    for cv, want in [(0.0, 0.0), (0.05, 0.0), (0.06, 0.5), (0.099, 0.5), (0.1, 1.0), (9.9, 1.0)]:
         got = score_statistical(cv, 0.0, 1.0).cv_score
-        assert got == want, f"CV {cv}: got {got}, want {want}"
-    # Pearson bands on |r|.
-    for r, want in [(0.05, 0.0), (0.1, 0.5), (-0.2, 0.5), (0.3, 1.0),
-                    (0.49, 1.0), (0.5, 2.0), (-0.9, 2.0)]:
+        assert got == want, f"cv={cv} → {got}, want {want}"
+    for r, want in [(0.0, 0.0), (-0.09, 0.0), (0.1, 0.5), (-0.29, 0.5), (0.3, 1.0), (-0.99, 1.0)]:
         got = score_statistical(0.0, r, 1.0).pearson_score
-        assert got == want, f"Pearson {r}: got {got}, want {want}"
-    # VIF bands.
-    for vif, want in [(1.0, 0.0), (2.0, 0.5), (4.9, 0.5), (5.0, 1.0),
-                      (9.9, 1.0), (10.0, 2.0), (50.0, 2.0)]:
+        assert got == want, f"r={r} → {got}, want {want}"
+    for vif, want in [(1.0, 1.0), (1.01, 0.5), (4.99, 0.5), (5.0, 0.0), (99.0, 0.0)]:
         got = score_statistical(0.0, 0.0, vif).vif_score
-        assert got == want, f"VIF {vif}: got {got}, want {want}"
+        assert got == want, f"vif={vif} → {got}, want {want}"
     print("✓ band boundaries")
 
 
 def test_verdict_thresholds() -> None:
-    """Total = CV+Pearson+VIF drives Good ≥ 3, Acceptable 1.5–3, else Unconsiderable."""
-    # Good: 1 + 2 + 0 = 3.0
-    assert score_statistical(0.1, 0.6, 1.0).verdict == "Good"
-    # Acceptable: 0.5 + 1 + 0 = 1.5
-    ac = score_statistical(0.07, 0.4, 1.0)
-    assert _approx(ac.total, 1.5) and ac.verdict == "Acceptable"
-    # Unconsiderable: 0 + 0.5 + 0.5 = 1.0
-    un = score_statistical(0.04, 0.2, 2.0)
-    assert _approx(un.total, 1.0) and un.verdict == "unconsiderable"
-    assert STAT_ACCEPTABLE == 1.5 and STAT_GOOD == 3.0
+    """Total = CV x Pearson x VIF; only an all-pass product (1.0) is Good."""
+    assert score_statistical(0.2, 0.6, 1.0).verdict == "Good"
+    ac = score_statistical(0.07, 0.4, 1.0)          # 0.5 * 1 * 1
+    assert ac.total == 0.5 and ac.verdict == "Acceptable"
+    un = score_statistical(0.04, 0.2, 2.0)          # 0 * 0.5 * 0.5
+    assert un.total == 0.0 and un.verdict == "unconsiderable"
+    assert STAT_GOOD == 0.5
     print("✓ verdict thresholds")
 
 
@@ -105,10 +94,10 @@ def test_end_to_end_reference() -> None:
     assert card.rows, "expected scored indicators on the reference dataset"
     for r in card.rows:
         assert r.indicator, "each row names an indicator"
-        assert 0.0 <= r.cv_score <= 2.0
-        assert 0.0 <= r.pearson_score <= 2.0
-        assert 0.0 <= r.vif_score <= 2.0
-        assert _approx(r.total, r.cv_score + r.pearson_score + r.vif_score)
+        assert 0.0 <= r.cv_score <= 1.0
+        assert 0.0 <= r.pearson_score <= 1.0
+        assert 0.0 <= r.vif_score <= 1.0
+        assert _approx(r.total, r.cv_score * r.pearson_score * r.vif_score)
         assert r.auto_verdict in ("Good", "Acceptable", "unconsiderable")
         assert r.disposition in ("include", "review", "drop")
     # Worst-first ordering.

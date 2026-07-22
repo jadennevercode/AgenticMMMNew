@@ -53,21 +53,32 @@ def test_validation_continuity_band() -> None:
 
 
 def test_statistical_bands() -> None:
-    assert [score_statistical(cv, 0.4, 2).cv_score for cv in (0.04, 0.07, 0.15, 0.5)] == [0.0, 0.5, 1.0, 2.0]
-    assert [score_statistical(0.3, r, 2).pearson_score for r in (0.05, 0.2, 0.4, 0.8)] == [0.0, 0.5, 1.0, 2.0]
-    assert [score_statistical(0.3, 0.4, v).vif_score for v in (1, 3, 7, 12)] == [0.0, 0.5, 1.0, 2.0]
+    """2.33 bands are 0 / 0.5 / 1 per test. VIF is scored the workbook's way:
+    VIF = 1 is the GOOD end (no collinearity), VIF >= 5 is the bad end."""
+    assert [score_statistical(cv, 0.4, 1).cv_score for cv in (0.04, 0.07, 0.15, 0.5)] == [0.0, 0.5, 1.0, 1.0]
+    assert [score_statistical(0.3, r, 1).pearson_score for r in (0.05, 0.2, 0.4, 0.8)] == [0.0, 0.5, 1.0, 1.0]
+    assert [score_statistical(0.3, 0.4, v).vif_score for v in (1, 3, 7, 12)] == [1.0, 0.5, 0.0, 0.0]
+    print("✓ statistical bands")
 
 
 def test_statistical_verdict_thresholds() -> None:
-    assert score_statistical(0.5, 0.8, 1).verdict == "Good"          # 2+2+0 = 4
-    assert score_statistical(0.15, 0.2, 3).verdict == "Acceptable"   # 1+0.5+0.5 = 2
-    assert score_statistical(0.04, 0.05, 1).verdict == "unconsiderable"  # 0
+    """Total is the PRODUCT of the three bands, so a single failing test zeroes it."""
+    good = score_statistical(0.5, 0.8, 1)      # 1 * 1 * 1
+    assert good.total == 1.0 and good.verdict == "Good" and not good.drop
+    mid = score_statistical(0.15, 0.2, 3)      # 1 * 0.5 * 0.5
+    assert mid.total == 0.25 and mid.verdict == "Acceptable" and not mid.drop
+    dead = score_statistical(0.04, 0.8, 1)     # 0 * 1 * 1 — flat series
+    assert dead.total == 0.0 and dead.verdict == "unconsiderable" and dead.drop
+    print("✓ statistical verdict thresholds")
 
 
-def test_statistical_severe_collinearity_drops_despite_high_total() -> None:
-    sc = score_statistical(0.3, 0.8, 12)  # strong signal but VIF 12 → severe collinearity
-    assert sc.total >= 3.0 and sc.verdict == "Good"
-    assert sc.drop is True
+def test_severe_collinearity_zeroes_the_total() -> None:
+    """A strong, volatile indicator still dies on collinearity — VIF >= 5 scores 0
+    and the product carries that to the verdict without a separate override."""
+    sc = score_statistical(0.3, 0.8, 12)
+    assert sc.vif_score == 0.0 and sc.total == 0.0
+    assert sc.verdict == "unconsiderable" and sc.drop
+    print("✓ severe collinearity zeroes the total")
 
 
 def test_rule_rows_load_from_kb() -> None:

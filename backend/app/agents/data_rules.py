@@ -10,8 +10,8 @@ The authoritative rubric lives in ``Assets/数据智能体知识库/机器可读
 
 2.11 data validation — four dimensions, each 0 / 0.5 / 1:
     consistency (continuity) · accuracy · completeness · granularity
-2.33 statistical screening — three tests, each 0 / 0.5 / 1 / 2:
-    CV (volatility) · Pearson (vs KPI) · VIF (collinearity); Total = sum.
+2.33 statistical screening — three tests, each 0 / 0.5 / 1:
+    CV (volatility) · Pearson (vs KPI) · VIF (collinearity); Total = product.
 """
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ KB_DIR = (BACKEND_ROOT.parent / "Assets" / "数据智能体知识库" / "机器�
 VALIDATION_PASS = 3.0       # accept
 VALIDATION_BORDERLINE = 2.0  # human decision (0.5-band); below → unusable
 
-# Statistical verdict thresholds — Total = CV + Pearson + VIF in [0, 6].
-STAT_GOOD = 3.0
-STAT_ACCEPTABLE = 1.5
-STAT_SEVERE_VIF = 10.0      # severe collinearity → drop regardless of total
+# Statistical verdict thresholds — Total = CV x Pearson x VIF in [0, 1].
+# Only an all-pass product (1.0) clears STAT_GOOD; a single failing test zeroes
+# the product, which is exactly the strictness the 2.33 workbook intends.
+STAT_GOOD = 0.5
 
 
 @lru_cache(maxsize=8)
@@ -146,34 +146,37 @@ class StatScore:
 
 
 def _cv_band(cv: float) -> float:
+    """2.33 volatility band. A near-flat series cannot explain KPI movement."""
     if cv <= 0.05:
         return 0.0
     if cv < 0.1:
         return 0.5
-    if cv < 0.2:
-        return 1.0
-    return 2.0
+    return 1.0
 
 
 def _pearson_band(r: float) -> float:
+    """2.33 correlation band on |r| against the KPI."""
     a = abs(r)
     if a < 0.1:
         return 0.0
     if a < 0.3:
         return 0.5
-    if a < 0.5:
-        return 1.0
-    return 2.0
+    return 1.0
 
 
 def _vif_band(vif: float) -> float:
-    if vif <= 1.0:
+    """2.33 collinearity band. Note the direction: VIF = 1 (no collinearity) is
+    the GOOD end and scores 1; VIF >= 5 is明显共线性 and scores 0.
+
+    The workbook writes the top band as "VIF = 1"; since ``vif_all`` floors its
+    output at 1.0, this is implemented as ``vif <= 1.0`` — the same set of
+    values, without a float-equality trap.
+    """
+    if vif >= 5.0:
         return 0.0
-    if vif < 5.0:
+    if vif > 1.0:
         return 0.5
-    if vif < 10.0:
-        return 1.0
-    return 2.0
+    return 1.0
 
 
 def reference_cv(x: "np.ndarray") -> float:
@@ -242,24 +245,25 @@ def vif_all(matrix: "np.ndarray") -> "np.ndarray":
 
 
 def score_statistical(cv: float, pearson: float, vif: float) -> StatScore:
-    """Score one variable on CV / Pearson / VIF per the KB bands.
+    """Score one variable on CV / Pearson / VIF per the 2.33 bands.
 
-    Total follows the KB formula (CV + Pearson + VIF). The keep/drop verdict
-    additionally guards against severe collinearity, since a high VIF inflates
-    the KB total but means the variable should be dropped, not kept.
+    Total is the **product** of the three bands, matching the workbook's
+    ``Final score = 完整性*颗粒度*真实性*一致性`` form applied to the three
+    statistical tests. A single failing test therefore zeroes the total, and a
+    zero total is the drop condition — no separate severe-collinearity override
+    is needed, because VIF >= 5 already scores 0 on its own.
     """
     cv_s = _cv_band(cv)
     pear_s = _pearson_band(pearson)
     vif_s = _vif_band(vif)
-    total = round(cv_s + pear_s + vif_s, 2)
-    if total >= STAT_GOOD:
+    total = round(cv_s * pear_s * vif_s, 4)
+    if total > STAT_GOOD:
         verdict = "Good"
-    elif total >= STAT_ACCEPTABLE:
+    elif total > 0.0:
         verdict = "Acceptable"
     else:
         verdict = "unconsiderable"
-    drop = total < STAT_ACCEPTABLE or vif >= STAT_SEVERE_VIF
-    return StatScore(cv_s, pear_s, vif_s, total, verdict, drop)
+    return StatScore(cv_s, pear_s, vif_s, total, verdict, drop=total == 0.0)
 
 
 def statistical_rule_rows() -> list[list[str]]:
