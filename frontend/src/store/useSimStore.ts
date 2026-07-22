@@ -148,6 +148,7 @@ interface BackendState {
   findings?: Record<string, TaskFinding[]>
   analysis?: unknown
   dataAssets?: DataAsset[]
+  signoffs?: Record<string, string>
 }
 
 const POLL_INTERVAL_MS = 1500
@@ -211,6 +212,9 @@ interface SimStore {
   olsConfig: OlsConfig | null
   /** S2 (2.3a) anomaly hypotheses with the human's per-anomaly ruling. */
   anomalyReview: AnomalyReview | null
+  /** 2.3s — per-target business sign-off verdicts, keyed by ledger.signoff_key
+   *  form ("i:<l4>|<metric>" or "f:<l3>"; legacy unprefixed keys still read). */
+  signoffs: Record<string, string>
 
   /** Data Engine: project-scoped data assets (raw → review → clean → publish). */
   dataAssets: DataAsset[]
@@ -273,8 +277,11 @@ interface SimStore {
   updateOlsConfig: (cfg: OlsConfig) => Promise<void>
   /** Persist the 2.3a anomaly rulings; accepted handlings reach the fit. */
   updateAnomalyReview: (review: AnomalyReview) => Promise<void>
-  /** 2.3s — persist one L3 factor's business sign-off ('' clears it). */
-  setSignoff: (l3: string, verdict: 'yes' | 'no' | '') => Promise<void>
+  /** 2.3s — persist a business sign-off at indicator or factor granularity.
+   *  Supply `l4` + `indicator` for a single indicator, or `l3` alone to apply
+   *  to every indicator under that factor. '' clears the verdict. */
+  setSignoff: (target: { l3?: string; l4?: string; indicator?: string },
+               verdict: 'yes' | 'no' | '') => Promise<void>
 
   /** Data Engine actions. */
   loadDataAssets: () => Promise<void>
@@ -357,6 +364,7 @@ function mapState(s: BackendState, currentChats: Record<string, AssistantTurn[]>
   if (s.stat_scorecard !== undefined) patch.statScorecard = s.stat_scorecard ?? null
   if (s.ols_config !== undefined) patch.olsConfig = s.ols_config ?? null
   if (s.anomaly_review !== undefined) patch.anomalyReview = s.anomaly_review ?? null
+  if (s.signoffs !== undefined) patch.signoffs = s.signoffs ?? {}
   if (s.tasks) {
     patch.tasks = Object.fromEntries(
       Object.entries(s.tasks).map(([id, raw]) => [id, toTaskRuntime(raw)]),
@@ -412,6 +420,7 @@ function blankRuntime(): Partial<SimStore> {
     statScorecard: null,
     olsConfig: null,
     anomalyReview: null,
+    signoffs: {},
     dataAssets: [],
     dataAssetsLoading: false,
     selectedDataAssetId: null,
@@ -492,6 +501,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     statScorecard: null,
     olsConfig: null,
     anomalyReview: null,
+    signoffs: {},
     dataAssets: [],
     dataAssetsLoading: false,
     selectedDataAssetId: null,
@@ -911,14 +921,16 @@ export const useSimStore = create<SimStore>((set, get) => {
       }
     },
 
-    setSignoff: async (l3, verdict) => {
+    setSignoff: async (target, verdict) => {
       const pid = get().activeProjectId
       if (!pid) return
       // A sign-off is a DECISION, not an artifact edit: it must reach the server
       // or the ledger's signoff layer can never reject anything. (It used to go
       // through `editArtifact`, which is local-only — the next poll erased it.)
+      // No optimistic set() here: a poll landing mid-flight would otherwise flip
+      // the toggle back under the user's finger before the PUT resolves.
       try {
-        await api.setSignoff(pid, { l3, verdict })
+        await api.setSignoff(pid, { ...target, verdict })
         await get().refresh()
       } catch (e) {
         set({ error: errorMessage(e) })

@@ -10,6 +10,7 @@ import { useSimStore } from '../../../store/useSimStore'
 import { asValidation } from '../../../lib/artifact-format'
 import { cn } from '../../../lib/cn'
 import { ValidationChart } from './ValidationChart'
+import { groupVerdict, pairVerdict } from './signoff'
 
 // DATA-005: the period grains the view can bucket on.
 const GRAIN_LABELS: Record<string, string> = {
@@ -247,14 +248,77 @@ function ComparisonBlock({ res }: { res: ValidationSeriesResponse }) {
   )
 }
 
+const VERDICT_LABEL: Record<'accepted' | 'denied' | 'mixed' | 'pending', string> = {
+  accepted: 'Accepted', denied: 'Denied', mixed: 'Mixed', pending: 'Pending',
+}
+
+/** Per-indicator Accept/Deny rows beneath a chart. Clicking the value already
+ * set clears it back to '' — blank means "not individually reviewed", which is
+ * not the same as accepted. */
+function IndicatorSignoffList({
+  pairs,
+  signoffs,
+  onSignoffPair,
+}: {
+  pairs: { l4: string; indicator: string }[]
+  signoffs: Record<string, string>
+  onSignoffPair: (pair: { l4: string; indicator: string }, verdict: 'yes' | 'no' | '') => void
+}) {
+  if (!pairs.length) {
+    return (
+      <p className="mt-3 text-xs text-muted-foreground">
+        This chart predates per-indicator sign-off — re-run 2.3 to enable it.
+      </p>
+    )
+  }
+  return (
+    <div className="mt-3 divide-y divide-border/60 rounded-lg border border-border">
+      {pairs.map((pair) => {
+        const v = pairVerdict(signoffs, pair.l4, pair.indicator)
+        return (
+          <div
+            key={`${pair.l4}|${pair.indicator}`}
+            className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs"
+          >
+            <span className="min-w-0 truncate" title={`${pair.l4} · ${pair.indicator}`}>
+              <span className="text-muted-foreground">{pair.l4}</span> · {pair.indicator}
+            </span>
+            <div className="flex shrink-0 items-center gap-1">
+              {(['yes', 'no'] as const).map((val) => (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => onSignoffPair(pair, v === val ? '' : val)}
+                  className={cn(
+                    'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
+                    v === val
+                      ? val === 'yes'
+                        ? 'bg-emerald-500/15 text-emerald-600'
+                        : 'bg-rose-500/15 text-rose-600'
+                      : 'border border-border text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  {val === 'yes' ? 'Y' : 'N'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 interface FactorCardProps {
   group: ValidationGroup
   projectId: string
   timeWindowId: string
-  onSignoff: (l3: string, value: 'yes' | 'no') => void
+  signoffs: Record<string, string>
+  onSignoffPair: (pair: { l4: string; indicator: string }, verdict: 'yes' | 'no' | '') => void
+  onSignoffAll: (verdict: 'yes' | 'no') => void
 }
 
-function FactorCard({ group, projectId, timeWindowId, onSignoff }: FactorCardProps) {
+function FactorCard({ group, projectId, timeWindowId, signoffs, onSignoffPair, onSignoffAll }: FactorCardProps) {
   const ref = useRef<HTMLElement>(null)
   const [inView, setInView] = useState(false)
   const [grain, setGrain] = useState('month')
@@ -352,6 +416,7 @@ function FactorCard({ group, projectId, timeWindowId, onSignoff }: FactorCardPro
   const opts = res?.options
   const grains = opts?.grains ?? ['year', 'month']
   const breadcrumb = [group.l1, group.l2, group.l3].filter(Boolean).join(' › ')
+  const verdict = groupVerdict(group, signoffs)
 
   return (
     <section ref={ref} className="rounded-xl border border-border bg-card p-4 shadow-sm">
@@ -360,25 +425,32 @@ function FactorCard({ group, projectId, timeWindowId, onSignoff }: FactorCardPro
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{group.l1} › {group.l2}</div>
           <h3 className="truncate text-sm font-semibold tracking-tight" title={breadcrumb}>{group.l3}</h3>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <span className="text-[10px] text-muted-foreground">Sign-off</span>
-          {(['yes', 'no'] as const).map((v) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => onSignoff(group.l3, v)}
-              className={cn(
-                'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
-                group.signoff === v
-                  ? v === 'yes'
-                    ? 'bg-emerald-500/15 text-emerald-600'
-                    : 'bg-rose-500/15 text-rose-600'
-                  : 'border border-border text-muted-foreground hover:bg-muted',
-              )}
-            >
-              {v === 'yes' ? 'Y' : 'N'}
-            </button>
-          ))}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span
+            className={cn(
+              'rounded px-2 py-0.5 text-[11px] font-medium',
+              verdict === 'accepted' && 'bg-emerald-500/15 text-emerald-600',
+              verdict === 'denied' && 'bg-rose-500/15 text-rose-600',
+              verdict === 'mixed' && 'bg-amber-500/15 text-amber-700',
+              verdict === 'pending' && 'bg-muted text-muted-foreground',
+            )}
+          >
+            {VERDICT_LABEL[verdict]}
+          </span>
+          <button
+            type="button"
+            onClick={() => onSignoffAll('yes')}
+            className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
+          >
+            Accept all
+          </button>
+          <button
+            type="button"
+            onClick={() => onSignoffAll('no')}
+            className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
+          >
+            Deny all
+          </button>
         </div>
       </div>
 
@@ -478,6 +550,8 @@ function FactorCard({ group, projectId, timeWindowId, onSignoff }: FactorCardPro
         </div>
       )}
 
+      <IndicatorSignoffList pairs={group.pairs ?? []} signoffs={signoffs} onSignoffPair={onSignoffPair} />
+
       {res && <ComparisonBlock res={res} />}
       {res && <YearlyTable res={res} />}
 
@@ -574,7 +648,8 @@ function TimeWindowBar({
 }
 
 export function BusinessValidationView({ inst }: { inst: ArtifactInstance }) {
-  const signoff = useSimStore((s) => s.setSignoff)
+  const signoffs = useSimStore((s) => s.signoffs)
+  const setSignoff = useSimStore((s) => s.setSignoff)
   const projectId = useSimStore((s) => s.activeProjectId)
   const [windowId, setWindowId] = useState('')  // DATA-005: shared across all cards
   const data = asValidation(inst.body)
@@ -587,14 +662,9 @@ export function BusinessValidationView({ inst }: { inst: ArtifactInstance }) {
     )
   }
 
-  // Persisted server-side: an explicit 'no' excludes the factor and all of its
-  // indicators from the model. Clicking the active verdict again clears it.
-  const setSignoff = (l3: string, value: 'yes' | 'no') => {
-    const current = data.groups.find((g) => g.l3 === l3)?.signoff
-    void signoff(l3, current === value ? '' : value)
-  }
-
-  const signedOff = data.groups.filter((g) => g.signoff === 'yes').length
+  // Denials are the consequential verdict — an explicit 'no' excludes an
+  // indicator (or, via l3, every indicator under a factor) from the model.
+  const denied = Object.values(signoffs).filter((v) => v === 'no').length
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
@@ -602,7 +672,7 @@ export function BusinessValidationView({ inst }: { inst: ArtifactInstance }) {
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold tracking-tight">Business Validation · {data.groups.length} factors</h2>
           <span className="text-xs text-muted-foreground">
-            KPI backdrop: <span className="font-medium text-foreground">{data.kpiMetric || '—'}</span> · signed off {signedOff}/{data.groups.length}
+            KPI backdrop: <span className="font-medium text-foreground">{data.kpiMetric || '—'}</span> · {denied} denied
           </span>
         </div>
         {data.note && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{data.note}</p>}
@@ -620,7 +690,15 @@ export function BusinessValidationView({ inst }: { inst: ArtifactInstance }) {
 
       {projectId &&
         data.groups.map((g) => (
-          <FactorCard key={g.l3} group={g} projectId={projectId} timeWindowId={windowId} onSignoff={setSignoff} />
+          <FactorCard
+            key={g.l3}
+            group={g}
+            projectId={projectId}
+            timeWindowId={windowId}
+            signoffs={signoffs}
+            onSignoffPair={(pair, verdict) => void setSignoff({ l4: pair.l4, indicator: pair.indicator }, verdict)}
+            onSignoffAll={(verdict) => void setSignoff({ l3: g.l3 }, verdict)}
+          />
         ))}
     </div>
   )
