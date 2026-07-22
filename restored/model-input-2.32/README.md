@@ -77,6 +77,28 @@
 `pivot._pick_y_metric()` 默认按"月覆盖优先 + 销量优先"选，2.5y 门禁可人工覆盖。
 跨渠道汇总的 Y 不可比 —— 默认 Y 在单个 model object（= `channel_type` 分组）内选取。
 
+## 从头跑一个 Case 需要什么
+
+**这个文件夹只有数据，不含 S1 需要的文档。** S1 的三个上传门禁要的是文本材料，
+本还原产物覆盖不到，必须另外提供：
+
+| 门禁 | category | 需要什么 | 本次贯通用的 |
+|---|---|---|---|
+| 1.0a | `project_background` | SOW / 立项简报 | `reference/01.商业智能体/【MMM AI】商业智能体-Scope_1.0.xlsx` |
+| 1.1a | `industry_reference` | 品牌竞品报告、内部材料 | 同目录 `行业知识_1.1.xlsx` + `factor&data_request_1.2.xlsx` |
+| 1.4a | `interview_minutes` | 访谈录音或纪要 | 同目录 `访谈框架及纪要_1.32/纪要/*.docx`（12 份） |
+| 2.1  | `data` | 建模数据 | **本文件夹** `curated/long_table.xlsx`（或 `raw/` 30 份） |
+
+端到端复现（真实后端 + 真实 LLM，无 mock）：
+
+```bash
+cd backend
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 &
+PYTHONPATH=. .venv/bin/python -m scripts.e2e_case
+```
+
+跑通过程中撞到的断点与假数问题，全部记在 `qa/e2e-findings.md`。
+
 ## 重新生成
 
 ```bash
