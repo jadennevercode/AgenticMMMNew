@@ -166,7 +166,7 @@ def _pearson_band(r: float) -> float:
 
 def _vif_band(vif: float) -> float:
     """2.33 collinearity band. Note the direction: VIF = 1 (no collinearity) is
-    the GOOD end and scores 1; VIF >= 5 is明显共线性 and scores 0.
+    the GOOD end and scores 1; VIF >= 5 is 明显共线性 and scores 0.
 
     The workbook writes the top band as "VIF = 1"; since ``vif_all`` floors its
     output at 1.0, this is implemented as ``vif <= 1.0`` — the same set of

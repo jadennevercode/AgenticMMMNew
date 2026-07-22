@@ -105,6 +105,58 @@ def test_yoy_removes_level_trend_and_season() -> None:
     print("✓ YoY differencing removes level, trend and seasonality")
 
 
+def test_yoy_guards_on_result_size_not_input_size() -> None:
+    """A 13-14 month project must not be differenced down to 1-2 rows -- that
+    starves Pearson's `mask.sum() < 3` guard and silently drops everything with
+    nothing explaining why."""
+    from app.agents.stat_scoring import MIN_DETRENDED_POINTS, _yoy
+
+    assert MIN_DETRENDED_POINTS == 6
+    # 14 months would difference down to 2 rows (14-12) -- below the minimum,
+    # so it must come back unchanged rather than starved.
+    a14 = np.arange(14, dtype=float)
+    assert np.array_equal(_yoy(a14), a14)
+    # 18 months differences down to exactly 6 rows -- right at the threshold,
+    # so it must still detrend.
+    a18 = np.arange(18, dtype=float)
+    d18 = _yoy(a18)
+    assert d18.shape[0] == 6
+    assert not np.array_equal(d18, a18)
+    print("✓ YoY guards on the RESULT size, not the input size")
+
+
+def test_reindex_onto_complete_calendar_pairs_correct_months() -> None:
+    """A month missing anywhere in the panel must not turn `a[12:] - a[:-12]`
+    into a '12 rows ago' difference across the discontinuity."""
+    import pandas as pd
+
+    from app.agents.stat_scoring import _complete_month_index, _yoy
+
+    # Two years of months with March 2024 (202403) missing from the raw panel.
+    months = [202401, 202402, 202404, 202405, 202406, 202407, 202408, 202409,
+              202410, 202411, 202412,
+              202501, 202502, 202503, 202504, 202505, 202506, 202507, 202508,
+              202509, 202510, 202511, 202512]
+    values = pd.Series(range(len(months)), index=months, dtype=float)
+
+    # Without the calendar reindex, "12 rows ago" is not "12 months ago" once a
+    # month is missing: position 12 in the raw (gapped) array is Feb-2025, not
+    # Jan-2025 -- an off-by-one diff across the March-2024 discontinuity.
+    assert months[12] == 202502
+    d_raw = _yoy(values.to_numpy(dtype=float))
+    assert d_raw[0] == values.loc[202502] - values.loc[202401]  # the bug this fixes
+
+    full_idx = _complete_month_index(values.index)
+    assert 202403 in full_idx and len(full_idx) == 24
+    reindexed = values.reindex(full_idx, fill_value=0.0)
+    d_fixed = _yoy(reindexed.to_numpy(dtype=float))
+    assert d_fixed.shape[0] == 12
+    # Position 0 of the fixed differences is now truly Jan-2025 minus Jan-2024.
+    assert d_fixed[0] == values.loc[202501] - values.loc[202401]
+    print("✓ reindexing onto the complete calendar range keeps YoY differencing "
+          "paired on real calendar months across a gap")
+
+
 def test_detrending_makes_the_screening_discriminate() -> None:
     """The regression this task exists to prevent: on raw levels every indicator
     passed CV and Pearson and failed VIF, so every total was 0 and 2.4 dropped
@@ -158,6 +210,8 @@ if __name__ == "__main__":
     test_reference_cv()
     test_vif_identified_vs_underdetermined()
     test_yoy_removes_level_trend_and_season()
+    test_yoy_guards_on_result_size_not_input_size()
+    test_reindex_onto_complete_calendar_pairs_correct_months()
     test_detrending_makes_the_screening_discriminate()
     test_end_to_end_reference()
     print("\nall statistical-score tests passed")

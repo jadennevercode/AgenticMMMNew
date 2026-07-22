@@ -8,10 +8,11 @@ time axis and the KPI (Y):
 * **Pearson** (vs KPI)  — signed correlation of the indicator with Y.
 * **VIF** (collinearity)— per-indicator variance inflation across ALL indicators.
 
-Each maps to a 0/0.5/1/2 band (``data_rules``); Total = CV+Pearson+VIF drives the
-Good / Acceptable / Unconsiderable verdict. The result is a ``StatScorecard`` the
-human reviews on the Canvas (per-indicator include / review / drop). Numbers are
-computed from the real long table via pandas/numpy — never from the LLM.
+Each maps to a 0/0.5/1 band (``data_rules``); Total = CV×Pearson×VIF (a single
+failing test zeroes it) drives the Good / Acceptable / Unconsiderable verdict.
+The result is a ``StatScorecard`` the human reviews on the Canvas (per-indicator
+include / review / drop). Numbers are computed from the real long table via
+pandas/numpy — never from the LLM.
 """
 from __future__ import annotations
 
@@ -42,16 +43,49 @@ _DISPOSITION_DEFAULT: dict[str, str] = {
 # at all, which is a property of the level series.
 DETREND_PERIOD = 12
 
+# Guard on the RESULT of differencing, not the input length: a 13-14 month
+# project differences down to 1-2 rows, and Pearson's `mask.sum() < 3` guard
+# then silently returns 0.0 for every indicator, dropping everything with no
+# explanation. Below this many resulting rows, skip differencing altogether.
+MIN_DETRENDED_POINTS = 6
+
 
 def _yoy(a: np.ndarray, period: int = DETREND_PERIOD) -> np.ndarray:
     """Year-over-year difference along axis 0.
 
-    Series with no more than ``period`` observations are returned unchanged — a
-    short project should still be screened, just without the seasonal correction.
+    Returns the input unchanged when differencing would leave fewer than
+    ``MIN_DETRENDED_POINTS`` rows — a short project should still be screened,
+    just without the seasonal correction, rather than being handed a handful of
+    points too few for Pearson (or anything else) to say anything meaningful.
     """
-    if a.shape[0] <= period:
+    if a.shape[0] - period < MIN_DETRENDED_POINTS:
         return a
     return a[period:] - a[:-period]
+
+
+def _complete_month_index(idx: "pd.Index") -> "pd.Index":
+    """The full contiguous yyyymm month range spanning ``idx``'s min..max.
+
+    Successive months are NOT successive integers (...202412, 202501...), so
+    the range has to be built by calendar arithmetic, not ``range()``. Used to
+    reindex the panel before year-over-year differencing: a month missing
+    anywhere in the panel would otherwise silently turn ``a[12:] - a[:-12]``
+    into a "12 rows ago" difference across the gap instead of a true YoY one.
+    """
+    if idx.empty:
+        return idx
+    lo, hi = int(idx.min()), int(idx.max())
+    y, m = divmod(lo, 100)
+    months: list[int] = []
+    cur = lo
+    while cur <= hi:
+        months.append(cur)
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+        cur = y * 100 + m
+    return pd.Index(months, name=idx.name)
 
 
 def _monthly_y(df: pd.DataFrame) -> pd.Series | None:
@@ -130,6 +164,12 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
     if not metas or y is None:
         return StatScorecard(rows=[])
 
+    # Reindex onto the complete, contiguous calendar range before anything is
+    # differenced positionally — a month missing anywhere in the panel would
+    # otherwise silently shift a[12:]-a[:-12] across the gap. New months are
+    # zero-filled, consistent with how _indicator_series already zero-fills gaps.
+    wide = wide.reindex(_complete_month_index(wide.index), fill_value=0.0)
+
     inherited = drops_before(st, "statistical")
     if inherited:
         metas = [m for m in metas
@@ -149,38 +189,31 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
     cv_by_col = dict(zip(cols, cvs))
 
     # CV stays on raw levels — see DETREND_PERIOD. The two correlation tests run on
-    # year-over-year differences.
+    # year-over-year differences (or, on a too-short project — see
+    # MIN_DETRENDED_POINTS — on the raw levels; the trace below says which).
+    n_rows = len(wide)
     detr = _yoy(wide[cols].to_numpy(dtype=float))
     y_aligned = y.reindex(wide.index)
     y_detr = _yoy(y_aligned.to_numpy(dtype=float))
+    was_detrended = len(detr) < n_rows
+    period_label = (
+        f"{len(detr)} year-over-year periods" if was_detrended
+        else f"{len(detr)} monthly points (too short to detrend)"
+    )
 
-    # VIF is grouped by L4. Across all candidates it is not merely noisy but
-    # undefined — p indicators over n months with p >= n makes every column an exact
-    # combination of the others. Within one leaf factor p is 2-7 against n months, so
-    # the standard VIF is identified, and "do this factor's indicators duplicate each
-    # other?" is the question 2.33 actually poses ("同因子多指标时淘汰不达标者").
-    by_l4: dict[str, list[int]] = {}
-    for i, m in enumerate(metas):
-        by_l4.setdefault(m["l4"], []).append(i)
-    group_order = list(by_l4.values())
-    vif_groups = traced(
-        eng, st, task_id, "stat.vif",
-        f"{n} indicators in {len(group_order)} L4 groups × {len(detr)} periods",
-        get_tool("stat.vif").run, [detr[:, idx] for idx in group_order],
+    # VIF is computed once across the whole candidate set, at indicator granularity.
+    vifs = traced(
+        eng, st, task_id, "stat.vif", f"{n} indicators × {period_label}",
+        get_tool("stat.vif").run, detr,
         summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
                             f"{int(np.nansum(np.asarray(v) >= 5))} at or above 5"
                             if len(v) else "no indicators",
     )
-    vif_by_col: dict[str, float] = {}
-    pos = 0
-    for idx in group_order:
-        for i in idx:
-            vif_by_col[cols[i]] = float(vif_groups[pos])
-            pos += 1
+    vif_by_col = dict(zip(cols, vifs))
 
     rs = traced(
         eng, st, task_id, "stat.pearson",
-        f"{n} indicators vs KPI ({len(y_detr)} year-over-year periods)",
+        f"{n} indicators vs KPI ({period_label})",
         get_tool("stat.pearson").run,
         [pd.Series(detr[:, i]) for i in range(len(cols))], pd.Series(y_detr),
         summarize=lambda vals: f"|r| up to {max(abs(v) for v in vals):.2f} · "

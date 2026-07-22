@@ -90,10 +90,7 @@ def test_stat_tools_identity(df: pd.DataFrame) -> None:
     matrix = wide[cols].to_numpy(dtype=float)
     y_aligned = y.reindex(wide.index)
 
-    assert np.array_equal(get("stat.vif").run([matrix]), vif_all(matrix), equal_nan=True)
-    m2 = matrix[:, :2]
-    assert np.array_equal(get("stat.vif").run([matrix, m2]),
-                          list(vif_all(matrix)) + list(vif_all(m2)), equal_nan=True)
+    assert np.array_equal(get("stat.vif").run(matrix), vif_all(matrix), equal_nan=True)
     assert get("stat.cv").run([wide[c].to_numpy(dtype=float) for c in cols]) == \
         [reference_cv(wide[c].to_numpy(dtype=float)) for c in cols]
     assert get("stat.pearson").run([wide[c] for c in cols], y_aligned) == \
