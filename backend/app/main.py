@@ -780,6 +780,42 @@ async def post_validation_series(project_id: str, body: ValidationSeriesQuery) -
     )
 
 
+@app.get("/api/projects/{project_id}/validation-dataset")
+async def get_validation_dataset(project_id: str) -> dict:
+    """Flat validation dataset (long-table rows + column metadata) for the explorer."""
+    from app.dataeng.validation_dataset import build_validation_dataset
+    st = _require_state(project_id)
+    return build_validation_dataset(st)
+
+
+@app.get("/api/projects/{project_id}/validation-specs")
+async def get_validation_specs(project_id: str) -> dict:
+    """Saved explorer check specs, or `{}` if none have been saved yet."""
+    st = _require_state(project_id)
+    return st.validation_specs or {}
+
+
+@app.put("/api/projects/{project_id}/validation-specs")
+async def put_validation_specs(project_id: str, body: dict) -> dict:
+    """Persist the explorer's current check specs."""
+    st = _require_state(project_id)
+    st.validation_specs = {
+        "specs": body.get("specs", []),
+        "version": int(body.get("version", 1)),
+    }
+    get_store().save(project_id)
+    return st.validation_specs
+
+
+@app.post("/api/projects/{project_id}/validation-insight")
+async def post_validation_insight(project_id: str, body: dict) -> dict:
+    """LLM-grounded narrative insight for a single explorer check's result rows."""
+    from app.dataeng.validation_insight import generate_insight
+    _require_state(project_id)  # 404s an unknown project
+    text = await generate_insight(body.get("spec", {}), body.get("rows", []))
+    return {"insight": text}
+
+
 # ── anomaly review (S2 · 2.3a · per-anomaly handling) ────
 @app.put("/api/projects/{project_id}/anomaly-review")
 async def update_anomaly_review(project_id: str, body: AnomalyReview) -> dict:
