@@ -139,6 +139,33 @@ await chatInput.press('Enter')
 await page.waitForTimeout(400)
 await page.screenshot({ path: `${OUT}/10c-canvas-chat-edit.png` })
 
+// 10d. Business Validation explorer (task 2.3) — Explore + Sign-off tabs
+await ensureProject()
+await page.click('a:has-text("Workflow Canvas")')
+await page.waitForTimeout(500)
+const bvNode = page.locator('.react-flow__node', { hasText: 'Business Validation' })
+if ((await bvNode.count()) > 0) {
+  await bvNode.first().click()
+  await page.waitForSelector('text=Build process')
+  await page.waitForTimeout(300)
+
+  const exploreTab = page.getByRole('button', { name: 'Explore' })
+  if ((await exploreTab.count()) > 0) {
+    await exploreTab.click()
+    await page.waitForTimeout(1800) // Graphic Walker lazy chunk + first render
+    await page.screenshot({ path: `${OUT}/11-validation-explore.png` })
+  }
+
+  const signoffTab = page.getByRole('button', { name: 'Sign-off' })
+  if ((await signoffTab.count()) > 0) {
+    await signoffTab.click()
+    await page.waitForTimeout(200)
+    const firstY = page.getByRole('button', { name: 'Y' }).first()
+    if ((await firstY.count()) > 0) await firstY.click()
+    await page.screenshot({ path: `${OUT}/12-validation-signoff.png` })
+  }
+}
+
 // 11. Knowledge still works
 await page.click('a:has-text("Knowledge")')
 await page.waitForSelector('text=What the team knows')
