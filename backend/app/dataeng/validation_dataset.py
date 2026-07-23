@@ -12,10 +12,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 import app.agents.dataset_cache as dataset_cache
-from app.agents.indicator_metadata import classify_indicator  # noqa: F401  (kept for future column typing)
 
 # fid → semantic/analytic classification for the fixed dimension columns.
 _DIMENSIONS = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8",
@@ -23,17 +23,26 @@ _DIMENSIONS = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8",
 _CELL_KEYS = ["l3", "l4", "metric", "brand", "channel_type", "province_group"]
 
 
-def _period(year: Any, month: Any) -> str:
-    m = pd.to_numeric(pd.Series([month]), errors="coerce").iloc[0]
-    if pd.notna(m) and int(m) >= 190001:
-        s = str(int(m))
-        return f"{s[:4]}-{s[4:6]}"
-    y = pd.to_numeric(pd.Series([year]), errors="coerce").iloc[0]
-    return "" if pd.isna(y) else str(int(y))
+def _period(df: pd.DataFrame) -> pd.Series:
+    """Vectorized period label over the whole frame: "YYYY-MM" for monthly rows
+    (month as yyyymm >= 190001), else the year as a string, else ""."""
+    m = pd.to_numeric(df.get("month"), errors="coerce")
+    y = pd.to_numeric(df.get("year"), errors="coerce")
+    has_month = m.notna() & (m >= 190001)
+    m_str = m.astype("Int64").astype("string")
+    monthly = m_str.str.slice(0, 4) + "-" + m_str.str.slice(4, 6)
+    yearly = y.astype("Int64").astype("string")
+    return monthly.where(has_month, yearly).fillna("")
 
 
 def _with_yoy(df: pd.DataFrame) -> pd.Series:
-    """YoY % per (cell, period-within-year): value vs the same month/year-1."""
+    """YoY % per (cell, period-within-year): value vs the same month/year-1.
+
+    When a cell/period has multiple source rows (e.g. multiple published Data
+    Engine assets contribute the same cell), the prior-year value is taken from
+    the first row after a stable sort by cell keys + year + month, so the result
+    is deterministic regardless of the incoming row order.
+    """
     val = pd.to_numeric(df["value"], errors="coerce")
     ym = pd.to_numeric(df["month"], errors="coerce")
     has_month = ym.notna()
@@ -43,10 +52,18 @@ def _with_yoy(df: pd.DataFrame) -> pd.Series:
     keys = df[[c for c in _CELL_KEYS if c in df.columns]].astype("string").fillna("")
     cur = pd.Series(list(zip(*[keys[c] for c in keys.columns], yr, mm)), index=df.index)
     prev = pd.Series(list(zip(*[keys[c] for c in keys.columns], yr - 1, mm)), index=df.index)
-    prior_val = pd.Series(val.values, index=cur.values)
+
+    sort_cols = list(keys.columns)
+    sort_key = keys.copy()
+    sort_key["__yr"] = yr
+    sort_key["__mm"] = mm
+    order = sort_key.sort_values(sort_cols + ["__yr", "__mm"], kind="mergesort").index
+
+    prior_val = pd.Series(val.loc[order].values, index=cur.loc[order].values)
     prior_val = prior_val[~prior_val.index.duplicated(keep="first")]
     mapped = prev.map(prior_val)
-    yoy = (val - mapped) / mapped.abs() * 100.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        yoy = (val - mapped) / mapped.abs() * 100.0
     return yoy.where(mapped.notna() & (mapped != 0))
 
 
@@ -76,7 +93,7 @@ def build_validation_dataset(st: object, row_cap: int = 200_000) -> dict:
     if df.empty:
         return {"columns": _columns(df), "rows": [], "rowCount": 0, "capped": False, "note": ""}
     df["year"] = pd.to_numeric(df.get("year"), errors="coerce").astype("Int64")
-    df["period"] = [_period(y, m) for y, m in zip(df.get("year"), df.get("month"))]
+    df["period"] = _period(df)
     df["value_yoy"] = _with_yoy(df).round(1)
 
     capped = len(df) > row_cap
