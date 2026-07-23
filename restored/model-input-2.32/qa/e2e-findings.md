@@ -361,3 +361,20 @@ attempted in this task. It needs a running `uvicorn` server, LLM credentials,
 and touches shared `data/` project state, none of which this read-only,
 in-memory verification is allowed to do. That run is the controller's
 responsibility on a dedicated project id.
+
+## 2026-07-23 — Live autopilot e2e on new per-channel code (BLOCKED: external LLM 502)
+Ran `POST /reset` + `POST /run {autopilot:true}` on `danone-mizone` against the
+feat/per-channel-screening backend (port 8020, GLM-5.2 configured).
+- Deterministic S1 steps completed cleanly: 1.0, 1.0a, 1.1a done (3 tasks).
+- HALTED at task 1.1 (first LLM-dependent A/C step): `LLMError: LLM chat failed
+  after 3 attempts — HTTP 502`. Reproduced with a direct `get_llm().json()` probe —
+  persistent, provider/gateway side, NOT a code issue and NOT transient.
+- Pre-existing infra bug re-observed (out of Phase 2 scope): `app/main.py::_run_job`
+  does not isolate the LLMError, so task 1.1 is stranded at status "running" while the
+  run guard clears — "Task exception was never retrieved". (Documented in prior sessions.)
+CONCLUSION: the per-channel pipeline itself is verified end-to-end on REAL data by
+`app/agents/_test_real_per_channel.py` (7 channels, genuine per-channel divergence,
+master-table columns differ by channel). A full *autopilot* case (with the LLM narrative
+layer) needs the GLM-5.2 endpoint restored (check provider status / credentials / quota
+in Settings → model config). No fabricated data was produced — the run stopped rather
+than faking the LLM output.
