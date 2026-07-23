@@ -253,3 +253,47 @@ setup: {"configured": true, "selectedX": 6, "totalX": 22, ...}
 `D.Data Station` 23,813 = 2.24 的 23,790 + **23 行全空 padding**。
 `raw/` 因此是 30 个 workbook（29 个真实数据源 + `未标注数据源.xlsx` 装这 23 行）。
 保留而非静默丢弃：无损断言要求逐行多重集相等，真实客户文件也常带尾部空行。
+
+---
+
+## ✅ 修复验证 2026-07-22（真实跑通，非单测）
+
+两个 BREAK 已修复并在真实后端 + 真实 LLM 上验证（项目 `mizone-mmm-e2e-v4-gate-minutes-v`）。
+实现见 `docs/superpowers/plans/2026-07-22-s1-gate-writeback-and-minutes-coverage.md`
+（commits 4266159 / b77a580 / b3ed513）。
+
+### BREAK 1 — 已修复，实测通过
+S1 跑完，`d-1.21` 批准后 **46 条 AI 因子行全部从 `proposed` 翻成 `accepted`**：
+
+```
+tree 181 行 → accepted/ai 46 · baseline/template 135
+ACTIVE（进 2.1）：181/181     [修复前：仅 135 template 进 2.1，46 AI 行全被丢]
+```
+
+单测 `tests/test_factor_gate_effects.py` 另外锁定：翻转只动本门禁来源集、尊重手动
+`rejected`、翻转后的行确实进入 `resolve_factor_map`。
+
+### BREAK 2 — 已修复，实测通过
+真实 `writeback_minutes` 处理器在隔离条件下（pacer 已激活、无并发 1.3b 抢占）跑 v4 的
+12 份真实纪要：**12 份全部逐份送入 LLM，合并后 25/28 个业务问题被回答**
+（修复前 `0/28`——只有前 5 份挤进 9000 字符上限，后 7 份一字未进）。
+
+流水线里的"never silent"也实测生效：当 1.4 的 12 并发调用整体撞上限流惩罚时，
+处理器**如实报告 `Interview digest: 0/12 transcripts used` 并标为 finding**、逐份容错
+（一份失败返回 {} 不拖垮任务），而不是像修复前那样静默假装"已从纪要回写"。
+
+### 附带发现（既有基础设施问题，不属本次两个 BREAK，未修）
+LLM 端点是 20次/2分钟硬限 + **10 分钟惩罚锁死**。`973fcd9` 的 pacer 是**反应式**的
+（观测到首个 429 才开始限速），存在两个洞：
+
+1. **冷启动突发**：刚重启的后端进程 pacer 未激活，S1 前几个任务的调用齐射易触发惩罚；
+   一旦进入 10 分钟锁死，3 次退避重试（约 7 分钟）盖不住，任务硬失败。
+2. **未捕获的 LLMError 会卡死任务**：`assemble_knowledge`(1.1) 等处理器不 catch LLMError，
+   异常冒泡杀死 `app/main.py::_run_job`，任务永久卡在 `status="running"`，整个项目楔死。
+   （此条更早的 SDD 周期已记为 "FOUND, NOT FIXED"。）
+
+对用户"自己也能从头跑到尾"的影响：同一进程内 pacer 一旦激活（首个 429 后）即持续生效，
+所以在**已激活**的后端上新建项目可顺利跑通（BREAK 1 的 v4 全程 S1 15/15 即如此）。
+但冷启动 + 并发齐射仍会偶发触限。建议后续单独处理：pacer 改为**主动式**（初始即带最小间隔，
+或跨重启持久化"已被限流"状态），并给 S1 各处理器的 LLM 调用加 try/except 降级
+（对齐 `writeback_minutes` 的容错），避免单次 429 楔死整个 run。
