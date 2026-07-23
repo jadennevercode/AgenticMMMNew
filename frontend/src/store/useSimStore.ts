@@ -168,6 +168,9 @@ interface SimStore {
    *  drive the whole case end-to-end. Default false: the run stops at every
    *  upload and decision node for genuine human-in-the-loop action. */
   autopilot: boolean
+  /** S2 Channel Type filter shared across the per-channel canvases (2.2/2.4/2.5).
+   *  '' = All channels (collapsed view). Resets on project switch. */
+  s2ChannelFilter: string
   /** hydration / request state */
   loading: boolean
   error: string | null
@@ -240,6 +243,8 @@ interface SimStore {
   pause: () => void
   /** Toggle autopilot (auto-satisfy HITL gates) vs interactive HITL. */
   setAutopilot: (value: boolean) => void
+  /** Set the shared S2 Channel Type filter ('' = All channels). */
+  setS2ChannelFilter: (value: string) => void
   reset: () => Promise<void>
 
   resolveDecision: (decisionId: string, optionId: string, note: string) => Promise<void>
@@ -432,6 +437,7 @@ function blankRuntime(): Partial<SimStore> {
     selectedTaskId: null,
     selectedAssetId: null,
     viewedStageId: null,
+    s2ChannelFilter: '',
   }
 }
 
@@ -513,6 +519,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     selectedTaskId: null,
     selectedAssetId: null,
     viewedStageId: null,
+    s2ChannelFilter: '',
     panels: { activity: false, assistant: false, folder: false },
 
     loadProjects: async () => {
@@ -593,6 +600,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     },
 
     setAutopilot: (value) => set({ autopilot: value }),
+    setS2ChannelFilter: (value) => set({ s2ChannelFilter: value }),
 
     reset: async () => {
       const pid = get().activeProjectId
