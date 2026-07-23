@@ -277,19 +277,23 @@ _QUALITY_TOOLS = ("quality.consistency", "quality.accuracy",
 
 def _run_quality_tools(eng: Engine, st: ProjectState, task_id: str,
                        evidences: list[QualityEvidence],
-                       contexts: list[FieldContext]) -> list[list[list[SubScore]]]:
+                       contexts: list[FieldContext],
+                       obj: str = "") -> list[list[list[SubScore]]]:
     """Call the four quality tools, one explicit traced invocation each.
 
     Returns the subcheck lists per dimension in `_QUALITY_TOOLS` order — the same
     order `score_quality` concatenates them in, so the rollup is unchanged.
+    ``obj`` (a model object / channel_type) only labels the trace when given —
+    it never changes what is computed.
     """
+    label = f"{obj}: " if obj else ""
     out: list[list[list[SubScore]]] = []
     for tool_id in _QUALITY_TOOLS:
         # Completeness is the one dimension that also reads the parent factor's
         # spend/performance context.
         args = (evidences, contexts) if tool_id == "quality.completeness" else (evidences,)
         out.append(traced(
-            eng, st, task_id, tool_id, f"{len(evidences)} metric series",
+            eng, st, task_id, tool_id, f"{label}{len(evidences)} metric series",
             get_tool(tool_id).run, *args,
             summarize=lambda subs: _quality_tool_summary(subs),
         ))
@@ -352,57 +356,82 @@ def _verdict(total: float) -> str:
 
 
 async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
-    """2.2 — score every factor×metric on the four 2.11 validation dimensions.
+    """2.2 — score every factor×metric on the four 2.11 validation dimensions,
+    per model object.
 
     A deterministic subcheck scorer (`quality_scoring`) computes the 10 subchecks
     and a baseline dimension score straight from the real long table; the AI then
     reviews the four dimension scores on that grounding. Total = product of the
-    four dimensions (Excel 2.12). The human reviews the verdicts in 2.2d."""
-    df = model_df(st)
-    fields = _field_context(df)
+    four dimensions (Excel 2.12). The human reviews the verdicts in 2.2d.
+
+    Each model object (channel_type) is scored on its own data slice — an
+    indicator's quality can differ by channel (e.g. sparser reporting in one
+    channel than another), so it is screened once per channel, not once globally.
+    """
+    from app.agents.ledger import _matches, _norm_pair, drops_before
+
+    full = model_df(st)
     # 1) deterministic subcheck evidence, then the four registered quality tools —
-    #    one explicit call each, batched over every series (see app/tools).
-    evidences: list[QualityEvidence] = []
-    contexts: list[FieldContext] = []
-    metas: list[dict] = []
-    grouped = df.groupby(["l1", "l2", "l3", "l4", "metric"], dropna=False)
-    for i, ((l1, l2, l3, l4, metric), grp) in enumerate(grouped):
-        if not str(metric).strip() or str(metric) == "<NA>":
+    #    one explicit call each, batched over every series (see app/tools) —
+    #    computed per object on that channel's own slice.
+    base: list[tuple[str, str, dict, QualityResult]] = []  # (rid, obj, meta, res)
+    for obj in model_objects(st):
+        df = full[full["channel_type"].astype("string").str.strip() == obj]
+        fields = _field_context(df)
+        evidences: list[QualityEvidence] = []
+        contexts: list[FieldContext] = []
+        metas: list[dict] = []
+        grouped = df.groupby(["l1", "l2", "l3", "l4", "metric"], dropna=False)
+        for i, ((l1, l2, l3, l4, metric), grp) in enumerate(grouped):
+            if not str(metric).strip() or str(metric) == "<NA>":
+                continue
+            evidences.append(compute_series_evidence(grp))
+            contexts.append(fields.get((l1, l2, l3, l4), FieldContext(False, True)))
+            metas.append({"id": f"{obj}|q-{i}", "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
+                          "l4": _s(l4), "indicator": _s(metric)})
+        if not metas:
             continue
-        evidences.append(compute_series_evidence(grp))
-        contexts.append(fields.get((l1, l2, l3, l4), FieldContext(False, True)))
-        metas.append({"id": f"q-{i}", "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
-                      "l4": _s(l4), "indicator": _s(metric)})
-    subs_by_dim = _run_quality_tools(eng, st, task["id"], evidences, contexts)
-    base: list[tuple[str, dict, QualityResult]] = [
-        (meta["id"], meta, roll_up_quality([s for dim in subs_by_dim for s in dim[idx]]))
-        for idx, meta in enumerate(metas)
-    ]
+
+        inherited = drops_before(st, "quality", obj)
+        if inherited:
+            keep = [not _matches(_norm_pair(m["l4"], m["indicator"]), inherited) for m in metas]
+            metas = [m for m, k in zip(metas, keep) if k]
+            evidences = [e for e, k in zip(evidences, keep) if k]
+            contexts = [c for c, k in zip(contexts, keep) if k]
+            if not metas:
+                continue
+
+        subs_by_dim = _run_quality_tools(eng, st, task["id"], evidences, contexts, obj)
+        base.extend(
+            (meta["id"], obj, meta, roll_up_quality([s for dim in subs_by_dim for s in dim[idx]]))
+            for idx, meta in enumerate(metas)
+        )
     # 2) AI reviews the dimension scores over the subcheck breakdown (falls back to baseline).
     review_rows = [{**meta,
                     "baseline": {d: getattr(res, d) for d in DIMENSIONS},
                     "subchecks": [{"dimension": s.dimension, "label": s.label,
                                    "score": s.score, "evidence": s.note} for s in res.subs]}
-                   for (_rid, meta, res) in base]
+                   for (_rid, _obj, meta, res) in base]
     ai = await _ai_review_dimensions(review_rows)
     used_ai = bool(ai)
     # 3) merge → scorecard rows with the product-Total verdict.
     qrows: list[QualityRow] = []
     borderline: list[str] = []
     unusable: list[str] = []
-    for (rid, meta, res) in base:
+    for (rid, obj, meta, res) in base:
         a = ai.get(rid, {})
         notes = a.get("notes", {}) if isinstance(a.get("notes"), dict) else {}
         dims = {d: _coerce_score(a.get(d), getattr(res, d)) for d in DIMENSIONS}
         total = round(dims["consistency"] * dims["accuracy"]
                       * dims["completeness"] * dims["granularity"], 4)
         verdict = _verdict(total)
-        label = f"{meta['l4'] or meta['l3'] or meta['l1']} · {meta['indicator']}".strip(" ·")
+        label = f"{obj} · {meta['l4'] or meta['l3'] or meta['l1']} · {meta['indicator']}".strip(" ·")
         subs = [QualitySubScore(key=s.key, dimension=s.dimension, label=s.label,
                                 score=s.score, note=s.note, computed=s.computed, blocking=s.blocking)
                 for s in res.subs]
         qrows.append(QualityRow(
-            id=rid, l1=meta["l1"], l2=meta["l2"], l3=meta["l3"], l4=meta["l4"], indicator=meta["indicator"],
+            id=rid, object=obj, l1=meta["l1"], l2=meta["l2"], l3=meta["l3"], l4=meta["l4"],
+            indicator=meta["indicator"],
             consistency=dims["consistency"], accuracy=dims["accuracy"],
             completeness=dims["completeness"], granularity=dims["granularity"],
             consistencyNote=str(notes.get("consistency") or res.dimension_note("consistency")),
@@ -415,7 +444,7 @@ async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
             borderline.append(label)
         elif verdict == "unusable":
             unusable.append(label)
-    qrows.sort(key=lambda r: r.total)
+    qrows.sort(key=lambda r: (r.object, r.total))
     card = QualityScorecard(rows=qrows)
     st.quality_scorecard = card
     eng.produce(st, "a-quality-scorecard", body=quality_sheet(card), state="confirmed", agent="data")

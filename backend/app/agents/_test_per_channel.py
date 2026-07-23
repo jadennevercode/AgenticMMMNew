@@ -81,6 +81,19 @@ def test_stat_drops_are_per_object() -> None:
     print("  stat drops per object")
 
 
+def test_stat_scorecard_is_per_object() -> None:
+    from app.agents.stat_scoring import build_stat_scorecard
+    st = make_two_channel_state()
+    card = build_stat_scorecard(st)
+    objs = {r.object for r in card.rows}
+    assert objs == {"MT", "TT"}, objs
+    # 渠道库存 is constant in TT → dropped there by the degenerate-series guard,
+    # but present as a scored row in MT.
+    mt_stock = [r for r in card.rows if r.object == "MT" and r.indicator == "渠道库存"]
+    assert mt_stock, "渠道库存 should be scored in MT"
+    print("  stat scorecard per object")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
