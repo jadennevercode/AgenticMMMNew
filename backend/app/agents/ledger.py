@@ -98,7 +98,8 @@ class LayerVerdict:
 
 @dataclass(frozen=True)
 class LedgerRow:
-    """One indicator's full lifecycle across the S2 filter layers."""
+    """One indicator's full lifecycle across the S2 filter layers, for one
+    model object (``OBJECT_ANY`` for the layers that are still global)."""
     key: tuple[str, str]
     l1: str
     l2: str
@@ -110,6 +111,7 @@ class LedgerRow:
     adopted: bool
     rejected_at: str = ""
     reason: str = ""
+    object: str = ""
 
 
 @dataclass(frozen=True)
@@ -498,109 +500,130 @@ def _mapping_ignored(st: ProjectState) -> dict[tuple[str, str], str]:
 
 
 def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
-    """Resolve every indicator's lifecycle across the six S2 filter layers.
+    """Resolve every indicator's lifecycle across the six S2 filter layers,
+    independently per model object (channel type).
 
     Layers rule in order; the first rejection wins and every later layer records
     ``inherited`` rather than ruling again. That inheritance is the whole point:
     it is what stops a 2.2-dropped indicator from being re-scored at 2.4, from
-    being re-offered at 2.5x, and from re-entering the master table at 2.6.
+    being re-offered at 2.5x, and from re-entering the master table at 2.6. A
+    layer that is still global (mapping, sign-off, range) rules the same for
+    every object via ``OBJECT_ANY``; a layer that is per-object (quality,
+    statistical, selection) can reach a different verdict per channel — the
+    same indicator can die in one channel and survive in another.
     """
+    from app.agents.dataset_cache import model_objects
+
     universe = _universe(st)
     ignored = _mapping_ignored(st)
-    q_drop, q_flag = quality_drop_pairs(st), quality_flag_pairs(st)
-    sign_drop = signoff_drop_pairs(st)
-    s_drop = stat_drop_pairs(st)
-    flagged = ols_flagged_pairs(st)
-    r_drop = range_drop_pairs(st)
+    q_drop_o = quality_drop_pairs_by_object(st)
+    q_flag_o = quality_flag_pairs_by_object(st)
+    sign_o = signoff_drop_pairs_by_object(st)
+    s_drop_o = stat_drop_pairs_by_object(st)
+    tick_o = unticked_pairs_by_object(st)
+    range_o = range_drop_pairs_by_object(st)
+    flagged = ols_flagged_pairs(st)  # flags stay global display-only for now
+
+    objects = model_objects(st) or [OBJECT_ANY]
 
     cfg: OlsConfig | None = getattr(st, "ols_config", None)
-    # 2.5x only rules once the setup exists; a metric absent from the candidate
-    # list was never offered, so the layer stays pending for it.
-    ticked: dict[tuple[str, str], bool] = {}
-    if cfg is not None and cfg.x_candidates:
-        for c in cfg.x_candidates:
-            ticked[_norm_pair(c.l4, c.metric)] = bool(c.selected)
 
     rows: list[LedgerRow] = []
-    for key, c in sorted(universe.items()):
-        verdicts: list[LayerVerdict] = []
-        rejected_at, reason = "", ""
+    for obj in objects:
+        q_drop = _object_drops(q_drop_o, obj)
+        q_flag = _object_drops(q_flag_o, obj)
+        sign_drop = _object_drops(sign_o, obj)
+        s_drop = _object_drops(s_drop_o, obj)
+        r_drop = _object_drops(range_o, obj)
+        # 2.5x rules only once a candidate exists for this object.
+        unticked_here = _object_drops(tick_o, obj)
+        offered: set[tuple[str, str]] = set()
+        if cfg is not None and cfg.x_candidates:
+            for c in cfg.x_candidates:
+                if (_obj(getattr(c, "object", "")) or OBJECT_ANY) in (OBJECT_ANY, obj):
+                    offered.add(_norm_pair(c.l4, c.metric))
 
-        def rule(layer: str, status: str, note: str = "") -> None:
-            nonlocal rejected_at, reason
-            if rejected_at:
-                verdicts.append(LayerVerdict(
-                    layer, LAYER_TASK[layer], LAYER_LABEL[layer], STATUS_INHERITED,
-                    f"Already rejected at {LAYER_LABEL[rejected_at]}."))
-                return
-            verdicts.append(LayerVerdict(layer, LAYER_TASK[layer], LAYER_LABEL[layer], status, note))
-            if status == STATUS_REJECTED:
-                rejected_at, reason = layer, note
+        for key, c in sorted(universe.items()):
+            verdicts: list[LayerVerdict] = []
+            rejected_at, reason = "", ""
 
-        # 2.1 — mapped into the long table, or explicitly ignored.
-        if _matches(key, set(ignored)):
-            rule("mapping", STATUS_REJECTED,
-                 ignored.get(key) or "Ignored in the FactorTree↔DataAssets mapping.")
-        else:
-            rule("mapping", STATUS_ADOPTED, "Mapped to a published data asset.")
+            def rule(layer: str, status: str, note: str = "") -> None:
+                nonlocal rejected_at, reason
+                if rejected_at:
+                    verdicts.append(LayerVerdict(
+                        layer, LAYER_TASK[layer], LAYER_LABEL[layer], STATUS_INHERITED,
+                        f"Already rejected at {LAYER_LABEL[rejected_at]}."))
+                    return
+                verdicts.append(LayerVerdict(layer, LAYER_TASK[layer], LAYER_LABEL[layer], status, note))
+                if status == STATUS_REJECTED:
+                    rejected_at, reason = layer, note
 
-        # 2.2d — quality verdict.
-        if _matches(key, q_drop):
-            rule("quality", STATUS_REJECTED, "Dropped in the data-quality review (unusable).")
-        elif _matches(key, q_flag):
-            rule("quality", STATUS_FLAGGED, "Borderline quality — kept with a caveat.")
-        else:
-            rule("quality", STATUS_ADOPTED, "Passed the data-quality review.")
-
-        # 2.3 — the client's business-validation sign-off, per indicator (or,
-        # for legacy keys, per L3 factor).
-        if _matches(key, sign_drop):
-            rule("signoff", STATUS_REJECTED,
-                 f"Not signed off by the client at Business Validation ({c.get('indicator', key[1])}).")
-        else:
-            rule("signoff", STATUS_ADOPTED, "Covered by the business-validation sign-off.")
-
-        # 2.4d — statistical screening.
-        if _matches(key, s_drop):
-            rule("statistical", STATUS_REJECTED, "Dropped in the statistical screening.")
-        else:
-            rule("statistical", STATUS_ADOPTED, "Passed the statistical screening.")
-
-        # 2.5x — the human's model-variable selection.
-        if key in ticked:
-            if ticked[key]:
-                rule("selection", STATUS_ADOPTED, "Ticked as a model variable.")
+            # 2.1 — mapped into the long table, or explicitly ignored (global).
+            if _matches(key, set(ignored)):
+                rule("mapping", STATUS_REJECTED,
+                     ignored.get(key) or "Ignored in the FactorTree↔DataAssets mapping.")
             else:
-                rule("selection", STATUS_REJECTED, "Not ticked as a model variable.")
-        else:
-            rule("selection", STATUS_PENDING, "The model setup has not been proposed yet.")
+                rule("mapping", STATUS_ADOPTED, "Mapped to a published data asset.")
 
-        # 2.5r — the ROI / contribution range check.
-        if _matches(key, r_drop):
-            rule("range", STATUS_REJECTED,
-                 "Outside its knowledge-base ROI / contribution band; dropped at the d-2.5 gate.")
-        elif _matches(key, flagged):
-            rule("range", STATUS_FLAGGED,
-                 "Outside its knowledge-base ROI / contribution band; kept for review.")
-        else:
-            rule("range", STATUS_ADOPTED, "Within its expected range (or no benchmark).")
+            # 2.2d — quality verdict, this object's own scorecard rows.
+            if _matches(key, q_drop):
+                rule("quality", STATUS_REJECTED, "Dropped in the data-quality review (unusable).")
+            elif _matches(key, q_flag):
+                rule("quality", STATUS_FLAGGED, "Borderline quality — kept with a caveat.")
+            else:
+                rule("quality", STATUS_ADOPTED, "Passed the data-quality review.")
 
-        rows.append(LedgerRow(
-            key=key, l1=c.get("l1", ""), l2=c.get("l2", ""), l3=c.get("l3", ""),
-            l4=c.get("l4", ""), indicator=c.get("metric", ""), metric=c.get("metric", ""),
-            verdicts=tuple(verdicts), adopted=not rejected_at,
-            rejected_at=rejected_at, reason=reason,
-        ))
+            # 2.3 — the client's business-validation sign-off, per indicator (or,
+            # for legacy keys, per L3 factor). Still global until Task 4.
+            if _matches(key, sign_drop):
+                rule("signoff", STATUS_REJECTED,
+                     f"Not signed off by the client at Business Validation ({c.get('indicator', key[1])}).")
+            else:
+                rule("signoff", STATUS_ADOPTED, "Covered by the business-validation sign-off.")
+
+            # 2.4d — statistical screening, this object's own scorecard rows.
+            if _matches(key, s_drop):
+                rule("statistical", STATUS_REJECTED, "Dropped in the statistical screening.")
+            else:
+                rule("statistical", STATUS_ADOPTED, "Passed the statistical screening.")
+
+            # 2.5x — the human's model-variable selection, this object's own
+            # candidate list.
+            if key in offered:
+                if _matches(key, unticked_here):
+                    rule("selection", STATUS_REJECTED, "Not ticked as a model variable.")
+                else:
+                    rule("selection", STATUS_ADOPTED, "Ticked as a model variable.")
+            else:
+                rule("selection", STATUS_PENDING, "The model setup has not been proposed yet.")
+
+            # 2.5r — the ROI / contribution range check. Still global until Task 6.
+            if _matches(key, r_drop):
+                rule("range", STATUS_REJECTED,
+                     "Outside its knowledge-base ROI / contribution band; dropped at the d-2.5 gate.")
+            elif _matches(key, flagged):
+                rule("range", STATUS_FLAGGED,
+                     "Outside its knowledge-base ROI / contribution band; kept for review.")
+            else:
+                rule("range", STATUS_ADOPTED, "Within its expected range (or no benchmark).")
+
+            rows.append(LedgerRow(
+                key=key, object=obj, l1=c.get("l1", ""), l2=c.get("l2", ""), l3=c.get("l3", ""),
+                l4=c.get("l4", ""), indicator=c.get("metric", ""), metric=c.get("metric", ""),
+                verdicts=tuple(verdicts), adopted=not rejected_at,
+                rejected_at=rejected_at, reason=reason,
+            ))
 
     # Factor-tree rows the human ignored at 2.1 never reach the long table, so
     # they are absent from the universe. Surface them anyway — "I ignored it" is
     # a lifecycle answer, and silently omitting them is what makes the funnel lie.
+    # Mapping is global, so these are emitted once, under OBJECT_ANY.
     known = {r.key for r in rows}
     for key, note in sorted(ignored.items()):
         if key in known:
             continue
         rows.append(LedgerRow(
-            key=key, l1="", l2="", l3="", l4=key[0], indicator=key[1], metric=key[1],
+            key=key, object=OBJECT_ANY, l1="", l2="", l3="", l4=key[0], indicator=key[1], metric=key[1],
             verdicts=(LayerVerdict("mapping", "2.1", LAYER_LABEL["mapping"], STATUS_REJECTED,
                                    note or "Ignored in the FactorTree↔DataAssets mapping."),),
             adopted=False, rejected_at="mapping",
@@ -612,13 +635,15 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
     # universe never carried at all — real enough for the client to deny at
     # 2.3, but absent from `_universe`'s own predicate. `model_selection`
     # already excludes it directly (see above); surface it here too so the
-    # funnel and the canvas do not silently disagree with the fit.
-    for key in sorted(sign_drop):
+    # funnel and the canvas do not silently disagree with the fit. Sign-off is
+    # still global, so these too are emitted once, under OBJECT_ANY.
+    sign_drop_all = _object_drops(sign_o, None)
+    for key in sorted(sign_drop_all):
         if key in known:
             continue
         l4, metric = key
         rows.append(LedgerRow(
-            key=key, l1="", l2="", l3="", l4=l4, indicator=metric, metric=metric,
+            key=key, object=OBJECT_ANY, l1="", l2="", l3="", l4=l4, indicator=metric, metric=metric,
             verdicts=(LayerVerdict("signoff", LAYER_TASK["signoff"], LAYER_LABEL["signoff"],
                                    STATUS_REJECTED,
                                    f"Not signed off by the client at Business Validation ({metric})."),),
@@ -629,12 +654,18 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
     return tuple(rows)
 
 
-def adopted_pairs(st: ProjectState) -> frozenset[tuple[str, str]]:
-    return frozenset(r.key for r in indicator_ledger(st) if r.adopted)
+def adopted_pairs(st: ProjectState, object: str | None = None) -> frozenset[tuple[str, str]]:
+    """Adopted (l4, metric) pairs — every object, or one object's own verdicts
+    (plus whatever a still-global layer rejected for everyone)."""
+    return frozenset(r.key for r in indicator_ledger(st)
+                     if r.adopted and (object is None or r.object in (object, OBJECT_ANY)))
 
 
-def rejected_pairs(st: ProjectState) -> frozenset[tuple[str, str]]:
-    return frozenset(r.key for r in indicator_ledger(st) if not r.adopted)
+def rejected_pairs(st: ProjectState, object: str | None = None) -> frozenset[tuple[str, str]]:
+    """Rejected (l4, metric) pairs — every object, or one object's own verdicts
+    (plus whatever a still-global layer rejected for everyone)."""
+    return frozenset(r.key for r in indicator_ledger(st)
+                     if not r.adopted and (object is None or r.object in (object, OBJECT_ANY)))
 
 
 def model_selection(st: ProjectState) -> ModelSelection:
@@ -702,23 +733,36 @@ def anomaly_effects(st: ProjectState) -> tuple[list[OlsEvent], list[OlsCapWindow
     return events, caps
 
 
-def funnel(st: ProjectState) -> list[dict]:
-    """Per-layer intake → survivors, with the rejected labels behind each drop.
+def funnel(st: ProjectState) -> dict:
+    """Per-layer intake → survivors, with the rejected labels behind each drop —
+    resolved once per model object, plus a combined rollup over every object.
 
     This is the 2.6 filter funnel: each layer reports what reached it, what it
-    rejected, and exactly which indicators those were.
+    rejected, and exactly which indicators those were. Returns
+    ``{"combined": [...], "byObject": {object: [...]}}``: ``combined`` mirrors
+    the pre-per-object shape (one funnel over every row, any object), while
+    ``byObject`` is each channel's own funnel — the same indicator can die at a
+    different layer, or survive, in a different channel.
     """
+    from app.agents.dataset_cache import model_objects
+
     ledger = indicator_ledger(st)
-    out: list[dict] = []
-    remaining = len(ledger)
-    for lid, task, label in LAYERS:
-        killed = [r for r in ledger if r.rejected_at == lid]
-        out.append({
-            "layer": lid, "task": task, "label": label,
-            "intake": remaining, "rejected": len(killed),
-            "survivors": remaining - len(killed),
-            "dropped": [{"l4": r.l4, "indicator": r.indicator, "reason": r.reason}
-                        for r in killed],
-        })
-        remaining -= len(killed)
-    return out
+
+    def _for(rows: list[LedgerRow]) -> list[dict]:
+        out: list[dict] = []
+        remaining = len(rows)
+        for lid, task, label in LAYERS:
+            killed = [r for r in rows if r.rejected_at == lid]
+            out.append({
+                "layer": lid, "task": task, "label": label,
+                "intake": remaining, "rejected": len(killed),
+                "survivors": remaining - len(killed),
+                "dropped": [{"l4": r.l4, "indicator": r.indicator, "reason": r.reason}
+                            for r in killed],
+            })
+            remaining -= len(killed)
+        return out
+
+    per_object = {obj: _for([r for r in ledger if r.object in (obj, OBJECT_ANY)])
+                  for obj in (model_objects(st) or [OBJECT_ANY])}
+    return {"combined": _for(list(ledger)), "byObject": per_object}

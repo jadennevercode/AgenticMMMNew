@@ -1033,7 +1033,9 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     rejected = [r for r in led if not r.adopted]
     body = {
         "objects": obj_rows,
-        "funnel": funnel(st),
+        # TODO(Task 7): serialize the per-object funnel; for now the combined
+        # rollup keeps this artifact body on the pre-per-object shape.
+        "funnel": funnel(st)["combined"],
         "dimensions": dimensions(st),
         "adopted": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
                      "indicator": r.indicator} for r in led if r.adopted],
