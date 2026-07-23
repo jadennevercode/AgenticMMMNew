@@ -136,9 +136,23 @@ def quality_sheet(card: QualityScorecard) -> dict:
 
 
 def accepted_metric_labels(card: QualityScorecard) -> list[str]:
-    """Metric labels the human kept (disposition != drop) — the S2 blackboard."""
-    return [f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
-            for r in card.rows if r.disposition != "drop"]
+    """Metric labels the human kept (disposition != drop) — the S2 blackboard.
+
+    Rows are now per (object, indicator) — dedup by label (first occurrence
+    wins) so the count reflects distinct indicators, not channel-multiplied
+    rows.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in card.rows:
+        if r.disposition == "drop":
+            continue
+        label = f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
 
 
 _MAP_STATUS_EN = {"mapped": "Mapped", "ignored": "Ignored", "pending": "Pending"}

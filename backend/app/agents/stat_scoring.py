@@ -266,9 +266,23 @@ _pearson = pearson  # legacy internal alias
 
 
 def accepted_stat_labels(card: StatScorecard) -> list[str]:
-    """Indicators the human kept (disposition != drop) — the 2.4 → 2.5 hand-off."""
-    return [f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
-            for r in card.rows if r.disposition != "drop"]
+    """Indicators the human kept (disposition != drop) — the 2.4 → 2.5 hand-off.
+
+    Rows are now per (object, indicator) — dedup by label (first occurrence
+    wins) so the count reflects distinct indicators, not channel-multiplied
+    rows.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in card.rows:
+        if r.disposition == "drop":
+            continue
+        label = f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
 
 
 # Column layout for the Sheet2-style artifact body (mirrors the reference workbook).

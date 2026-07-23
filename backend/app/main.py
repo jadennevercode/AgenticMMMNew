@@ -967,6 +967,18 @@ async def get_indicator_ledger(project_id: str) -> dict:
     from app.agents import ledger
     st = _require_state(project_id)
     rows = ledger.indicator_ledger(st)
+    # interim: dedup by indicator key — one verdict per indicator until the
+    # Phase 1 object-aware ledger index. `indicator_ledger` now returns one row
+    # PER model object (channel type); this view serializes no `object` field,
+    # so without dedup the response would carry 7x duplicate rows (Danone case)
+    # and inflated adopted/rejected counts.
+    seen: set[tuple[str, str]] = set()
+    deduped = []
+    for r in rows:
+        if r.key in seen:
+            continue
+        seen.add(r.key)
+        deduped.append(r)
     return {
         "layers": [{"layer": lid, "task": task, "label": label}
                    for lid, task, label in ledger.LAYERS],
@@ -975,12 +987,12 @@ async def get_indicator_ledger(project_id: str) -> dict:
             "adopted": r.adopted, "rejectedAt": r.rejected_at, "reason": r.reason,
             "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
                           "status": v.status, "note": v.note} for v in r.verdicts],
-        } for r in rows],
+        } for r in deduped],
         # TODO(Task 7): serialize the per-object funnel; for now the combined
         # rollup keeps this endpoint's response shape unchanged.
         "funnel": ledger.funnel(st)["combined"],
-        "adopted": sum(1 for r in rows if r.adopted),
-        "rejected": sum(1 for r in rows if not r.adopted),
+        "adopted": sum(1 for r in deduped if r.adopted),
+        "rejected": sum(1 for r in deduped if not r.adopted),
     }
 
 

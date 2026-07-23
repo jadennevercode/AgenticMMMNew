@@ -199,10 +199,21 @@ def test_end_to_end_reference() -> None:
     for _obj, rows in groupby(card.rows, key=lambda r: r.object):
         totals = [r.total for r in rows]
         assert totals == sorted(totals), "rows should be worst-first by total within each object"
-    # Kept set excludes dropped.
+    # Kept set excludes dropped. `card.rows` is per (object, indicator) — the
+    # real reference dataset screens each channel_type on its own slice — but
+    # `accepted_stat_labels` dedups to one verdict per distinct indicator
+    # label (kept if kept in ANY channel), so "kept == rows - dropped" no
+    # longer holds row-for-row. Assert the dedup invariant directly instead.
+    from collections import defaultdict
+    label_dispositions: dict[str, set[str]] = defaultdict(set)
+    for r in card.rows:
+        label = f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
+        label_dispositions[label].add(r.disposition)
     kept = accepted_stat_labels(card)
-    dropped = [r for r in card.rows if r.disposition == "drop"]
-    assert len(kept) == len(card.rows) - len(dropped)
+    assert len(kept) == len(set(kept)), "kept labels must be deduped"
+    expected_kept = {lbl for lbl, dispositions in label_dispositions.items()
+                      if dispositions != {"drop"}}
+    assert set(kept) == expected_kept
     # Artifact body: two sheets (rules + per-indicator results), every column rendered.
     body = stat_sheet(card)
     assert [s["name"] for s in body["sheets"]] == ["Scoring rules", "Statistical score"]

@@ -81,9 +81,23 @@ def test_2_2_scorecard_roundtrip() -> None:
     assert score_sheet["columns"][-2:] == ["Disposition", "Notes"]
     assert len(score_sheet["rows"]) == len(card.rows)
 
+    # `card.rows` is now per (object, indicator) — per-channel screening scores
+    # the same indicator once per model object — but `accepted_metric_labels`
+    # dedups to one verdict per distinct indicator label (kept if kept in ANY
+    # channel). So "kept == rows - dropped" no longer holds row-for-row; assert
+    # the dedup invariant directly: kept has no duplicate labels, and a label is
+    # kept iff at least one of its (possibly several, per-object) rows isn't
+    # dropped.
+    from collections import defaultdict
+    label_dispositions: dict[str, set[str]] = defaultdict(set)
+    for r in card.rows:
+        label = f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
+        label_dispositions[label].add(r.disposition)
     kept = accepted_metric_labels(card)
-    dropped = [r for r in card.rows if r.disposition == "drop"]
-    assert len(kept) == len(card.rows) - len(dropped)
+    assert len(kept) == len(set(kept)), "kept labels must be deduped"
+    expected_kept = {lbl for lbl, dispositions in label_dispositions.items()
+                      if dispositions != {"drop"}}
+    assert set(kept) == expected_kept
     assert st.analysis["quality"]["accepted_metrics"] == kept
 
 
@@ -94,7 +108,14 @@ def test_quality_disposition_drives_blackboard() -> None:
 
     before = len(accepted_metric_labels(card))
     first_kept = next(r for r in card.rows if r.disposition != "drop")
-    rows = [r.model_copy(update={"disposition": "drop"}) if r.id == first_kept.id else r
+    first_label = f"{first_kept.l4 or first_kept.l3} · {first_kept.indicator}".strip(" ·")
+    # Drop every row carrying this indicator's label, across every model
+    # object it was scored in — not just the one row matched by id.
+    # `accepted_metric_labels` dedups by label (kept if kept in ANY channel),
+    # so flipping a single per-object row is not guaranteed to change the
+    # deduped kept count; only clearing every occurrence of the label does.
+    rows = [r.model_copy(update={"disposition": "drop"})
+            if f"{r.l4 or r.l3} · {r.indicator}".strip(" ·") == first_label else r
             for r in card.rows]
     edited = QualityScorecard(rows=rows)
     assert len(accepted_metric_labels(edited)) == before - 1

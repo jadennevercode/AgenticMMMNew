@@ -352,6 +352,39 @@ def test_model_objects_ordered_by_data() -> None:
     print("  model_objects derived from data, no hardcoded list")
 
 
+def test_drops_before_no_object_equals_global_union() -> None:
+    """The no-object form of `drops_before` (``object=None``) is documented as
+    the legacy global-union behaviour for every un-migrated caller — pin that
+    invariant: it must always equal the union of every model object's own
+    `drops_before`, even once a layer's verdict genuinely diverges per channel.
+    """
+    from app.agents import ledger
+    from app.agents.dataset_cache import model_objects
+    from app.domain.models import StatScorecard, StatScoreRow
+
+    st = make_two_channel_state()
+    # Force the same per-channel divergence as test_model_selection_is_per_object:
+    # TT drops 渠道库存 at the statistical layer, MT keeps it.
+    st.stat_scorecard = StatScorecard(rows=[
+        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+                     disposition="include"),
+        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                     disposition="drop"),
+    ])
+
+    global_drops = ledger.drops_before(st, "range")
+    per_object_union: set[tuple[str, str]] = set()
+    for obj in model_objects(st):
+        per_object_union |= ledger.drops_before(st, "range", obj)
+
+    assert global_drops == per_object_union, (global_drops, per_object_union)
+    # Concrete sanity check the divergence is actually exercised: the TT-only
+    # drop must be present in both the global union and the manual union.
+    assert ("渠道库存", "渠道库存") in global_drops
+    assert ("渠道库存", "渠道库存") in per_object_union
+    print("  drops_before(no object) == union of drops_before(each object)")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
