@@ -872,48 +872,40 @@ def _merge_minutes_digests(results: list[dict]) -> dict:
     return {"answers": answers, "factor_changes": changes, "insights": insights}
 
 
-async def _minutes_answers(qlist: str, transcripts: str) -> dict:
-    """Best-effort: map the interview minutes back onto the outline questions."""
-    try:
-        obj = await get_llm().json(
-            system=SYS,
-            user=(
-                "From the interview minutes below, write the FINAL answer to each outline question "
-                "that the minutes actually address, with its source. Skip questions the minutes "
-                "don't cover. Return JSON: {\"answers\":[{\"n\":int,\"answer\":str,\"source\":str}]}\n\n"
-                f"OUTLINE:\n{qlist}\n\nMINUTES:\n{transcripts[:6500]}"
-            ),
-            timeout=_MINUTES_LLM_TIMEOUT,
-        )
-        return obj if isinstance(obj, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
+async def _digest_transcript(filename: str, text: str, qlist: str,
+                             st: ProjectState) -> dict:
+    """One combined LLM call over ONE transcript → {answers, factor_changes, insights}.
 
-
-async def _minutes_factor_changes(transcripts: str, st: ProjectState) -> dict:
-    """The important extraction — interview-driven factor-tree changes + insights.
-
-    Kept as its own focused call so it can't be zeroed out by a failure in the
-    (heavier, often-misaligned) answer-writeback above.
+    Combined (not two split calls) so N transcripts cost N requests, not 2N — the
+    endpoint rate-limits and the client paces requests. Fault isolation is per
+    file: a bad transcript returns {} and is skipped, losing only itself. The
+    call sees ALL outline questions but only this transcript, and answers only
+    what this transcript actually covers; the merge fills across files.
     """
     try:
         obj = await get_llm().json(
             system=agent_system("business", st),
             user=(
-                "From the interview minutes below, propose the factor-tree changes the interviews "
-                "imply (add a new factor, or modify an existing factor's indicator / granularity / "
-                "channel caliber), each traced to a verbatim minute quote; plus 1-2 cross-source "
-                "insights. Each of l1/l2/l3/l4 and indicator must be a SINGLE atomic value — never "
-                "combine several (no 'TV/OTV/OOH', no 'A、B'); emit a separate change per combination. "
-                "FORMAT: every emitted value must have BALANCED punctuation — any bracket or quote （）()「」\"\" "
-                "opened must also be closed; never leave a dangling '（' or '）'. When several sub-items share a "
-                "prefix, write them as 'PREFIX（a/b/c）' — the system expands that into one COMPLETE value per item "
-                "('PREFIX（a）','PREFIX（b）','PREFIX（c）') — or emit each as its own complete value. "
-                "Return JSON: {\"factor_changes\":[{\"op\":\"add|modify\",\"l1\":str,"
-                "\"l2\":str,\"l3\":str,\"l4\":str,\"indicator\":str,\"granularity\":str,"
-                "\"rationale\":str,\"quote\":str}],\"insights\":[{\"kind\":"
-                "\"connection|gap|conflict|reference\",\"title\":str,\"finding\":str,"
-                "\"confidence\":0-1}]}\n\nMINUTES:\n" + transcripts[:6500]
+                "You are given ONE interview transcript and the full outline of questions. "
+                "Using ONLY this transcript, do BOTH tasks:\n"
+                "(1) ANSWERS — for each outline question this transcript actually addresses, "
+                "write the final answer with its source. Skip questions it does not cover.\n"
+                "(2) FACTOR CHANGES — propose the factor-tree changes this transcript implies "
+                "(add a new factor, or modify an existing factor's indicator / granularity / "
+                "channel caliber), each traced to a verbatim quote; plus up to 2 cross-source "
+                "insights.\n"
+                "Each of l1/l2/l3/l4 and indicator must be a SINGLE atomic value — never combine "
+                "several (no 'TV/OTV/OOH', no 'A、B'); emit a separate change per combination. "
+                "Every emitted value must have BALANCED punctuation — any bracket or quote （）()「」\"\" "
+                "opened must also be closed; never leave a dangling '（' or '）'. When several sub-items "
+                "share a prefix, write 'PREFIX（a/b/c）' — the system expands that into one COMPLETE "
+                "value per item — or emit each as its own complete value. "
+                "Return JSON: {\"answers\":[{\"n\":int,\"answer\":str,\"source\":str}],"
+                "\"factor_changes\":[{\"op\":\"add|modify\",\"l1\":str,\"l2\":str,\"l3\":str,"
+                "\"l4\":str,\"indicator\":str,\"granularity\":str,\"rationale\":str,\"quote\":str}],"
+                "\"insights\":[{\"kind\":\"connection|gap|conflict|reference\",\"title\":str,"
+                "\"finding\":str,\"confidence\":0-1}]}\n\n"
+                f"OUTLINE:\n{qlist}\n\nTRANSCRIPT ({filename}):\n{text}"
             ),
             timeout=_MINUTES_LLM_TIMEOUT,
         )
@@ -954,12 +946,11 @@ def confirm_interview_effect(st: ProjectState, option_id: str) -> None:
 
 
 async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
-    transcripts, origin = _load_minutes_text(st)
+    files = _minutes_files(st)
     targets = st.analysis.get("interview_targets", [])
     # Collect references to the REAL business-question dicts (the flattened
-    # interview_questions are copies, so writing onto them would not reach the
-    # rendered per-target sheets). Data-team items are confirmed by the data team,
-    # not covered by stakeholder minutes — skip them. Cap at 28.
+    # interview_questions are copies). Data-team items are confirmed by the data
+    # team, not covered by stakeholder minutes — skip them. Cap at 28.
     biz: list[tuple[dict, str]] = []
     for t in targets:
         if t.get("layer") == "data":
@@ -970,15 +961,21 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
     biz = biz[:28]
     qlist = "\n".join(f"{i + 1}. [{label}] {q['question']}" for i, (q, label) in enumerate(biz))
 
-    # Two isolated calls, each on a long timeout — these run on a reasoning model
-    # and the factor-change call routinely needs ~180s; under the default 120s
-    # client timeout it failed on every retry and silently produced nothing.
-    ans_obj = await _minutes_answers(qlist, transcripts)
-    obj = await _minutes_factor_changes(transcripts, st)
+    if not files:
+        eng.emit(st, "business", "finding",
+                 "No interview minutes uploaded — nothing to write back.", task["id"])
+        return
+
+    # One combined call per transcript, run concurrently (the client paces them);
+    # every transcript reaches the model instead of only the first few.
+    results = await asyncio.gather(
+        *(_digest_transcript(fn, tx, qlist, st) for fn, tx in files))
+    files_used = sum(1 for r in results if isinstance(r, dict) and r)
+    merged = _merge_minutes_digests(results)
 
     # ── Issue 1: write the AI-parsed final answers back as a COLUMN on each
     # existing question row (not a separate sheet). ──
-    answers = {int(a.get("n", 0)): a for a in ans_obj.get("answers", []) if isinstance(a, dict)}
+    answers = merged["answers"]
     answered = 0
     for i, (q, _label) in enumerate(biz):
         a = answers.get(i + 1)
@@ -988,24 +985,25 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
             q["answerSource"] = str(a.get("source", "")).strip() if isinstance(a, dict) else ""
             answered += 1
     if targets:
-        # Re-render from targets so the 访谈回答 column shows; keep the flat view in sync.
         eng.set_analysis(st, "interview_targets", targets)
         eng.set_analysis(st, "interview_questions", _flatten_targets(targets))
         eng.produce(st, "a-interview", body=_interview_sheets(targets), state="draft", agent="business")
     eng.emit(st, "business", "info",
-             f"Interview answers written back from minutes ({origin}): "
-             f"{answered}/{len(biz)} business questions answered", task["id"])
-
-    # ── Issue 2: interview-driven factor changes → append as 'proposed' rows on
-    # the factor tree (user accepts/rejects each at gate 1.4d) + proposals. ──
-    changes = [c for c in (obj.get("factor_changes", []) if isinstance(obj, dict) else [])
-               if isinstance(c, dict)]
-    if not changes:
-        # Make the empty result VISIBLE — this used to be a silent timeout that
-        # zeroed the single most important S1 output.
+             f"Interview digest: {files_used}/{len(files)} transcripts used, "
+             f"{answered}/{len(biz)} business questions answered.", task["id"])
+    if files_used < len(files):
         eng.emit(st, "business", "finding",
-                 f"No interview-driven factor changes were extracted from the minutes "
-                 f"({origin}) — review the minutes or re-run if the model timed out.", task["id"])
+                 f"Only {files_used}/{len(files)} interview transcripts produced a usable "
+                 f"digest — the rest failed (timeout or parse error); re-run to cover them.",
+                 task["id"])
+
+    # ── Issue 2: interview-driven factor changes → 'proposed' rows on the factor
+    # tree (user accepts at gate 1.4d) + proposals. ──
+    changes = merged["factor_changes"]
+    if not changes:
+        eng.emit(st, "business", "finding",
+                 "No interview-driven factor changes were extracted from the minutes — "
+                 "review the minutes or re-run if the model timed out.", task["id"])
     elif st.factor_tree is None:
         eng.emit(st, "business", "finding",
                  f"{len(changes)} interview factor changes extracted but no factor tree "
@@ -1041,7 +1039,7 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
             diff=[DiffLine(kind="add", text=f"{ch.get('l3','')}/{ch.get('l4','')} — {ch.get('indicator','')}")],
             evidence=[EvidenceRef(artifactId="a-interview", note=str(ch.get("quote", ""))[:120])],
             confidence=0.7, sourceAgent="business", sourceMode="pipeline", afterTask="1.4"))
-    for i, ins in enumerate(obj.get("insights", [])[:2] if isinstance(obj, dict) else []):
+    for i, ins in enumerate(merged["insights"]):
         if not isinstance(ins, dict):
             continue
         eng.add_insight(st, Insight(
