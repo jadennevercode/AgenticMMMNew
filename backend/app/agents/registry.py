@@ -34,6 +34,10 @@ def build_engine() -> Engine:
     # d-2.5 freezes its dropped indicators onto the resolution, so a later re-fit
     # (which no longer flags them, having excluded them) cannot revive them.
     eng.register_decision("d-2.5", ledger.freeze_range_drops)
+    # S1 factor-tree gates write accepted status back so AI/interview rows reach
+    # the 2.1 mapping (until now approval changed no row — they stayed proposed).
+    eng.register_decision("d-1.21", business.confirm_tree_effect)
+    eng.register_decision("d-1.4", business.confirm_interview_effect)
     # S4 — model
     eng.register("3.1", model.register_priors)
     eng.register("3.2", model.train_models)

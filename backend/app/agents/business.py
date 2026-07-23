@@ -880,6 +880,37 @@ async def _minutes_factor_changes(transcripts: str, st: ProjectState) -> dict:
         return {}
 
 
+def accept_factor_rows(st: ProjectState, sources: set[str]) -> None:
+    """Flip this gate's still-proposed rows to accepted; respect manual rejects.
+
+    `proposed` is excluded by mapping._ACTIVE_STATUSES, so a row only reaches the
+    2.1 factor map once accepted. Approving a factor-tree gate means "accept the
+    proposals I did not manually reject" — so only `proposed` rows of the gate's
+    own source-set flip; `rejected` and `baseline` rows are left alone.
+    """
+    if st.factor_tree is None:
+        return
+    for r in st.factor_tree.rows:
+        if r.status == "proposed" and r.source in sources:
+            r.status = "accepted"
+    art = st.artifact("a-factor-tree")
+    if art is not None:
+        art.body = _factor_tree_sheet(st.factor_tree)
+
+
+def confirm_tree_effect(st: ProjectState, option_id: str) -> None:
+    """d-1.21 effect: approving 'Confirm the factor tree' accepts the 1.21 rows."""
+    if option_id == "approve":
+        accept_factor_rows(st, {"ai", "template"})
+
+
+def confirm_interview_effect(st: ProjectState, option_id: str) -> None:
+    """d-1.4 effect: approving 'write back into the factor tree' accepts the
+    interview-sourced rows 1.4 proposed."""
+    if option_id == "approve":
+        accept_factor_rows(st, {"interview"})
+
+
 async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
     transcripts, origin = _load_minutes_text(st)
     targets = st.analysis.get("interview_targets", [])
