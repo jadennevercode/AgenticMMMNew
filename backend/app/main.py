@@ -838,12 +838,17 @@ class SignoffBody(BaseModel):
     card's "Accept all" / "Deny all" should send, so the write matches exactly
     what the card rendered — or `l3` alone as a fallback that fans the verdict
     over every indicator the ledger's universe currently attributes to that
-    factor. An empty `verdict` clears the entry back to un-reviewed."""
+    factor. An empty `verdict` clears the entry back to un-reviewed.
+
+    `object` names the model object (channel type) the verdict applies to;
+    left empty (the default) it applies to every channel — see
+    `ledger.OBJECT_ANY`."""
     l3: str = ""
     l4: str = ""
     indicator: str = ""
     pairs: list[dict] = []
     verdict: str = ""  # "yes" | "no" | ""
+    object: str = ""
 
 
 @app.put("/api/projects/{project_id}/signoff")
@@ -881,14 +886,14 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
             indicator = str(p.get("indicator", "")) if isinstance(p, dict) else ""
             if not indicator and not l4:
                 continue
-            keys.append(ledger.signoff_key(l4, indicator))
+            keys.append(ledger.signoff_key(l4, indicator, body.object))
             target_l4, target_ind = l4.strip().lower(), indicator.strip().lower()
             row = next((r for r in rows if r.l4.strip().lower() == target_l4
                         and r.indicator.strip().lower() == target_ind), None)
             if row is not None and row.l3:
                 stale_l3s.add(row.l3)
     elif body.l4 or body.indicator:
-        keys = [ledger.signoff_key(body.l4, body.indicator)]
+        keys = [ledger.signoff_key(body.l4, body.indicator, body.object)]
         target_l4 = body.l4.strip().lower()
         target_ind = body.indicator.strip().lower()
         row = next((r for r in ledger.indicator_ledger(st)
@@ -902,7 +907,7 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
         # now matches what the card displays instead of an arbitrary-L4 collapse.
         target = body.l3.strip().lower()
         rows = ledger.indicator_ledger(st)
-        keys = [ledger.signoff_key(r.l4, r.indicator) for r in rows
+        keys = [ledger.signoff_key(r.l4, r.indicator, body.object) for r in rows
                 if r.l3.strip().lower() == target]
         stale_l3s.add(body.l3)
     else:
@@ -952,6 +957,32 @@ async def post_master_table(project_id: str, body: MasterTableQuery) -> dict:
     )
 
 
+@app.get("/api/projects/{project_id}/master-data/export")
+async def export_master_data(
+    project_id: str,
+    brand: str = "",
+    provinceGroup: str = "",
+    channelType: str = "",
+    channel: str = "",
+    grain: str = "month",
+) -> Response:
+    """Download the full adopted feature matrix as xlsx — one sheet per Channel
+    Type, uncapped (not the master-table display slice)."""
+    from app.agents import master_data
+    st = _require_state(project_id)
+    data = master_data.build_export(
+        st, brand=[brand] if brand else None,
+        province_group=[provinceGroup] if provinceGroup else None,
+        channel_type=[channelType] if channelType else None,
+        channel=[channel] if channel else None, grain=grain,
+    )
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="master-data-{project_id}.xlsx"'},
+    )
+
+
 # ── Indicator lifecycle ledger (S2 · every layer's verdict) ─
 @app.get("/api/projects/{project_id}/indicator-ledger")
 async def get_indicator_ledger(project_id: str) -> dict:
@@ -961,8 +992,34 @@ async def get_indicator_ledger(project_id: str) -> dict:
     it can never disagree with the scorecards, the sign-offs or the OLS setup.
     """
     from app.agents import ledger
+    from app.agents.dataset_cache import model_objects
+    from app.agents.ledger import OBJECT_ANY
     st = _require_state(project_id)
     rows = ledger.indicator_ledger(st)
+    # interim: dedup by indicator key — one verdict per indicator until the
+    # Phase 1 object-aware ledger index. `indicator_ledger` now returns one row
+    # PER model object (channel type); this view serializes no `object` field,
+    # so without dedup the response would carry 7x duplicate rows (Danone case)
+    # and inflated adopted/rejected counts.
+    seen: set[tuple[str, str]] = set()
+    deduped = []
+    for r in rows:
+        if r.key in seen:
+            continue
+        seen.add(r.key)
+        deduped.append(r)
+
+    def _row(r):
+        return {
+            "object": r.object, "l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
+            "indicator": r.indicator, "adopted": r.adopted, "rejectedAt": r.rejected_at,
+            "reason": r.reason,
+            "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
+                          "status": v.status, "note": v.note} for v in r.verdicts],
+        }
+
+    objs = model_objects(st) or [OBJECT_ANY]
+    rows_by_object = {o: [_row(r) for r in rows if r.object in (o, OBJECT_ANY)] for o in objs}
     return {
         "layers": [{"layer": lid, "task": task, "label": label}
                    for lid, task, label in ledger.LAYERS],
@@ -971,12 +1028,13 @@ async def get_indicator_ledger(project_id: str) -> dict:
             "adopted": r.adopted, "rejectedAt": r.rejected_at, "reason": r.reason,
             "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
                           "status": v.status, "note": v.note} for v in r.verdicts],
-        } for r in rows],
+        } for r in deduped],
+        "rowsByObject": rows_by_object,
         # TODO(Task 7): serialize the per-object funnel; for now the combined
         # rollup keeps this endpoint's response shape unchanged.
         "funnel": ledger.funnel(st)["combined"],
-        "adopted": sum(1 for r in rows if r.adopted),
-        "rejected": sum(1 for r in rows if not r.adopted),
+        "adopted": sum(1 for r in deduped if r.adopted),
+        "rejected": sum(1 for r in deduped if not r.adopted),
     }
 
 

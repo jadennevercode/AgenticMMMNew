@@ -1,7 +1,8 @@
-import { Fragment, useMemo, useState } from 'react'
-import { ChevronRight } from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { asOlsTree } from '../../../lib/artifact-format'
 import { cn } from '../../../lib/cn'
+import { useSimStore } from '../../../store/useSimStore'
+import { ChannelTypeSelect } from '../factor-tree/ChannelTypeSelect'
 import type {
   ArtifactInstance,
   OlsObjectSummary,
@@ -110,105 +111,88 @@ function RangeCell({ value, band, status, isPct }: { value: number | null; band:
   )
 }
 
-/* ── one factor-tree indicator row (+ expandable per-object results) ── */
-function IndicatorRow({ row }: { row: OlsTreeRow }) {
-  const [open, setOpen] = useState(false)
-  const meta = STATUS_META[row.status]
-  const canExpand = row.results.length > 0
+/* ── one horizontal factor row (L1|L2|L3|L4|Indicator + fit cells) ──
+ * When `channel` is set, coef/t/p/ROI/Contribution are read from that object's
+ * own result (`row.results`); otherwise the aggregate row values are shown. */
+interface Laid {
+  row: OlsTreeRow
+  firstL1: boolean
+  firstL2: boolean
+  firstL3: boolean
+}
+
+function IndicatorRow({ laid, channel }: { laid: Laid; channel: string }) {
+  const { row, firstL1, firstL2, firstL3 } = laid
+  const res = channel ? row.results.find((r) => r.object === channel) : undefined
+  const inChannel = !channel || res != null
+  const coef = res ? res.coef : row.coef
+  const tValue = res ? res.tValue : row.tValue
+  const pValue = res ? res.pValue : row.pValue
+  const roi = res ? res.roi : row.roi
+  const contribution = res ? res.contribution : row.contribution
+  const meta = STATUS_META[!inChannel ? 'notInModel' : row.status]
   return (
-    <>
-      <tr
-        className={cn(
-          'border-b border-border/50 last:border-0 hover:bg-accent/40',
-          canExpand && 'cursor-pointer',
-          row.status === 'dropped' && 'opacity-60',
-        )}
-        onClick={() => canExpand && setOpen((v) => !v)}
-      >
-        <td className="py-1.5 pl-2 pr-2 align-top">
-          <div className="flex items-start gap-1.5">
-            {canExpand ? (
-              <ChevronRight className={cn('mt-0.5 size-3 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')} />
-            ) : (
-              <span className="w-3 shrink-0" />
-            )}
-            <div className="min-w-0">
-              <span className={cn('block leading-snug', row.status === 'dropped' && 'line-through')}>{row.indicator || '—'}</span>
-              <span className="mt-0.5 flex flex-wrap items-center gap-1">
-                <span className={cn('size-1.5 rounded-full', row.mapped ? 'bg-emerald-500' : 'bg-muted-foreground/40')} title={row.mapped ? 'mapped to data' : 'unmapped'} />
-                <span className={cn('size-1.5 rounded-full', row.inModel ? 'bg-primary' : 'bg-muted-foreground/40')} title={row.inModel ? 'in model' : 'not in model'} />
-                {row.rangeSource && (
-                  <span className="rounded bg-muted px-1 text-[9px] uppercase tracking-wide text-muted-foreground">
-                    {row.rangeSource === 'knowledge' ? 'KB' : 'ref'}
-                  </span>
-                )}
-              </span>
-            </div>
-          </div>
-        </td>
-        <td className="px-2 py-1.5 text-right align-top font-mono text-[11px]">{num(row.coef)}</td>
-        <td className={cn('px-2 py-1.5 text-right align-top font-mono text-[11px]', row.significant && 'font-bold text-foreground')}>{num(row.tValue)}</td>
-        <td className="px-2 py-1.5 text-right align-top font-mono text-[11px] text-muted-foreground">{num(row.pValue, 3)}</td>
-        <td className="px-2 py-1.5 align-top"><RangeCell value={row.roi} band={row.roiRange} status={row.roiStatus} /></td>
-        <td className="px-2 py-1.5 align-top"><RangeCell value={row.contribution} band={row.contributionRange} status={row.contributionStatus} isPct /></td>
-        <td className="px-2 py-1.5 align-top">
-          <span className={cn('inline-flex w-fit items-center rounded px-1.5 py-0.5 text-[11px] font-medium', meta.chip)}>
-            {meta.label}
-            {row.droppedBy && ` · ${row.droppedBy}`}
-          </span>
-          {row.flagReason && <p className="mt-0.5 max-w-[220px] text-[10px] leading-snug text-amber-600/90">{row.flagReason}</p>}
-        </td>
-      </tr>
-      {open && canExpand && (
-        <tr className="border-b border-border/50 bg-muted/30">
-          <td colSpan={7} className="px-8 py-2">
-            <table className="w-full text-[11px]">
-              <thead>
-                <tr className="text-left text-muted-foreground">
-                  <th className="py-0.5 pr-4 font-medium">Object</th>
-                  <th className="py-0.5 pr-4 text-right font-medium">Coef</th>
-                  <th className="py-0.5 pr-4 text-right font-medium">t</th>
-                  <th className="py-0.5 pr-4 text-right font-medium">p</th>
-                  <th className="py-0.5 pr-4 text-right font-medium">ROI</th>
-                  <th className="py-0.5 text-right font-medium">Contribution</th>
-                </tr>
-              </thead>
-              <tbody>
-                {row.results.map((r, i) => (
-                  <tr key={`${r.object}-${i}`} className="font-mono">
-                    <td className="py-0.5 pr-4 font-sans">{r.object}</td>
-                    <td className="py-0.5 pr-4 text-right">{num(r.coef)}</td>
-                    <td className="py-0.5 pr-4 text-right">{num(r.tValue)}</td>
-                    <td className="py-0.5 pr-4 text-right">{num(r.pValue, 3)}</td>
-                    <td className="py-0.5 pr-4 text-right">{num(r.roi)}</td>
-                    <td className="py-0.5 text-right">{pct(r.contribution)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </td>
-        </tr>
+    <tr
+      className={cn(
+        'border-b border-border/40',
+        firstL1 && 'border-t border-border/70',
+        (row.status === 'dropped' || !inChannel) && 'opacity-60',
+        'hover:bg-accent/40',
       )}
-    </>
+    >
+      <td className="px-2 py-1.5 align-top font-semibold">{firstL1 ? row.l1 || '—' : ''}</td>
+      <td className="px-2 py-1.5 align-top text-foreground/80">{firstL2 ? row.l2 : ''}</td>
+      <td className="px-2 py-1.5 align-top text-foreground/70">{firstL3 ? row.l3 : ''}</td>
+      <td className="px-2 py-1.5 align-top text-muted-foreground">{row.l4}</td>
+      <td className="px-2 py-1.5 align-top">
+        <span className={cn('block leading-snug font-medium', row.status === 'dropped' && 'line-through')}>{row.indicator || '—'}</span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-1">
+          <span className={cn('size-1.5 rounded-full', row.mapped ? 'bg-emerald-500' : 'bg-muted-foreground/40')} title={row.mapped ? 'mapped to data' : 'unmapped'} />
+          <span className={cn('size-1.5 rounded-full', row.inModel ? 'bg-primary' : 'bg-muted-foreground/40')} title={row.inModel ? 'in model' : 'not in model'} />
+          {row.rangeSource && (
+            <span className="rounded bg-muted px-1 text-[9px] uppercase tracking-wide text-muted-foreground">
+              {row.rangeSource === 'knowledge' ? 'KB' : 'ref'}
+            </span>
+          )}
+        </span>
+      </td>
+      <td className="px-2 py-1.5 text-right align-top font-mono text-[11px]">{num(coef)}</td>
+      <td className={cn('px-2 py-1.5 text-right align-top font-mono text-[11px]', row.significant && !channel && 'font-bold text-foreground')}>{num(tValue)}</td>
+      <td className="px-2 py-1.5 text-right align-top font-mono text-[11px] text-muted-foreground">{num(pValue, 3)}</td>
+      <td className="px-2 py-1.5 align-top"><RangeCell value={roi} band={row.roiRange} status={channel ? '' : row.roiStatus} /></td>
+      <td className="px-2 py-1.5 align-top"><RangeCell value={contribution} band={row.contributionRange} status={channel ? '' : row.contributionStatus} isPct /></td>
+      <td className="px-2 py-1.5 align-top">
+        <span className={cn('inline-flex w-fit items-center rounded px-1.5 py-0.5 text-[11px] font-medium', meta.chip)}>
+          {meta.label}
+          {row.droppedBy && ` · ${row.droppedBy}`}
+        </span>
+        {row.flagReason && !channel && <p className="mt-0.5 max-w-[220px] text-[10px] leading-snug text-amber-600/90">{row.flagReason}</p>}
+      </td>
+    </tr>
   )
 }
 
 /* ── main view ─────────────────────────────────────────── */
 export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
   const data = asOlsTree(inst.body)
+  const channel = useSimStore((s) => s.s2ChannelFilter)
+  const setChannel = useSimStore((s) => s.setS2ChannelFilter)
   const [filter, setFilter] = useState<Set<OlsRowStatus>>(new Set())
 
-  const groups = useMemo(() => {
+  // Data-derived channel options — the fitted model objects. Never hardcoded.
+  const channelOptions = useMemo(() => (data ? data.objects.map((o) => o.object) : []), [data])
+
+  // Flat rows with vertical-merge flags (first-of-run per L level).
+  const laidRows: Laid[] = useMemo(() => {
     if (!data) return []
     const rows = filter.size ? data.tree.filter((r) => filter.has(r.status)) : data.tree
-    const out: { path: string; rows: OlsTreeRow[] }[] = []
-    for (const r of rows) {
-      const path = [r.l1, r.l2, r.l3].filter(Boolean).join(' › ') || '—'
-      const last = out[out.length - 1]
-      if (last && last.path === path) last.rows.push(r)
-      else out.push({ path, rows: [r] })
-    }
-    return out
+    return rows.map((row, i, arr) => {
+      const prev = arr[i - 1]
+      const firstL1 = !prev || prev.l1 !== row.l1
+      const firstL2 = firstL1 || prev?.l2 !== row.l2
+      const firstL3 = firstL2 || prev?.l3 !== row.l3
+      return { row, firstL1, firstL2, firstL3 }
+    })
   }, [data, filter])
 
   if (!data) {
@@ -279,11 +263,16 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
       {/* fit-metric header */}
       <section aria-label="Model fit">
-        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Model objects — fast OLS pre-fit</h3>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Model objects — fast OLS pre-fit</h3>
+          <ChannelTypeSelect options={channelOptions} value={channel} onChange={setChannel} />
+        </div>
         <div className="flex gap-2.5 overflow-x-auto pb-1">
-          {data.objects.map((o) => (
-            <ObjectCard key={o.object} o={o} />
-          ))}
+          {data.objects
+            .filter((o) => !channel || o.object === channel)
+            .map((o) => (
+              <ObjectCard key={o.object} o={o} />
+            ))}
         </div>
       </section>
 
@@ -291,6 +280,7 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
       <section aria-label="Result summary" className="flex flex-wrap items-center gap-1.5">
         <span className="mr-1 text-[11px] text-muted-foreground">
           {data.summary.total} factors · {data.summary.inModel} in model
+          {channel && <> · showing <span className="text-primary">{channel}</span></>}
         </span>
         {SUMMARY_ORDER.map(({ key, label, countKey }) => {
           const count = data.summary[countKey]
@@ -317,45 +307,44 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
         )}
       </section>
 
-      {/* factor tree results */}
+      {/* factor tree results — horizontal L1|L2|L3|L4|Indicator + fit cells */}
       <section aria-label="Factor tree results" className="overflow-hidden rounded-xl border border-border">
-        <table className="w-full text-[12.5px]">
-          <thead className="bg-muted/50">
-            <tr className="text-left text-[11px] text-muted-foreground">
-              <th className="py-2 pl-2 pr-2 font-medium">Indicator</th>
-              <th className="px-2 py-2 text-right font-medium">Coef</th>
-              <th className="px-2 py-2 text-right font-medium">t</th>
-              <th className="px-2 py-2 text-right font-medium">p</th>
-              <th className="px-2 py-2 font-medium">
-                ROI
-                {moneyRoi ? ' · band' : (
-                  <span className="ml-1 font-normal normal-case text-muted-foreground/80" title="Y is a volume metric and no unit price is set, so ROI is volume per spend — not comparable to the industry money bands.">
-                    (volume/spend — not benchmarked)
-                  </span>
-                )}
-              </th>
-              <th className="px-2 py-2 font-medium">Contribution · band</th>
-              <th className="px-2 py-2 font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map((g) => (
-              <Fragment key={`grp-${g.path}`}>
-                <tr className="bg-muted/30">
-                  <td colSpan={7} className="px-2 py-1 text-[11px] font-semibold text-foreground/80">{g.path}</td>
-                </tr>
-                {g.rows.map((r) => (
-                  <IndicatorRow key={r.key} row={r} />
-                ))}
-              </Fragment>
-            ))}
-            {groups.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-[12px] text-muted-foreground">No factors match this filter.</td>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[820px] text-[12.5px]">
+            <thead className="bg-muted/50">
+              <tr className="text-left text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                <th className="px-2 py-2 font-semibold">L1</th>
+                <th className="px-2 py-2 font-medium">L2</th>
+                <th className="px-2 py-2 font-medium">L3</th>
+                <th className="px-2 py-2 font-medium">L4</th>
+                <th className="px-2 py-2 font-medium">Indicator</th>
+                <th className="px-2 py-2 text-right font-medium">Coef</th>
+                <th className="px-2 py-2 text-right font-medium">t</th>
+                <th className="px-2 py-2 text-right font-medium">p</th>
+                <th className="px-2 py-2 font-medium">
+                  ROI
+                  {moneyRoi ? ' · band' : (
+                    <span className="ml-1 font-normal normal-case text-muted-foreground/80" title="Y is a volume metric and no unit price is set, so ROI is volume per spend — not comparable to the industry money bands.">
+                      (vol/spend)
+                    </span>
+                  )}
+                </th>
+                <th className="px-2 py-2 font-medium">Contribution · band</th>
+                <th className="px-2 py-2 font-medium">Status</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {laidRows.map((laid) => (
+                <IndicatorRow key={laid.row.key} laid={laid} channel={channel} />
+              ))}
+              {laidRows.length === 0 && (
+                <tr>
+                  <td colSpan={11} className="px-3 py-6 text-center text-[12px] text-muted-foreground">No factors match this filter.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       {data.note && <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">{data.note}</p>}

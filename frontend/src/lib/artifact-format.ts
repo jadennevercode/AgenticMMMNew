@@ -164,10 +164,11 @@ export function bodyToMarkdown(
         ? `- **${o.object}**: ${o.error}`
         : `- **${o.object}** — ${o.features} features over ${o.months} periods · Y: ${o.y}`))
       .join('\n')
+    const funnelLayers = master.funnel?.combined ?? []
     const funnel = [
       '| Layer | Task | Intake | Rejected | Survivors |',
       '| --- | --- | --- | --- | --- |',
-      ...master.funnel.map((f) => `| ${f.label} | ${f.task} | ${f.intake} | ${f.rejected} | ${f.survivors} |`),
+      ...funnelLayers.map((f) => `| ${f.label} | ${f.task} | ${f.intake} | ${f.rejected} | ${f.survivors} |`),
     ].join('\n')
     const adopted = master.adopted
       .map((a) => `- ${[a.l1, a.l2, a.l3, a.l4].filter(Boolean).join(' › ')} — ${a.indicator}`)

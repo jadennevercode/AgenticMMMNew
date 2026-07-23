@@ -297,3 +297,84 @@ LLM 端点是 20次/2分钟硬限 + **10 分钟惩罚锁死**。`973fcd9` 的 pa
 但冷启动 + 并发齐射仍会偶发触限。建议后续单独处理：pacer 改为**主动式**（初始即带最小间隔，
 或跨重启持久化"已被限流"状态），并给 S1 各处理器的 LLM 调用加 try/except 降级
 （对齐 `writeback_minutes` 的容错），避免单次 429 楔死整个 run。
+
+---
+
+## Phase 2 per-channel verification — 2026-07-23
+
+Verified Phase 2's per-Channel-Type screening on the **real Danone reference
+dataset** (23,790 rows, `backend/app/agents/_test_real_per_channel.py`).
+Deterministic, read-only: an in-memory state bound to project id `t-real-pc`
+via `set_project_dataset(..., "slot")`/`invalidate_project`, never writing to
+stored project JSON, no server started, no LLM called, no autopilot run.
+
+**Result: 5/5 assertions pass, all against real computed values.**
+
+1. **Data-derived channels.** `model_objects(st)` returns exactly the 7 real
+   channel_types, ordered busiest-first by row count — re-derived independently
+   from the raw frame rather than hardcoded:
+   ```
+   MT (5186) > AFH (4142) > TT (2522) > EC (1754) > O2O (1519) > 社区团购 (1479) > WS (942)
+   ```
+2. **Per-object ledger.** `indicator_ledger(st)` produces 168 rows (24 distinct
+   indicator keys × 7 channels), and the set of non-`OBJECT_ANY` `object`
+   values covers all 7 real channels.
+3. **Per-channel statistical divergence (the core proof).** Built the real
+   `build_stat_scorecard(st)`, found `POSM和陈列物料（POSM&Rack) / Bluesky KPI -
+   平均POSM个数（IR拍照识别到的POSM数量加总/拍照次数）` scored in 5 real channels
+   (AFH, EC, MT, TT, WS), forced its disposition to `"drop"` in AFH only and
+   `"include"` in the other 4, rebuilt the ledger: AFH → `rejected_at ==
+   "statistical"`, not adopted; MT/TT/EC/WS → adopted. Confirms the per-object
+   statistical layer genuinely partitions by channel on real data, not just the
+   synthetic two-channel fixture in `_test_per_channel.py`.
+4. **`model_selection` per object.** The dropped `(l4, metric)` pair is in
+   `model_selection(st).exclude_for("AFH")` and NOT in `exclude_for("MT")`.
+5. **`master_table` columns differ by channel.** `master_table(st,
+   channel_type=["MT"])` carries the POSM indicator as a column (4 total
+   columns); `master_table(st, channel_type=["AFH"])` does not (6 total
+   columns, all different) — the same real indicator is a modeling column in
+   one channel and absent from another.
+
+One adaptation from the plan as written: the plan's step 3 recipe ("force
+disposition to drop for exactly one channel") was followed literally, but the
+first candidate indicator tried (`产品价格调整` / `RSP`, chosen purely by
+"scored in ≥2 channels") turned out to be scored by 2.4's statistical scorer
+but absent from the ledger's own driver universe (`driver_candidates_by_l4` —
+price-type factors are not driver candidates), so it never appears in
+`indicator_ledger` at all and the forced drop silently matched nothing. Fixed
+by additionally requiring the candidate indicator to be present in
+`ledger._universe(st)`, which is what surfaces through the ledger/model_selection/
+master_table chain. This is a real, reproducible property of the actual data
+and taxonomy — documented in the script's `_pick_divergence_indicator`
+docstring — not a workaround to fake a result.
+
+**Existing suites still pass, unaffected:**
+- `PYTHONPATH=. .venv/bin/python -m app.agents._test_per_channel` → 12/12 passed.
+- `PYTHONPATH=. .venv/bin/python -m pytest tests/ -q` → 131 passed, 3 failed
+  (all three in `tests/test_ols_config_roundtrip.py`, pre-existing and
+  unrelated to this change — same 131/3 split the task's own success
+  criteria call "pre-existing").
+
+**Not run here (explicitly deferred):** criterion 5 of the Phase 2 plan — the
+full live-autopilot end-to-end run on a real backend + real LLM — was **not**
+attempted in this task. It needs a running `uvicorn` server, LLM credentials,
+and touches shared `data/` project state, none of which this read-only,
+in-memory verification is allowed to do. That run is the controller's
+responsibility on a dedicated project id.
+
+## 2026-07-23 — Live autopilot e2e on new per-channel code (BLOCKED: external LLM 502)
+Ran `POST /reset` + `POST /run {autopilot:true}` on `danone-mizone` against the
+feat/per-channel-screening backend (port 8020, GLM-5.2 configured).
+- Deterministic S1 steps completed cleanly: 1.0, 1.0a, 1.1a done (3 tasks).
+- HALTED at task 1.1 (first LLM-dependent A/C step): `LLMError: LLM chat failed
+  after 3 attempts — HTTP 502`. Reproduced with a direct `get_llm().json()` probe —
+  persistent, provider/gateway side, NOT a code issue and NOT transient.
+- Pre-existing infra bug re-observed (out of Phase 2 scope): `app/main.py::_run_job`
+  does not isolate the LLMError, so task 1.1 is stranded at status "running" while the
+  run guard clears — "Task exception was never retrieved". (Documented in prior sessions.)
+CONCLUSION: the per-channel pipeline itself is verified end-to-end on REAL data by
+`app/agents/_test_real_per_channel.py` (7 channels, genuine per-channel divergence,
+master-table columns differ by channel). A full *autopilot* case (with the LLM narrative
+layer) needs the GLM-5.2 endpoint restored (check provider status / credentials / quota
+in Settings → model config). No fabricated data was produced — the run stopped rather
+than faking the LLM output.

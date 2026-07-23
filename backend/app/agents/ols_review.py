@@ -21,10 +21,14 @@ from app.agents import data_rules
 from app.agents.dataset_cache import model_df, model_objects, uses_project_data
 from app.agents.data_rules import build_range_index, RangeBenchmark
 from app.agents.ledger import (
-    _LAYER_PAIRS,
+    _LAYER_PAIRS_BY_OBJECT,
     LAYER_LABEL,
     LAYER_TASK,
+    OBJECT_ANY,
+    ModelSelection,
     _matches,
+    _obj,
+    _object_drops,
     indicator_ledger,
     model_selection,
     ols_flagged_pairs,
@@ -87,8 +91,10 @@ ols_drop_pairs = ols_flagged_pairs
 # ── 2.5 setup proposal (AI proposes → human reviews in 2.5y / 2.5x / 2.5p) ──
 
 
-def _stat_index(st: ProjectState) -> dict[tuple[str, str], object]:
-    """2.4's scored rows keyed by (l4, indicator) — the evidence behind the advice.
+def _stat_index(st: ProjectState) -> dict[tuple[str, str, str], object]:
+    """2.4's scored rows keyed by (object, l4, indicator) — the evidence behind
+    the advice, one row per channel's own screening (``OBJECT_ANY`` for legacy
+    scorecards recorded before rows carried an object).
 
     2.5 runs after 2.4, so the human-reviewed scorecard is normally on state. If
     it is missing (2.4 not run / legacy state) we recompute it with 2.4's own
@@ -101,7 +107,11 @@ def _stat_index(st: ProjectState) -> dict[tuple[str, str], object]:
             card = build_stat_scorecard(st)
         except Exception:  # noqa: BLE001 — a proposal without stats still beats failing
             return {}
-    return {_norm_pair(r.l4, r.indicator): r for r in (getattr(card, "rows", None) or [])}
+    out: dict[tuple[str, str, str], object] = {}
+    for r in getattr(card, "rows", None) or []:
+        obj = _obj(getattr(r, "object", "")) or OBJECT_ANY
+        out[(obj, *_norm_pair(r.l4, r.indicator))] = r
+    return out
 
 
 def _y_rationale(c: dict, recommended: bool) -> str:
@@ -139,11 +149,14 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
     objects = model_objects(st)
     stats = _stat_index(st)
 
+    from app.agents.vocabulary import vocab_for
+    vocab = vocab_for(st)
+
     # ── Y: one candidate list per model object; recommend the KPI volume ──
     y_cands: list[OlsYCandidate] = []
     y_choice: list[OlsYChoice] = []
     for obj in objects:
-        cands = y_candidates(df, obj)
+        cands = y_candidates(df, obj, vocab)
         for i, c in enumerate(cands):
             rec = i == 0  # y_candidates() puts the volume-preferring default first
             y_cands.append(OlsYCandidate(
@@ -157,25 +170,31 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
                                        metricType=top["metric_type"],
                                        isMoney=top["is_money"]))
 
-    # ── X: the driver universe across objects, scored by 2.4 ──
+    # ── X: each object screens its own driver universe, scored by 2.4 ──
     # Indicators an earlier layer rejected are listed too, but locked. Hiding
     # them (the old behaviour) left the human with no way to see where a
-    # variable went — and no trace of who decided it.
-    seen: dict[tuple[str, str], OlsXCandidate] = {}
+    # variable went — and no trace of who decided it. Candidates are never
+    # deduped across objects: the same indicator can be a strong driver in one
+    # channel and collinear/insignificant in another, so each channel needs its
+    # own row, its own stats, and its own lock/select verdict.
+    x_cands: list[OlsXCandidate] = []
     for obj in objects:
-        for c in driver_candidates_by_l4(df, obj):
+        seen: dict[tuple[str, str], OlsXCandidate] = {}
+        for c in driver_candidates_by_l4(df, obj, vocab):
             key = _norm_pair(c["l4"], c["metric"])
             if key in seen:
                 continue
-            locked_by = next((lid for lid in ("mapping", "quality", "signoff", "statistical")
-                              if _matches(key, _LAYER_PAIRS[lid](st))), "")
-            row = stats.get(key)
+            locked_by = next(
+                (lid for lid in ("mapping", "quality", "signoff", "statistical")
+                 if _matches(key, _object_drops(_LAYER_PAIRS_BY_OBJECT[lid](st), obj))),
+                "")
+            row = stats.get((obj, *key)) or stats.get((OBJECT_ANY, *key))
             ok = (not locked_by
                   and row is not None
                   and abs(row.pearson) >= MIN_ABS_PEARSON
                   and row.vif < MAX_VIF)
             seen[key] = OlsXCandidate(
-                key=f"{key[0]}|{key[1]}",
+                key=f"{key[0]}|{key[1]}", object=obj,
                 l1=c["l1"], l2=c["l2"], l3=c["l3"], l4=c["l4"],
                 indicator=c["metric"], metric=c["metric"], isSpend=c["is_spend"],
                 pearson=round(float(getattr(row, "pearson", 0.0)), 4),
@@ -188,30 +207,35 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
                            "not available as a model variable." if locked_by
                            else _x_rationale(row, c, bool(ok))),
             )
-    x_cands = sorted(seen.values(),
-                     key=lambda r: (r.locked, not r.recommended, -abs(r.pearson), r.indicator))
+        obj_cands = sorted(seen.values(),
+                           key=lambda r: (r.locked, not r.recommended, -abs(r.pearson), r.indicator))
 
-    # Cap the pre-ticked set so the first fit is identified on a short series;
-    # everything stays visible and the human can tick more (the df guard warns).
-    picked = 0
-    for c in x_cands:
-        if c.selected:
-            picked += 1
-            if picked > DEFAULT_MAX_SELECTED:
-                c.selected = False
-                c.rationale += (f" Not pre-ticked — beyond the top {DEFAULT_MAX_SELECTED} "
-                                "by correlation; tick to include.")
+        # Cap the pre-ticked set, per object, so the first fit is identified on a
+        # short series; everything stays visible and the human can tick more
+        # (the df guard warns). Reset at each object boundary — one channel's
+        # cap must never crowd out another channel's own candidates.
+        picked = 0
+        for c in obj_cands:
+            if c.selected:
+                picked += 1
+                if picked > DEFAULT_MAX_SELECTED:
+                    c.selected = False
+                    c.rationale += (f" Not pre-ticked — beyond the top {DEFAULT_MAX_SELECTED} "
+                                    "by correlation; tick to include.")
 
-    # Never hand back an empty selection: with heavily collinear data nothing
-    # clears the gate, and a fit with no variables cannot run at all. Pre-tick the
-    # best available as a starting point and say plainly that they failed the gate.
-    # Locked candidates are never revived — an earlier layer already ruled.
-    openable = [c for c in x_cands if not c.locked]
-    if openable and not any(c.selected for c in openable):
-        for c in sorted(openable, key=lambda r: (-abs(r.pearson), r.vif))[:DEFAULT_MAX_SELECTED]:
-            c.selected = True
-            c.rationale += (" Pre-ticked only as a starting point — no variable cleared the "
-                            "correlation/collinearity gate. Review before trusting the fit.")
+        # Never hand this object back an empty selection: with heavily collinear
+        # data nothing clears the gate, and a fit with no variables cannot run at
+        # all. Pre-tick the best available as a starting point and say plainly
+        # that they failed the gate. Locked candidates are never revived — an
+        # earlier layer already ruled.
+        openable = [c for c in obj_cands if not c.locked]
+        if openable and not any(c.selected for c in openable):
+            for c in sorted(openable, key=lambda r: (-abs(r.pearson), r.vif))[:DEFAULT_MAX_SELECTED]:
+                c.selected = True
+                c.rationale += (" Pre-ticked only as a starting point — no variable cleared the "
+                                "correlation/collinearity gate. Review before trusting the fit.")
+
+        x_cands.extend(obj_cands)
 
     return OlsConfig(
         dataSource="project" if uses_project_data(st) else "reference",
@@ -220,11 +244,19 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
     )
 
 
-def selected_x_metrics(cfg: OlsConfig | None) -> frozenset[str] | None:
-    """Normalized metric names the human kept — ``None`` = auto-select (legacy)."""
+def selected_x_metrics(cfg: OlsConfig | None) -> dict[str, frozenset[str]] | None:
+    """Per-object metric names the human kept — ``None`` = auto-select (legacy).
+
+    Keyed by model object (``OBJECT_ANY`` for candidates predating the object
+    field). Each channel fits on its own ticked set, never another channel's.
+    """
     if cfg is None or not cfg.x_candidates:
         return None
-    return frozenset(_norm(c.metric) for c in cfg.x_candidates if c.selected)
+    out: dict[str, set[str]] = {}
+    for c in cfg.x_candidates:
+        if c.selected:
+            out.setdefault(_obj(c.object) or OBJECT_ANY, set()).add(_norm(c.metric))
+    return {k: frozenset(v) for k, v in out.items()} or None
 
 
 def y_metric_for(cfg: OlsConfig | None, obj: str) -> str | None:
@@ -241,7 +273,7 @@ def y_metric_for(cfg: OlsConfig | None, obj: str) -> str | None:
 
 def _collect_records(
     st: ProjectState,
-    exclude: frozenset[tuple[str, str]],
+    sel: ModelSelection,
     cfg: OlsConfig | None = None,
     *,
     eng=None,
@@ -253,25 +285,32 @@ def _collect_records(
     they chose, the X they ticked, and their transform/control parameters.
     Without it we fall back to the legacy auto-fit so old projects still run.
 
+    ``sel`` is the resolved :class:`ModelSelection` — its exclude set is read
+    per object (``sel.exclude_for(obj)``) so one channel's drop never excludes
+    an indicator from another channel's fit.
+
     ``eng``/``task_id`` record each object's regression as an explicit
     ``model.ols`` tool invocation; without them the fit runs untraced.
     """
     objects: list[dict] = []
     prefit: dict[str, dict] = {}
-    # records[(l4n, metricn)] = accumulated per-indicator stats across objects.
-    records: dict[tuple[str, str], dict] = {}
+    # records[(obj, l4n, metricn)] = one object's own per-indicator stats —
+    # never accumulated across objects, so ROI/contribution are never averaged
+    # between channels.
+    records: dict[tuple[str, str, str], dict] = {}
     df = model_df(st)
     include = selected_x_metrics(cfg)
     params = cfg.params if cfg is not None else None
     for obj in model_objects(st):
         y_metric = y_metric_for(cfg, obj)
+        inc = include.get(obj) if isinstance(include, dict) else include
         try:
             res = traced(
                 eng, st, task_id, "model.ols",
-                f"{obj} · Y={y_metric or 'auto'} · {len(include) if include else 'auto'} X",
+                f"{obj} · Y={y_metric or 'auto'} · {len(inc) if inc else 'auto'} X",
                 get_tool("model.ols").run, df, obj,
-                adstock=0.5, hill_half=1.0, exclude=exclude,
-                y_metric=y_metric, include=include, params=params,
+                adstock=0.5, hill_half=1.0, exclude=sel.exclude_for(obj),
+                y_metric=y_metric, include=inc, params=params,
                 summarize=lambda r: f"R²={r.r2:.3f} · {int(r.n_obs)} obs · {len(r.drivers)} drivers",
             )
         except Exception as e:  # noqa: BLE001
@@ -302,7 +341,7 @@ def _collect_records(
             meta = dmeta.get(d, {})
             l4 = (meta.get("l4") or meta.get("l3") or meta.get("l1") or "").strip()
             metric = meta.get("metric") or d
-            key = _norm_pair(l4, metric)
+            key = (obj, *_norm_pair(l4, metric))
             rec = records.get(key)
             if rec is None:
                 rec = {"l4": l4, "l1": meta.get("l1", ""), "l2": meta.get("l2", ""),
@@ -310,7 +349,7 @@ def _collect_records(
                        "contribs": [], "rois": [], "coefs": [],
                        "best_t": None, "objects": [], "results": [],
                        # ROI is only comparable to the Knowledge money bands when
-                       # every object contributing to it produced a revenue ROI.
+                       # this object's own fit produced a revenue ROI.
                        "roi_money": True}
                 records[key] = rec
             if str(res.meta.get("roi_unit", "")) != "revenue/spend":
@@ -344,7 +383,11 @@ def _range_status(value: float, rng: tuple[float, float] | None) -> str:
 
 
 def _row_from_record(rec: dict, bench: RangeBenchmark | None) -> dict:
-    """Aggregate a per-indicator record across objects + apply the range verdict."""
+    """Aggregate one object's per-indicator record + apply the range verdict.
+
+    ``rec`` is now scoped to a single model object (the record key carries the
+    object), so this mean is over that one channel's own driver columns — never
+    averaged across channels."""
     contrib = _nan_mean(rec["contribs"])
     roi = _nan_mean(rec["rois"])
     coef = _nan_mean(rec["coefs"])
@@ -426,9 +469,14 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
     # One resolved selection — the same one 2.6 and 3.2 fit on, so what the tree
     # shows as in-model is exactly what the master table and training will carry.
     sel = model_selection(st)
-    exclude = sel.exclude
     # Where each rejected indicator died, for the tree's `droppedBy` column.
-    rejected_by = {r.key: r.rejected_at for r in indicator_ledger(st) if not r.adopted}
+    # Keyed by (object, key): a rejection at a per-object layer (quality,
+    # statistical, selection) only applies to that channel, so the same
+    # indicator can be dropped in one channel and adopted in another.
+    # OBJECT_ANY holds the still-global layers (mapping, sign-off) and the
+    # ledger rows for indicators excluded before they ever reach a channel's
+    # own driver universe.
+    rejected_by = {(r.object, r.key): r.rejected_at for r in indicator_ledger(st) if not r.adopted}
     if not fit:
         # Setup state — the proposal is on the config; nothing is fitted yet.
         body = {
@@ -441,69 +489,85 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
                      "they are confirmed."),
         }
         return body, {}, []
-    objects, prefit, records = _collect_records(st, exclude, cfg, eng=eng, task_id=task_id)
+    objects, prefit, records = _collect_records(st, sel, cfg, eng=eng, task_id=task_id)
 
     industry = getattr(getattr(st, "meta", None), "industry", None)
     idx = build_range_index(getattr(industry, "l1", None), getattr(industry, "l2", None))
 
-    consumed: set[tuple[str, str]] = set()
+    consumed: set[tuple[str, str, str]] = set()
     tree: list[dict] = []
     fmap = resolve_factor_map(st)
+    objects_list = model_objects(st) or [OBJECT_ANY]
 
+    # One tree row per (object, factor-row): each channel screens its own
+    # driver universe (Task 5), so a factor can be in-model in one channel and
+    # dropped in another — the tree must show both, not one averaged verdict.
     for fm in fmap.rows:
         l4n = _norm(fm.l4)
-        # Match a model record by the covering metric label, then the indicator label.
-        rec = None
-        for name in (fm.metric, fm.indicator):
-            if not name:
-                continue
-            k = (l4n, _norm(name))
-            if k in records:
-                rec = records[k]
-                consumed.add(k)
-                break
-        # droppedBy — the layer that rejected this indicator, tested against
-        # every name it might be keyed under.
         cand_names = {_norm(fm.metric), _norm(fm.indicator)}
-        if rec:
-            cand_names.add(_norm(rec["metric"]))
-        dropped_by = next((rejected_by[(l4n, n)] for n in cand_names
-                           if n and (l4n, n) in rejected_by), "")
+        for obj in objects_list:
+            # Match this object's own model record by the covering metric
+            # label, then the indicator label.
+            rec = None
+            for name in (fm.metric, fm.indicator):
+                if not name:
+                    continue
+                k = (obj, l4n, _norm(name))
+                if k in records:
+                    rec = records[k]
+                    consumed.add(k)
+                    break
+            # droppedBy — the layer that rejected this indicator for this
+            # object, tested against every name it might be keyed under; falls
+            # back to OBJECT_ANY for the still-global layers.
+            names = set(cand_names)
+            if rec:
+                names.add(_norm(rec["metric"]))
+            dropped_by = next(
+                (rejected_by[(obj, (l4n, n))] for n in names
+                 if n and (obj, (l4n, n)) in rejected_by), "") or next(
+                (rejected_by[(OBJECT_ANY, (l4n, n))] for n in names
+                 if n and (OBJECT_ANY, (l4n, n)) in rejected_by), "")
 
-        bench = idx.match(fm.l4, fm.metric or fm.indicator)
-        base = _row_from_record(rec, bench) if rec else {**_empty_row_fields(),
-                                                          "roiRange": bench.roi_text if bench else "",
-                                                          "contributionRange": bench.contribution_text if bench else "",
-                                                          "rangeSource": bench.source if bench else ""}
-        in_model = rec is not None
-        status, reason = _classify(base, dropped_by, in_model, bench)
-        tree.append({
-            "key": f"{l4n}|{_norm(fm.metric or fm.indicator)}",
-            "treeRowId": fm.row_id,
-            "l1": fm.l1, "l2": fm.l2, "l3": fm.l3, "l4": fm.l4,
-            "indicator": fm.indicator or fm.metric,
-            "mapped": fm.status == "mapped", "inModel": in_model,
-            "droppedBy": dropped_by,
-            **base, "status": status, "flagReason": reason,
-        })
+            bench = idx.match(fm.l4, fm.metric or fm.indicator)
+            base = _row_from_record(rec, bench) if rec else {**_empty_row_fields(),
+                                                              "roiRange": bench.roi_text if bench else "",
+                                                              "contributionRange": bench.contribution_text if bench else "",
+                                                              "rangeSource": bench.source if bench else ""}
+            in_model = rec is not None
+            status, reason = _classify(base, dropped_by, in_model, bench)
+            tree.append({
+                "key": f"{obj}|{l4n}|{_norm(fm.metric or fm.indicator)}",
+                "object": obj,
+                "treeRowId": fm.row_id,
+                "l1": fm.l1, "l2": fm.l2, "l3": fm.l3, "l4": fm.l4,
+                "indicator": fm.indicator or fm.metric,
+                "mapped": fm.status == "mapped", "inModel": in_model,
+                "droppedBy": dropped_by,
+                **base, "status": status, "flagReason": reason,
+            })
 
     # Model records not tied to any active factor row → surface so nothing is hidden.
     for key, rec in records.items():
         if key in consumed:
             continue
+        obj, l4n, metricn = key
         bench = idx.match(rec["l4"], rec["metric"])
         base = _row_from_record(rec, bench)
         status, reason = _classify(base, "", True, bench)
         tree.append({
-            "key": f"{key[0]}|{key[1]}", "treeRowId": "",
+            "key": f"{obj}|{l4n}|{metricn}", "object": obj, "treeRowId": "",
             "l1": rec["l1"], "l2": rec["l2"], "l3": rec["l3"], "l4": rec["l4"],
             "indicator": rec["metric"], "mapped": False, "inModel": True,
             "droppedBy": "",
             **base, "status": status, "flagReason": reason,
         })
 
-    tree.sort(key=lambda r: (r["l1"], r["l2"], r["l3"], r["l4"], r["indicator"]))
+    tree.sort(key=lambda r: (r["l1"], r["l2"], r["l3"], r["l4"], r["indicator"], r["object"]))
 
+    # Counts are over tree rows, and every row is now (object, factor) — with
+    # more than one model object the totals scale by the object count; that is
+    # honest, not a bug, since each channel's own verdict is now a separate row.
     summary = {
         "total": len(tree),
         "inModel": sum(1 for r in tree if r["inModel"]),
@@ -515,13 +579,19 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
     }
     note = ("OLS fit per model object on the confirmed setup — the response, the model "
             "variables and the transform/control settings you approved in the steps above. "
-            "Contribution is each variable's share of actual sales; trend and seasonality "
+            "Each row is one factor's verdict in one model object (channel), so counts "
+            "scale with the number of objects. Contribution is each variable's share of "
+            "actual sales; trend and seasonality "
             "controls fold into the baseline. Benchmarks come from the industry Knowledge "
             "pack (reference rule library as fallback); ROI is only range-checked when it "
             "is a revenue/spend ratio.")
     body = {"objects": objects, "tree": tree, "summary": summary,
             "setup": _setup_section(cfg, objects), "note": note}
-    flagged = [{"l4": r["l4"], "indicator": r["indicator"], "reason": r["flagReason"]}
+    # `object` rides along so the d-2.5 gate can freeze the drop per channel
+    # (`ledger.freeze_range_drops`) — the same indicator can be out of range in
+    # one channel and fine in another (Task 5's per-object screening).
+    flagged = [{"l4": r["l4"], "indicator": r["indicator"], "reason": r["flagReason"],
+               "object": r["object"]}
                for r in tree if r["status"] == "review"]
     return body, prefit, flagged
 

@@ -16,7 +16,7 @@ import asyncio
 
 from app.agents import data as data_agent
 from app.agents.data import accepted_metric_labels, quality_sheet
-from app.agents.ledger import indicator_ledger, model_selection
+from app.agents.ledger import model_selection
 from app.agents.registry import build_engine
 from app.domain import blueprint as bp
 from app.domain.models import QualityScorecard
@@ -43,6 +43,25 @@ def _fresh():
     return initial_state(danone_meta())
 
 
+def _pick_unique_victim(ticked):
+    """A ticked candidate whose (object, metric) is not shared by another still-
+    ticked candidate — the real dataset carries many indicators with the same
+    generic metric name (e.g. multiple "花费" spend lines under different l4
+    campaigns) for one object. Unticking one such candidate while a same-metric
+    sibling stays selected leaves the metric itself still included, which is
+    correct behaviour but makes a plain "pick the last ticked row" victim
+    flaky against candidate-ordering changes (`model_objects` is now
+    data-derived, not a fixed channel list, so `x_candidates` order is no
+    longer stable run to run). Picking a victim whose metric is unique within
+    its object keeps the assertion meaningful regardless of ordering."""
+    from collections import Counter
+    key = lambda c: (c.object, c.metric.strip().lower())  # noqa: E731
+    counts = Counter(key(c) for c in ticked)
+    unique = [c for c in ticked if counts[key(c)] == 1]
+    assert unique, "need a ticked candidate whose metric is unique within its object"
+    return unique[-1]
+
+
 # ── 2.2 · Data Quality Score ────────────────────────────────────────────────
 
 
@@ -62,9 +81,23 @@ def test_2_2_scorecard_roundtrip() -> None:
     assert score_sheet["columns"][-2:] == ["Disposition", "Notes"]
     assert len(score_sheet["rows"]) == len(card.rows)
 
+    # `card.rows` is now per (object, indicator) — per-channel screening scores
+    # the same indicator once per model object — but `accepted_metric_labels`
+    # dedups to one verdict per distinct indicator label (kept if kept in ANY
+    # channel). So "kept == rows - dropped" no longer holds row-for-row; assert
+    # the dedup invariant directly: kept has no duplicate labels, and a label is
+    # kept iff at least one of its (possibly several, per-object) rows isn't
+    # dropped.
+    from collections import defaultdict
+    label_dispositions: dict[str, set[str]] = defaultdict(set)
+    for r in card.rows:
+        label = f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
+        label_dispositions[label].add(r.disposition)
     kept = accepted_metric_labels(card)
-    dropped = [r for r in card.rows if r.disposition == "drop"]
-    assert len(kept) == len(card.rows) - len(dropped)
+    assert len(kept) == len(set(kept)), "kept labels must be deduped"
+    expected_kept = {lbl for lbl, dispositions in label_dispositions.items()
+                      if dispositions != {"drop"}}
+    assert set(kept) == expected_kept
     assert st.analysis["quality"]["accepted_metrics"] == kept
 
 
@@ -75,7 +108,14 @@ def test_quality_disposition_drives_blackboard() -> None:
 
     before = len(accepted_metric_labels(card))
     first_kept = next(r for r in card.rows if r.disposition != "drop")
-    rows = [r.model_copy(update={"disposition": "drop"}) if r.id == first_kept.id else r
+    first_label = f"{first_kept.l4 or first_kept.l3} · {first_kept.indicator}".strip(" ·")
+    # Drop every row carrying this indicator's label, across every model
+    # object it was scored in — not just the one row matched by id.
+    # `accepted_metric_labels` dedups by label (kept if kept in ANY channel),
+    # so flipping a single per-object row is not guaranteed to change the
+    # deduped kept count; only clearing every occurrence of the label does.
+    rows = [r.model_copy(update={"disposition": "drop"})
+            if f"{r.l4 or r.l3} · {r.indicator}".strip(" ·") == first_label else r
             for r in card.rows]
     edited = QualityScorecard(rows=rows)
     assert len(accepted_metric_labels(edited)) == before - 1
@@ -109,16 +149,21 @@ def test_2_4_screening_produces_the_scorecard_and_acceptable_bucket() -> None:
 
 
 def test_2_4_does_not_rescore_what_2_2_dropped() -> None:
-    """A settled quality drop must not come back as an open 2.4 row."""
+    """A settled quality drop must not come back as an open 2.4 row — in the
+    SAME channel it was dropped in. Quality (2.2) screens each model object
+    (channel_type) on its own data slice, so a drop recorded in one channel
+    must not block 2.4 from scoring the same indicator in a channel whose own
+    quality review never dropped it — that per-channel divergence is the
+    whole point of per-object screening, not a leak."""
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     victim = st.quality_scorecard.rows[0]
     victim.disposition = "drop"
 
     _run(data_agent.stat_screening, st, "2.4")
-    scored = {(r.l4.strip().lower(), r.indicator.strip().lower())
-              for r in st.stat_scorecard.rows}
-    assert (victim.l4.strip().lower(), victim.indicator.strip().lower()) not in scored
+    scored_in_object = {(r.l4.strip().lower(), r.indicator.strip().lower())
+                        for r in st.stat_scorecard.rows if r.object == victim.object}
+    assert (victim.l4.strip().lower(), victim.indicator.strip().lower()) not in scored_in_object
 
 
 # ── 2.5 · the OLS setup proposal ────────────────────────────────────────────
@@ -127,7 +172,14 @@ def test_2_4_does_not_rescore_what_2_2_dropped() -> None:
 def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
     """A rejected indicator stays visible in 2.5x — locked, and labelled with
     the layer that rejected it. Hiding it would leave the human no way to see
-    where their variable went."""
+    where their variable went.
+
+    2.5x candidates are per model object (channel_type), and quality is too —
+    the same (l4, metric) can appear as a candidate in several channels, only
+    one of which is the victim's own. Looking it up by (l4, metric) alone
+    would silently grab an unrelated, unlocked channel's candidate instead of
+    the one the quality drop actually applies to — the lookup must be
+    object-aware."""
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     victim = st.quality_scorecard.rows[0]
@@ -139,12 +191,13 @@ def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
     assert cfg is not None and cfg.x_candidates
     key = (victim.l4.strip().lower(), victim.indicator.strip().lower())
     hit = next((c for c in cfg.x_candidates
-                if (c.l4.strip().lower(), c.metric.strip().lower()) == key), None)
+                if c.object == victim.object
+                and (c.l4.strip().lower(), c.metric.strip().lower()) == key), None)
     if hit is not None:  # only if the victim is a driver (KPI rows are not offered)
         assert hit.locked and hit.locked_by == "quality"
         assert not hit.selected
         assert "quality" in hit.rationale.lower()
-    # Nothing locked may ever be pre-ticked.
+    # Nothing locked may ever be pre-ticked, in the victim's channel or any other.
     assert not any(c.selected for c in cfg.x_candidates if c.locked)
 
 
@@ -152,6 +205,12 @@ def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
 
 
 def test_2_6_master_data_carries_only_adopted_indicators() -> None:
+    """Per-channel screening legitimately allows an indicator adopted in one
+    channel and rejected in another to appear in BOTH flat `adopted`/
+    `rejected` lists — those are a global rollup across every model object,
+    deduped by indicator key only. The invariant that actually matters is
+    per-object exclusivity: within a single channel's own `byObject` entry,
+    adopted ∩ rejected must be empty."""
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     _run(data_agent.stat_screening, st, "2.4")
@@ -162,20 +221,30 @@ def test_2_6_master_data_carries_only_adopted_indicators() -> None:
     assert art is not None
     body = art.body
     assert body["objects"], "at least one model object must assemble"
-    assert [f["layer"] for f in body["funnel"]] == [
+    funnel = body["funnel"]
+    assert set(funnel) == {"combined", "byObject"}
+    assert [f["layer"] for f in funnel["combined"]] == [
         "mapping", "quality", "signoff", "statistical", "selection", "range"]
     # The dimensions the user slices product × channel × region by.
     for dim in ("brand", "provinceGroup", "channelType", "channel", "grains"):
         assert dim in body["dimensions"]
 
-    adopted = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
-               for r in body["adopted"]}
-    rejected = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
-                for r in body["rejected"]}
-    assert not (adopted & rejected), "an indicator cannot be both adopted and rejected"
-    # Every rejected row explains itself.
-    for r in body["rejected"]:
-        assert r["rejectedAt"] and r["reason"]
+    by_object = body["byObject"]
+    assert set(by_object) == {o["object"] for o in body["objects"]}
+    for obj, rows in by_object.items():
+        adopted = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
+                   for r in rows["adopted"]}
+        rejected = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
+                    for r in rows["rejected"]}
+        assert not (adopted & rejected), \
+            f"{obj}: an indicator cannot be both adopted and rejected in the same channel"
+        # Every rejected row explains itself; adopted rows now carry their
+        # own verdict chain too (spec §3.5) — why an indicator survived, not
+        # only why one was dropped.
+        for r in rows["rejected"]:
+            assert r["rejectedAt"] and r["reason"]
+        for r in rows["adopted"] + rows["rejected"]:
+            assert r["verdicts"], "every ledger row must carry its verdict chain"
 
     # The 2.6d gate reports what is actually being locked.
     assert "feature column" in st.decisions["d-2.6"].question
@@ -192,15 +261,22 @@ def test_2_6_honours_the_2_5x_variable_selection() -> None:
     cfg = st.ols_config
     ticked = [c for c in cfg.x_candidates if c.selected]
     assert len(ticked) >= 2, "need at least two ticked variables to untick one"
-    victim = ticked[-1]
+    victim = _pick_unique_victim(ticked)
     victim.selected = False
 
     sel = model_selection(st)
-    assert victim.metric.strip().lower() not in (sel.include or frozenset())
+    assert victim.metric.strip().lower() not in (sel.include_for(victim.object) or frozenset())
     _run(data_agent.assemble_master_data, st, "2.6")
 
-    adopted = {r["indicator"].strip().lower() for r in st.artifact("a-master-data").body["adopted"]}
-    assert victim.metric.strip().lower() not in adopted
+    # Check the victim's own channel, not the flat "adopted" rollup: that
+    # rollup is an intentional adopted-anywhere summary (dedup by indicator
+    # key, first occurrence wins — see `assemble_master_data`'s docstring) and
+    # the same (l4, metric) can legitimately still be adopted in another
+    # channel that never rejected it.
+    body = st.artifact("a-master-data").body
+    by_object_adopted = {r["indicator"].strip().lower()
+                          for r in body["byObject"][victim.object]["adopted"]}
+    assert victim.metric.strip().lower() not in by_object_adopted
 
 
 def test_master_table_slices_by_product_channel_region() -> None:
@@ -236,15 +312,19 @@ def test_s4_training_fits_the_same_selection_s2_locked() -> None:
     cfg = st.ols_config
     ticked = [c for c in cfg.x_candidates if c.selected]
     assert len(ticked) >= 2
-    victim = ticked[-1]
+    victim = _pick_unique_victim(ticked)
     victim.selected = False
 
     sel = model_selection(st)
-    from app.agents.dataset_cache import model_df, model_objects
+    from app.agents.dataset_cache import model_df
     df = model_df(st)
-    obj = model_objects(st)[0]
-    mf = build_model_frame(df, obj, exclude=sel.exclude, y_metric=sel.y_for(obj),
-                           include=sel.include)
+    # Train the object the victim actually belongs to — `model_objects` order
+    # is data-derived (busiest channel first), not guaranteed to put the
+    # victim's own object first, and this test is about S4 honouring the
+    # human's tick for that object specifically.
+    obj = victim.object
+    mf = build_model_frame(df, obj, exclude=sel.exclude_for(obj), y_metric=sel.y_for(obj),
+                           include=sel.include_for(obj))
     # The frame S4 trains on carries the human's response and none of the
     # variables they unticked.
     assert sel.y_for(obj) is None or mf.y_col
@@ -253,6 +333,14 @@ def test_s4_training_fits_the_same_selection_s2_locked() -> None:
 
 
 def test_master_table_never_carries_a_rejected_indicator() -> None:
+    """A quality drop is per-object (2.2 screens each channel_type on its own
+    data slice) — the dropped indicator must vanish from ITS OWN channel's
+    master table. It may legitimately still be a column in another channel
+    that never dropped it (see `_test_per_channel.py::
+    test_master_table_columns_differ_by_channel`), so an UN-sliced table that
+    spans every channel can still surface it via a surviving channel's data —
+    that is per-channel screening working as designed, not a leak. The
+    invariant that actually matters is the channel-scoped slice."""
     from app.agents.master_data import master_table
 
     st = _fresh()
@@ -260,10 +348,10 @@ def test_master_table_never_carries_a_rejected_indicator() -> None:
     victim = next(r for r in st.quality_scorecard.rows if r.indicator.strip())
     victim.disposition = "drop"
 
-    t = master_table(st, grain="month")
+    t = master_table(st, channel_type=[victim.object], grain="month")
     cols = {c.strip().lower() for c in t["columns"]}
-    rejected = {r.key[1] for r in indicator_ledger(st) if not r.adopted}
-    assert not (cols & rejected), "a dropped indicator must not reach the master table"
+    assert victim.indicator.strip().lower() not in cols, \
+        "a dropped indicator must not reach its own channel's master table"
 
 
 def test_d_2_1_gates_2_2_and_reopens_2_1_on_rework() -> None:

@@ -52,6 +52,11 @@ CN_TO_EN = {
     "METRICS类型": "metric_type", "METRICS": "metric", "VALUE": "value",
 }
 
+from app.agents.vocabulary import DEFAULT_VOCAB, Vocab
+
+# The former hardcoded banks now live in ``app.agents.vocabulary`` as
+# ``DEFAULT_VOCAB``; these module names are kept as byte-parity references (the
+# vocab-parity test asserts they equal the default) and for any legacy importer.
 # metric_type tokens that indicate a Y (sales / volume / offtake / GMV) variable.
 _Y_METRIC_TYPES = {"箱数", "volume", "value", "rmb", "gmv", "unit", "百分比箱数"}
 _Y_KEYWORDS = ("offtake", "sales", "gmv", "出货", "完成", "volume", "箱数")
@@ -125,46 +130,46 @@ def _resolve_object_filter(df: pd.DataFrame, model_object: str) -> pd.Series:
     return ct.isin(parts)
 
 
-def _is_y_row(g: pd.DataFrame) -> pd.Series:
+def _is_y_row(g: pd.DataFrame, vocab: Vocab = DEFAULT_VOCAB) -> pd.Series:
     l1 = g["l1"].astype("string").str.upper()
     mtype = g["metric_type"].astype("string").str.strip().str.lower()
     metric = g["metric"].astype("string").str.lower().fillna("")
-    by_kpi = l1.eq("KPI")
-    by_kw = metric.apply(lambda m: any(k in m for k in _Y_KEYWORDS))
-    by_type = mtype.isin(_Y_METRIC_TYPES)
-    by_tag = mtype.isin(_Y_TAGS)  # explicit Y tag from per-project binding
+    by_kpi = l1.isin(vocab.y_l1_labels)
+    by_kw = metric.apply(lambda m: any(k in m for k in vocab.y_keywords))
+    by_type = mtype.isin(vocab.y_metric_types)
+    by_tag = mtype.isin(vocab.y_tags)  # explicit Y tag from per-project binding
     return by_kpi | by_tag | (by_kw & by_type)
 
 
-def is_driver_row(g: pd.DataFrame) -> pd.Series:
+def is_driver_row(g: pd.DataFrame, vocab: Vocab = DEFAULT_VOCAB) -> pd.Series:
     """Boolean mask selecting rows eligible to be an X driver (before the
     per-metric quality filters). The one definition of "this row is a driver",
     shared by `driver_candidates` and the taxonomy diagnosis so the two cannot
     disagree about whether a table has any drivers at all."""
     l1u = g["l1"].astype("string").str.upper()
     mtype = g["metric_type"].astype("string").str.strip().str.lower()
-    return l1u.isin(["MARKETING FACTOR", "COMMERCIAL FACTOR"]) | mtype.isin(_DRIVER_TAGS)
+    return l1u.isin(vocab.driver_l1_labels) | mtype.isin(vocab.driver_tags)
 
 
-def is_volume_metric_type(metric_type: object) -> bool:
+def is_volume_metric_type(metric_type: object, vocab: Vocab = DEFAULT_VOCAB) -> bool:
     """True for a volume/unit response (箱数 / volume / unit)."""
     t = str(metric_type).strip().lower()
-    return any(k in t for k in _VOLUME_TYPE_KEYWORDS)
+    return any(k in t for k in vocab.volume_keywords)
 
 
-def is_money_metric(metric_type: object) -> bool:
+def is_money_metric(metric_type: object, vocab: Vocab = DEFAULT_VOCAB) -> bool:
     """True for a monetary response (RMB / value / GMV / 金额).
 
     Decides the ROI unit: a money Y makes ``coef·Σtransformed / Σspend`` a real
     增量Revenue/Spend; a volume Y needs a unit price to become one.
     """
     t = str(metric_type).strip().lower()
-    if is_volume_metric_type(t):
+    if is_volume_metric_type(t, vocab):
         return False
-    return any(k in t for k in _MONEY_TYPE_KEYWORDS)
+    return any(k in t for k in vocab.money_keywords)
 
 
-def _pick_y_metric(ydf: pd.DataFrame) -> str:
+def _pick_y_metric(ydf: pd.DataFrame, vocab: Vocab = DEFAULT_VOCAB) -> str:
     """Among Y candidates pick the metric with the best month coverage,
     preferring **volume** over value so the default Y stays a unit count (the client
     requires the OLS default Y to be KPI-Volume; DATA-009/012).
@@ -183,7 +188,7 @@ def _pick_y_metric(ydf: pd.DataFrame) -> str:
         # carries the "Y" role, so fall back to the FND-001 semantic classifier which
         # distinguishes 本品销量 (kpi_volume) from 本品销售额 (kpi_value).
         mt = str(mtypes.get(metric, ""))
-        if any(k in mt for k in ("箱", "volume", "unit")):
+        if any(k in mt for k in vocab.volume_keywords):
             return True
         return classify_indicator(metric).metric_type == "kpi_volume"
 
@@ -193,7 +198,7 @@ def _pick_y_metric(ydf: pd.DataFrame) -> str:
     return str(ranked.index[0])
 
 
-def y_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
+def y_candidates(long_df: pd.DataFrame, model_object: str, vocab: Vocab = DEFAULT_VOCAB) -> list[dict]:
     """Selectable response variables for a model object (2.5's Y step).
 
     Returns ``[{metric, metric_type, months, is_money, is_volume}]`` ordered the
@@ -208,7 +213,7 @@ def y_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
     obj = df[_resolve_object_filter(df, model_object)]
     if obj.empty:
         return []
-    ydf = obj[_is_y_row(obj)]
+    ydf = obj[_is_y_row(obj, vocab)]
     if ydf.empty:
         return []
     out: list[dict] = []
@@ -218,18 +223,18 @@ def y_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
             "metric": str(metric),
             "metric_type": mtype,
             "months": int(g["month"].nunique()),
-            "is_money": is_money_metric(mtype),
-            "is_volume": is_volume_metric_type(mtype),
+            "is_money": is_money_metric(mtype, vocab),
+            "is_volume": is_volume_metric_type(mtype, vocab),
         })
-    default = _pick_y_metric(ydf)
+    default = _pick_y_metric(ydf, vocab)
     out.sort(key=lambda c: (c["metric"] != default, -c["months"], c["metric"]))
     return out
 
 
-def _is_spend(metric_type: str, metric: str) -> bool:
+def _is_spend(metric_type: str, metric: str, vocab: Vocab = DEFAULT_VOCAB) -> bool:
     t = str(metric_type).strip().lower()
     m = str(metric).lower()
-    return t in _SPEND_TYPES or any(k in m for k in _SPEND_KEYWORDS) or any(k in t for k in _SPEND_KEYWORDS)
+    return t in vocab.spend_types or any(k in m for k in vocab.spend_keywords) or any(k in t for k in vocab.spend_keywords)
 
 
 def driver_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
@@ -278,7 +283,7 @@ def driver_candidates(long_df: pd.DataFrame, model_object: str) -> list[dict]:
     return out
 
 
-def driver_candidates_by_l4(long_df: pd.DataFrame, model_object: str) -> list[dict]:
+def driver_candidates_by_l4(long_df: pd.DataFrame, model_object: str, vocab: Vocab = DEFAULT_VOCAB) -> list[dict]:
     """Every ``(l4, metric)`` driver combination usable for a model object.
 
     Same predicate and ``MIN_MONTHS`` rule as :func:`driver_candidates`, but
@@ -300,11 +305,11 @@ def driver_candidates_by_l4(long_df: pd.DataFrame, model_object: str) -> list[di
     if obj.empty:
         return []
 
-    y_rows = obj[_is_y_row(obj)]
-    y_metric = _pick_y_metric(y_rows) if not y_rows.empty else ""
+    y_rows = obj[_is_y_row(obj, vocab)]
+    y_metric = _pick_y_metric(y_rows, vocab) if not y_rows.empty else ""
 
-    drv = obj[is_driver_row(obj)]
-    drv = drv[~_is_y_row(drv) & (drv["metric"] != y_metric)]
+    drv = obj[is_driver_row(obj, vocab)]
+    drv = drv[~_is_y_row(drv, vocab) & (drv["metric"] != y_metric)]
 
     group_cols = [c for c in ("l1", "l2", "l3", "l4") if c in drv.columns] + ["metric"]
     out: list[dict] = []
@@ -325,7 +330,7 @@ def driver_candidates_by_l4(long_df: pd.DataFrame, model_object: str) -> list[di
             "l2": str(vals.get("l2", "")),
             "l3": str(vals.get("l3", "")),
             "l4": str(vals.get("l4", "")),
-            "is_spend": _is_spend(mt, str(metric)),
+            "is_spend": _is_spend(mt, str(metric), vocab),
             "months": months,
         })
     return out
@@ -364,6 +369,7 @@ def build_model_frame(
     y_metric: str | None = None,
     include: frozenset[str] | None = None,
     caps: list | None = None,
+    vocab: Vocab = DEFAULT_VOCAB,
 ) -> ModelFrame:
     """Pivot LONG -> wide monthly frame for one model object.
 
@@ -399,7 +405,7 @@ def build_model_frame(
         raise ValueError(f"No rows for model object '{model_object}'")
 
     # --- Y selection: the human's choice wins; else volume-preferring auto-pick ---
-    y_rows = obj[_is_y_row(obj)]
+    y_rows = obj[_is_y_row(obj, vocab)]
     if y_rows.empty:
         raise ValueError(f"No Y (sales/volume) metric found for '{model_object}'")
     if y_metric:
@@ -410,7 +416,7 @@ def build_model_frame(
         y_metric = str(chosen["metric"].iloc[0])
         y_rows = chosen
     else:
-        y_metric = _pick_y_metric(y_rows)
+        y_metric = _pick_y_metric(y_rows, vocab)
     y_metric_type = str(y_rows[y_rows["metric"] == y_metric]["metric_type"].iloc[0])
     y_series = (
         y_rows[y_rows["metric"] == y_metric]
@@ -422,8 +428,8 @@ def build_model_frame(
 
     # --- X drivers: Marketing + Commercial factors (reference taxonomy) OR rows
     # carrying an explicit driver/spend metric_type tag (per-project binding). ---
-    drv = obj[is_driver_row(obj)]
-    drv = drv[~_is_y_row(drv) & (drv["metric"] != y_metric)]
+    drv = obj[is_driver_row(obj, vocab)]
+    drv = drv[~_is_y_row(drv, vocab) & (drv["metric"] != y_metric)]
 
     # Physically exclude indicators flagged/dropped upstream (2.2/2.4/2.5), keyed
     # by (l4, metric) so a same-named metric under a different L4 is not over-dropped.
@@ -448,7 +454,7 @@ def build_model_frame(
     # still the honest denominator for its L4. Not added to the design matrix.
     l4_spend: dict[str, pd.Series] = {}
     l4_spend_meta: dict[str, list[str]] = {}
-    spend_rows = obj[[_is_spend(mt, mv) for mt, mv in
+    spend_rows = obj[[_is_spend(mt, mv, vocab) for mt, mv in
                       zip(obj["metric_type"], obj["metric"])]]
     if not spend_rows.empty:
         l4_of = (spend_rows["l4"].astype("string").map(_norm)

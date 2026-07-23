@@ -296,6 +296,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /** 2.6 — full URL of the uncapped per-channel xlsx export for a slice. */
+  masterDataExportUrl: (projectId: string, q: MasterTableQuery): string => {
+    const params = new URLSearchParams()
+    if (q.brand?.[0]) params.set('brand', q.brand[0])
+    if (q.provinceGroup?.[0]) params.set('provinceGroup', q.provinceGroup[0])
+    if (q.channelType?.[0]) params.set('channelType', q.channelType[0])
+    if (q.channel?.[0]) params.set('channel', q.channel[0])
+    if (q.grain) params.set('grain', q.grain)
+    return `${BASE}${p(projectId)}/master-data/export?${params.toString()}`
+  },
   /** Where every indicator stands, and which S2 layer rejected the dead ones. */
   indicatorLedger: (projectId: string) =>
     req<IndicatorLedger>(`${p(projectId)}/indicator-ledger`),

@@ -10,6 +10,9 @@ export interface FactorCanvasRow {
   /** Unique within the canvas. Use `indicatorKey(l4, indicator)` unless the
    *  module has its own row id (2.1 maps factor-tree rows, which can repeat a key). */
   key: string
+  /** Model object (channel type) this row belongs to, when the canvas is
+   *  scoped to one channel. Empty/undefined = the collapsed "all channels" view. */
+  object?: string
   l1: string
   l2: string
   l3: string

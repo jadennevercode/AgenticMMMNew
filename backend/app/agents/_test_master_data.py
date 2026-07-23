@@ -55,7 +55,7 @@ def test_master_table_acceptance():
     st = types.SimpleNamespace(project_id="mock-test", indicators=[])
 
     # No drops → all four indicators adopted; period key unique; NDWD averaged.
-    from app.agents.ledger import ModelSelection
+    from app.agents.ledger import OBJECT_ANY, ModelSelection
     md.model_selection = lambda s: ModelSelection()
     mt = md.master_table(st, brand=["b"], channel_type=["MT"], grain="month")
     periods = [r[0] for r in mt["rows"]]
@@ -68,7 +68,11 @@ def test_master_table_acceptance():
     assert mt["rows"][0][spend_i] > 120, "spend must still sum across the two geos"
 
     # Drop traceability: a ledger exclusion removes the indicator from the table.
-    md.model_selection = lambda s: ModelSelection(exclude=frozenset([("", "投放花费")]))
+    # `exclude` is keyed per model object (Task 6); `adopted_mask` resolves it
+    # per channel_type (Task 7). An `OBJECT_ANY` entry is a still-global-layer
+    # drop, which every object inherits via `exclude_for` — so it excludes the
+    # pair for MT here too, regardless of the concrete object key.
+    md.model_selection = lambda s: ModelSelection(exclude={OBJECT_ANY: frozenset([("", "投放花费")])})
     dropped = md.master_table(st, brand=["b"], channel_type=["MT"], grain="month")
     assert "投放花费" not in dropped["columns"], "a rejected indicator must not reach the table"
 

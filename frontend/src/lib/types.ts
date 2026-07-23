@@ -378,6 +378,8 @@ export interface OlsYChoice {
 }
 export interface OlsXCandidate {
   key: string
+  /** Model object (channel type) this row was screened under. */
+  object?: string
   l1: string
   l2: string
   l3: string
@@ -467,12 +469,22 @@ export interface MasterDataRejected extends MasterDataAdopted {
   reason: string
   verdicts: LedgerVerdict[]
 }
+/** Per-object adopted row (Tab 2's per-channel breakdown) — the flat
+ *  MasterDataAdopted shape plus the row's full verdict chain. */
+export interface MasterDataObjectAdopted extends MasterDataAdopted {
+  verdicts: LedgerVerdict[]
+}
 export interface MasterData {
   objects: MasterDataObject[]
-  funnel: FunnelLayer[]
+  /** {combined, byObject} — combined is the pre-per-object rollup every
+   *  reader used to get directly; byObject is each channel's own funnel. */
+  funnel: { combined: FunnelLayer[]; byObject: Record<string, FunnelLayer[]> }
   dimensions: MasterDataDimensions
   adopted: MasterDataAdopted[]
   rejected: MasterDataRejected[]
+  /** Per-object adopted/rejected indicators, each carrying its full verdict
+   *  chain (spec §3.5) — Tab 2's per-channel breakdown. */
+  byObject?: Record<string, { adopted: MasterDataObjectAdopted[]; rejected: MasterDataRejected[] }>
   note?: string
 }
 /** One live slice of the master feature table (POST /master-data/table). */
@@ -497,6 +509,9 @@ export interface MasterTableQuery {
 
 /** GET /indicator-ledger — every indicator's fate across the six S2 layers. */
 export interface IndicatorLedgerRow {
+  /** Model object (channel type) this row was screened under. Present only on the
+   *  per-object `rowsByObject` rows; undefined on the collapsed `rows`. */
+  object?: string
   l1: string
   l2: string
   l3: string
@@ -510,6 +525,8 @@ export interface IndicatorLedgerRow {
 export interface IndicatorLedger {
   layers: { layer: string; task: string; label: string }[]
   rows: IndicatorLedgerRow[]
+  /** Per-Channel-Type verdicts (additive); the collapsed `rows` stays one-per-indicator. */
+  rowsByObject?: Record<string, IndicatorLedgerRow[]>
   funnel: FunnelLayer[]
   adopted: number
   rejected: number
@@ -1131,6 +1148,8 @@ export interface QualitySubScore {
 
 export interface QualityRow {
   id: string
+  /** Model object (channel type) this row was screened under. */
+  object?: string
   l1: string
   l2: string
   l3: string
@@ -1162,6 +1181,8 @@ export type StatDisposition = 'include' | 'review' | 'drop'
 
 export interface StatScoreRow {
   id: string
+  /** Model object (channel type) this row was screened under. */
+  object?: string
   l1: string
   l2: string
   l3: string

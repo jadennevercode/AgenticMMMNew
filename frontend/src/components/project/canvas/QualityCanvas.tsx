@@ -4,9 +4,10 @@ import type { QualityDisposition, QualityRow } from '../../../lib/types'
 import { useSimStore } from '../../../store/useSimStore'
 import { cn } from '../../../lib/cn'
 import { FactorTreeCanvas } from '../factor-tree/FactorTreeCanvas'
+import { ChannelTypeSelect } from '../factor-tree/ChannelTypeSelect'
 import { indicatorKey } from '../factor-tree/keys'
 import { ledgerOnlyRows } from '../factor-tree/ledgerOnlyRows'
-import { blockedBefore, useLedgerIndex } from '../factor-tree/useLedgerIndex'
+import { useLedgerIndex } from '../factor-tree/useLedgerIndex'
 import type { FactorCanvasRow, FactorCanvasTone } from '../factor-tree/types'
 
 const DISPOSITIONS: { id: QualityDisposition; label: string; on: string }[] = [
@@ -33,14 +34,38 @@ const TONE: Record<string, FactorCanvasTone> = { pass: 'ok', borderline: 'warn',
 export function QualityCanvas() {
   const card = useSimStore((s) => s.qualityScorecard)
   const update = useSimStore((s) => s.updateQualityScorecard)
-  const { index, reload } = useLedgerIndex()
+  const channel = useSimStore((s) => s.s2ChannelFilter)
+  const setChannel = useSimStore((s) => s.setS2ChannelFilter)
+  const { index, blockedBeforeFor, reload } = useLedgerIndex()
   const [selected, setSelected] = useState('')
+  const [applyAll, setApplyAll] = useState(false)
 
   const cardRows = useMemo(() => card?.rows ?? [], [card])
 
+  // Data-derived channel options — the distinct model objects the scorecard rows
+  // were screened under. Never hardcoded.
+  const channels = useMemo(
+    () => [...new Set(cardRows.map((r) => r.object).filter(Boolean) as string[])].sort(),
+    [cardRows],
+  )
+
+  // A channel is selected → that channel's own rows. "All channels" → each
+  // indicator once (dedup by key, first occurrence) to reproduce the collapsed view.
+  const visibleCardRows = useMemo(() => {
+    if (channel) return cardRows.filter((r) => (r.object ?? '') === channel)
+    const seen = new Set<string>()
+    return cardRows.filter((r) => {
+      const k = indicatorKey(r.l4, r.indicator)
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+  }, [cardRows, channel])
+
   const rows: FactorCanvasRow[] = useMemo(() => {
-    const scored = cardRows.map((r) => ({
+    const scored = visibleCardRows.map((r) => ({
       key: r.id,
+      object: r.object,
       l1: r.l1, l2: r.l2, l3: r.l3, l4: r.l4,
       indicator: r.indicator,
       tone: TONE[r.autoVerdict] ?? 'muted',
@@ -50,11 +75,11 @@ export function QualityCanvas() {
         r.completeness.toString(), r.granularity.toString(),
         r.total.toFixed(2),
       ],
-      blockedBy: blockedBefore(index.get(indicatorKey(r.l4, r.indicator)), 'quality'),
+      blockedBy: blockedBeforeFor(r.l4, r.indicator, 'quality', channel || undefined),
     }))
-    const scoredKeys = new Set(cardRows.map((r) => indicatorKey(r.l4, r.indicator)))
+    const scoredKeys = new Set(visibleCardRows.map((r) => indicatorKey(r.l4, r.indicator)))
     return [...scored, ...ledgerOnlyRows(index, scoredKeys, 'quality')]
-  }, [cardRows, index])
+  }, [visibleCardRows, index, blockedBeforeFor, channel])
 
   const current: QualityRow | undefined = useMemo(
     () => cardRows.find((r) => r.id === selected),
@@ -65,17 +90,34 @@ export function QualityCanvas() {
 
   function setDisposition(id: string, disposition: QualityDisposition) {
     // A drop here is a quality-layer verdict every later layer inherits — reload
-    // the ledger so the "Denied @ …" badges downstream reflect it immediately,
-    // not after some unrelated poll happens to bump the index.
-    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) }).then(reload)
+    // the ledger so the "Denied @ …" badges downstream reflect it immediately.
+    // Default: this channel's row only. "Apply to all channels": every object's
+    // row for the same indicator.
+    const target = cardRows.find((r) => r.id === id)
+    const applies = (r: QualityRow) =>
+      r.id === id ||
+      (applyAll && target != null && indicatorKey(r.l4, r.indicator) === indicatorKey(target.l4, target.indicator))
+    void update({ rows: cardRows.map((r) => (applies(r) ? { ...r, disposition } : r)) }).then(reload)
   }
 
   const header = (
-    <header>
-      <h3 className="text-sm font-medium">Data Quality Score</h3>
-      <p className="text-[11px] text-muted-foreground">
-        {cardRows.length} indicators · {cardRows.filter((r) => r.disposition === 'drop').length} dropped
-      </p>
+    <header className="flex items-center justify-between gap-2">
+      <div>
+        <h3 className="text-sm font-medium">Data Quality Score</h3>
+        <p className="text-[11px] text-muted-foreground">
+          {visibleCardRows.length} indicators · {visibleCardRows.filter((r) => r.disposition === 'drop').length} dropped
+          {channel && <> · <span className="text-primary">{channel}</span></>}
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <ChannelTypeSelect options={channels} value={channel} onChange={setChannel} />
+        {channel && (
+          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
+            <input type="checkbox" checked={applyAll} onChange={(e) => setApplyAll(e.target.checked)} />
+            apply to all channels
+          </label>
+        )}
+      </div>
     </header>
   )
 

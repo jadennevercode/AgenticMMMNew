@@ -118,14 +118,30 @@ class LedgerRow:
 class ModelSelection:
     """The resolved model input every downstream consumer must filter on.
 
-    ``exclude``/``include``/``y``/``params`` map 1:1 onto ``build_model_frame``
-    and ``run_mmm`` arguments, so a consumer cannot accidentally honour some
-    layers and skip others.
+    ``exclude``/``include`` are keyed per model object (channel type): a
+    per-object layer (quality, statistical, selection) can reach a different
+    verdict per channel, so one channel's drop must never exclude an indicator
+    from another channel's fit. Still-global layers (mapping, sign-off, and any
+    layer that has not run yet) record under ``OBJECT_ANY``, which every object
+    inherits — see :meth:`exclude_for` / :meth:`include_for`. ``y``/``params``
+    map 1:1 onto ``build_model_frame`` and ``run_mmm`` arguments, so a consumer
+    cannot accidentally honour some layers and skip others.
     """
-    exclude: frozenset[tuple[str, str]] = frozenset()
-    include: Optional[frozenset[str]] = None
+    exclude: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
+    include: dict[str, Optional[frozenset[str]]] = field(default_factory=dict)
     y: dict[str, str] = field(default_factory=dict)
     params: Optional[OlsParams] = None
+
+    def exclude_for(self, obj: str) -> frozenset[tuple[str, str]]:
+        """This object's own drops, plus whatever a still-global layer dropped
+        for everyone (``OBJECT_ANY``)."""
+        return frozenset(self.exclude.get(obj, frozenset()) | self.exclude.get(OBJECT_ANY, frozenset()))
+
+    def include_for(self, obj: str) -> Optional[frozenset[str]]:
+        """This object's own ticked set, falling back to a global one;
+        ``None`` means the legacy auto-select path (no setup confirmed yet)."""
+        v = self.include.get(obj)
+        return v if v is not None else self.include.get(OBJECT_ANY)
 
     def y_for(self, obj: str) -> Optional[str]:
         return self.y.get(obj) or None
@@ -154,37 +170,46 @@ def stat_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
     return _scorecard_pairs(getattr(st, "stat_scorecard", None), ("drop",))
 
 
-def signoff_key(l4: object, metric: object) -> str:
-    """The ``st.signoffs`` key for one indicator: ``i:<norm_l4>|<norm_metric>``.
+def signoff_key(l4: object, metric: object, object: str = OBJECT_ANY) -> str:
+    """The ``st.signoffs`` key for one indicator:
+    ``i:<object>:<norm_l4>|<norm_metric>``.
 
-    The ``i:`` prefix makes the shape self-describing instead of inferred from
-    the mere presence of ``|`` — an uploaded factor/metric name can itself
-    contain a ``|`` (e.g. ``"Search | Brand"``), which under the old bare
-    ``"<l4>|<metric>"`` vs bare-L3 scheme was ambiguous with the factor shape.
-    See :func:`_parse_signoff_key`.
+    ``object`` is the model object (channel type) the verdict applies to;
+    it defaults to ``OBJECT_ANY`` — a single "Deny" from the 2.3 deck still
+    denies the indicator for every channel unless a caller explicitly names
+    one. The ``i:`` prefix makes the shape self-describing instead of
+    inferred from the mere presence of ``|`` — an uploaded factor/metric name
+    can itself contain a ``|`` (e.g. ``"Search | Brand"``), which under the
+    old bare ``"<l4>|<metric>"`` vs bare-L3 scheme was ambiguous with the
+    factor shape. See :func:`_parse_signoff_key`.
     """
     a, b = _norm_pair(l4, metric)
-    return f"i:{a}|{b}"
+    return f"i:{_obj(object) or OBJECT_ANY}:{a}|{b}"
 
 
-def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
+def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str, str]]:
     """Decode one ``st.signoffs`` key.
 
-    Returns ``(kind, l4_or_l3, metric)`` — ``kind`` is ``"indicator"`` or
-    ``"factor"``; ``metric`` is ``""`` for a factor. Returns ``None`` when the
-    key cannot be trusted (the round-trip guard below): the caller must treat
-    that as "no recorded verdict", never act on a guess.
+    Returns ``(kind, object, l4_or_l3, metric)`` — ``kind`` is ``"indicator"``
+    or ``"factor"``; ``metric`` is ``""`` for a factor; ``object`` is
+    ``OBJECT_ANY`` unless the key names a concrete channel. Returns ``None``
+    when the key cannot be trusted (the round-trip guards below): the caller
+    must treat that as "no recorded verdict", never act on a guess.
 
-    Accepts two shapes so nothing already stored is lost:
-      * ``"i:<l4>|<metric>"`` — the current indicator shape (`signoff_key`).
-      * unprefixed legacy     — predates the ``i:`` prefix: a bare
+    Accepts three shapes so nothing already stored is lost:
+      * ``"i:<object>:<l4>|<metric>"`` — the current shape (`signoff_key`).
+      * ``"i:<l4>|<metric>"``   — pre-Task-4 shape (no object segment); reads
+        as ``OBJECT_ANY``.
+      * unprefixed legacy      — predates the ``i:`` prefix entirely: a bare
         ``"<l4>|<metric>"`` (has a ``|``) reads as an indicator, a bare
-        ``"<l3>"`` (no ``|``) reads as a whole-factor verdict. This is the
-        same rule the prefix exists to replace, kept only so state saved
-        before this change keeps its verdicts — a legacy L3 name that itself
-        contains ``|`` is a known, accepted gap in that old data (today's
-        reference dataset has none), not something re-parsing can resolve
-        after the fact.
+        ``"<l3>"`` (no ``|``) reads as a whole-factor verdict, both under
+        ``OBJECT_ANY``. This is the same rule the prefix exists to replace,
+        kept only so state saved before this change keeps its verdicts — a
+        legacy L3 name that itself contains ``|`` is a known, accepted gap in
+        that old data (today's reference dataset has none), not something
+        re-parsing can resolve after the fact. Likewise an object-free legacy
+        L4 that itself contains ``:`` before its ``|`` is a known, accepted
+        gap — indistinguishable from the object-prefixed shape.
 
     There is no ``"f:"`` factor-key shape: nothing ever writes one (only the
     ``l3`` fallback in ``PUT /signoff`` exists, and it fans out to per-indicator
@@ -192,23 +217,40 @@ def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
     verdict only ever reaches this parser via the unprefixed-legacy path above.
     """
     if key.startswith("i:"):
-        l4, sep, metric = key[2:].partition("|")
-        if not sep or f"i:{l4}|{metric}" != key:
+        rest = key[2:]
+        head, psep, tail = rest.partition("|")
+        if not psep:
             return None  # malformed — an "i:" key must carry a '|'
-        return ("indicator", l4, metric)
+        if ":" in head:
+            # Current shape: "<object>:<l4>" before the '|'.
+            obj, _, l4 = head.partition(":")
+            metric = tail
+            if f"i:{obj}:{l4}|{metric}" != key:
+                return None
+            return ("indicator", obj or OBJECT_ANY, l4, metric)
+        # Pre-Task-4 shape: no object segment at all.
+        l4, metric = head, tail
+        if f"i:{l4}|{metric}" != key:
+            return None
+        return ("indicator", OBJECT_ANY, l4, metric)
     if "|" in key:
         l4, _, metric = key.partition("|")
-        return ("indicator", l4, metric)
-    return ("factor", key, "")
+        return ("indicator", OBJECT_ANY, l4, metric)
+    return ("factor", OBJECT_ANY, key, "")
 
 
 def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
-    """Everything the client denied at 2.3, split by key shape.
+    """Everything the client denied at 2.3, split by key shape, flattened
+    across every model object.
 
     Returns (denied_pairs, denied_l3). Only an explicit "no" rejects: a missing
     entry means "not individually reviewed", which the d-2.3 gate covers —
     treating it as a rejection would empty the model before the human ever
     opened the deck.
+
+    This is the object-agnostic view for callers that only care whether an
+    indicator was denied anywhere; see :func:`_signoff_denied_by_object` for
+    the per-channel breakdown that :func:`signoff_drop_pairs_by_object` uses.
     """
     pairs: set[tuple[str, str]] = set()
     l3s: set[str] = set()
@@ -218,12 +260,37 @@ def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
         parsed = _parse_signoff_key(key)
         if parsed is None:
             continue  # unparseable / ambiguous key — see _parse_signoff_key
-        kind, a, b = parsed
+        kind, _obj_, a, b = parsed
         if kind == "indicator":
             pairs.add((_norm(a), _norm(b)))
         else:
             l3s.add(_norm(a))
     return pairs, l3s
+
+
+def _signoff_denied_by_object(st: ProjectState) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
+    """Everything the client denied at 2.3, split by key shape, per object.
+
+    Returns (denied_triples, denied_l3s) where a triple is
+    ``(object, l4, metric)`` and an l3 entry is ``(object, l3)`` — object is
+    ``OBJECT_ANY`` for a key with no explicit channel (the default: a plain
+    "Deny" applies to every channel).
+    """
+    triples: set[tuple[str, str, str]] = set()
+    l3s: set[tuple[str, str]] = set()
+    for key, verdict in (getattr(st, "signoffs", None) or {}).items():
+        if _norm(verdict) != "no":
+            continue
+        parsed = _parse_signoff_key(key)
+        if parsed is None:
+            continue
+        kind, obj, a, b = parsed
+        obj = _obj(obj) or OBJECT_ANY
+        if kind == "indicator":
+            triples.add((obj, _norm(a), _norm(b)))
+        else:
+            l3s.add((obj, _norm(a)))
+    return triples, l3s
 
 
 def stale_factor_keys(st: ProjectState, l3: object) -> list[str]:
@@ -241,7 +308,7 @@ def stale_factor_keys(st: ProjectState, l3: object) -> list[str]:
     out: list[str] = []
     for key in getattr(st, "signoffs", None) or {}:
         parsed = _parse_signoff_key(key)
-        if parsed is not None and parsed[0] == "factor" and _norm(parsed[1]) == target:
+        if parsed is not None and parsed[0] == "factor" and _norm(parsed[2]) == target:
             out.append(key)
     return out
 
@@ -288,6 +355,13 @@ def freeze_range_drops(st: ProjectState, option_id: str) -> None:
 
     Registered on the engine so it runs the instant the gate is answered, while
     ``analysis['ols_flagged']`` still describes the fit the human was looking at.
+
+    Freezes both shapes: the legacy flat ``droppedPairs`` (still read by
+    :func:`range_drop_pairs`, and by anything saved before this per-object
+    freeze existed) and the new per-object ``droppedPairsByObject`` (read by
+    :func:`range_drop_pairs_by_object`) — each channel screens its own driver
+    universe (Task 5), so the same indicator can be out-of-range in one channel
+    and fine in another; freezing one flat set would drop it everywhere.
     """
     if option_id != "drop":
         return
@@ -295,19 +369,29 @@ def freeze_range_drops(st: ProjectState, option_id: str) -> None:
     if dec is None or not dec.resolution:
         return
     dec.resolution["droppedPairs"] = [list(p) for p in sorted(ols_flagged_pairs(st))]
+    by_object: dict[str, set[tuple[str, str]]] = {}
+    for f in st.analysis.get("ols_flagged") or []:
+        if not isinstance(f, dict):
+            continue
+        obj = _obj(f.get("object")) or OBJECT_ANY
+        by_object.setdefault(obj, set()).add(_norm_pair(f.get("l4", ""), f.get("indicator", "")))
+    dec.resolution["droppedPairsByObject"] = {
+        obj: [list(p) for p in sorted(pairs)] for obj, pairs in sorted(by_object.items())
+    }
 
 
 def signoff_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
-    """Indicators 2.3 rejected, in the (l4, metric) key space everything filters on.
+    """Indicators 2.3 rejected, in the (l4, metric) key space everything filters
+    on, flattened across every model object.
 
-    Per-indicator denials are already in that space. Legacy per-L3 denials are
-    expanded against the indicator universe, so projects saved before sign-off
-    became indicator-granular keep their verdicts.
+    Kept as a flat/global view for callers that only care whether an indicator
+    was denied anywhere (``model_selection`` now reads the per-object
+    breakdown directly — see :func:`signoff_drop_pairs_by_object`). Defined as
+    the union of :func:`signoff_drop_pairs_by_object`, which already expands
+    legacy per-L3 denials against the indicator universe.
     """
-    pairs, l3s = signoff_denied(st)
-    if l3s:
-        pairs |= {key for key, c in _universe(st).items() if _norm(c.get("l3")) in l3s}
-    return pairs
+    by_obj = signoff_drop_pairs_by_object(st)
+    return set().union(*by_obj.values()) if by_obj else set()
 
 
 def unticked_pairs(st: ProjectState) -> set[tuple[str, str]]:
@@ -361,13 +445,49 @@ def mapping_ignored_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]
 
 
 def signoff_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
-    # Object-aware sign-off keys land in Task 4; until then every denial is global.
-    return {OBJECT_ANY: signoff_drop_pairs(st)}
+    """Per-object breakdown of what 2.3 denied, keyed by model object.
+
+    A denial recorded under ``OBJECT_ANY`` (the default — see
+    :func:`signoff_key`) belongs to every channel; ``_object_drops`` is what
+    merges that bucket into a concrete object's own. Legacy per-L3 denials are
+    expanded against the (still object-agnostic) indicator universe, same as
+    the old flat ``signoff_drop_pairs``.
+    """
+    triples, l3s = _signoff_denied_by_object(st)
+    out: dict[str, set[tuple[str, str]]] = {}
+    for obj, l4, metric in triples:
+        out.setdefault(obj, set()).add((l4, metric))
+    if l3s:
+        uni = _universe(st)
+        for obj, l3 in l3s:
+            out.setdefault(obj, set()).update(
+                key for key, c in uni.items() if _norm(c.get("l3")) == l3)
+    return out
 
 
 def range_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
-    # d-2.5 freeze becomes per-object in Task 6; until then it is global.
-    return {OBJECT_ANY: range_drop_pairs(st)}
+    """Per-object breakdown of what the human dropped at the ``d-2.5`` range gate.
+
+    Read from ``droppedPairsByObject``, frozen by :func:`freeze_range_drops` at
+    the moment the gate was answered. Falls back to the legacy flat
+    ``droppedPairs`` (via :func:`range_drop_pairs`), applied under
+    ``OBJECT_ANY`` so every object still inherits it, for resolutions frozen
+    before this per-object shape existed.
+    """
+    dec = st.decisions.get("d-2.5")
+    res = (dec.resolution or {}) if dec else {}
+    if res.get("optionId") != "drop":
+        return {}
+    frozen = res.get("droppedPairsByObject")
+    if frozen is None:
+        return {OBJECT_ANY: range_drop_pairs(st)}
+    out: dict[str, set[tuple[str, str]]] = {}
+    for obj, pairs in frozen.items():
+        out[_obj(obj) or OBJECT_ANY] = {
+            (_norm(p[0]), _norm(p[1])) for p in pairs
+            if isinstance(p, (list, tuple)) and len(p) == 2
+        }
+    return out
 
 
 # Each layer's own rejection set, in its own key space.
@@ -472,10 +592,12 @@ def _universe(st: ProjectState) -> dict[tuple[str, str], dict]:
     except Exception:  # noqa: BLE001 — no bound data yet; the ledger is simply empty
         return {}
 
+    from app.agents.vocabulary import vocab_for
+    vocab = vocab_for(st)
     universe: dict[tuple[str, str], dict] = {}
     for obj in objects:
         try:
-            cands = driver_candidates_by_l4(df, obj)
+            cands = driver_candidates_by_l4(df, obj, vocab)
         except Exception:  # noqa: BLE001
             continue
         for c in cands:
@@ -507,10 +629,10 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
     ``inherited`` rather than ruling again. That inheritance is the whole point:
     it is what stops a 2.2-dropped indicator from being re-scored at 2.4, from
     being re-offered at 2.5x, and from re-entering the master table at 2.6. A
-    layer that is still global (mapping, sign-off, range) rules the same for
-    every object via ``OBJECT_ANY``; a layer that is per-object (quality,
-    statistical, selection) can reach a different verdict per channel — the
-    same indicator can die in one channel and survive in another.
+    layer that is still global (mapping, sign-off) rules the same for every
+    object via ``OBJECT_ANY``; a layer that is per-object (quality,
+    statistical, selection, range) can reach a different verdict per channel —
+    the same indicator can die in one channel and survive in another.
     """
     from app.agents.dataset_cache import model_objects
 
@@ -597,7 +719,7 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
             else:
                 rule("selection", STATUS_PENDING, "The model setup has not been proposed yet.")
 
-            # 2.5r — the ROI / contribution range check. Still global until Task 6.
+            # 2.5r — the ROI / contribution range check, this object's own frozen drops.
             if _matches(key, r_drop):
                 rule("range", STATUS_REJECTED,
                      "Outside its knowledge-base ROI / contribution band; dropped at the d-2.5 gate.")
@@ -671,33 +793,54 @@ def rejected_pairs(st: ProjectState, object: str | None = None) -> frozenset[tup
 def model_selection(st: ProjectState) -> ModelSelection:
     """The one resolved selection every downstream fit must use.
 
-    ``include`` stays ``None`` until 2.5 has proposed a setup — that is the
-    legacy auto-select path, which keeps reference/demo projects (and any
-    project that has not reached 2.5) fitting exactly as before.
+    ``exclude``/``include`` are resolved per model object: a per-object layer
+    (quality, statistical, selection) can drop or keep an indicator in one
+    channel without touching another, so the same key can be excluded from
+    one object's fit and included in another's. ``include_for(obj)`` stays
+    ``None`` until 2.5 has proposed a setup — that is the legacy auto-select
+    path, which keeps reference/demo projects (and any project that has not
+    reached 2.5) fitting exactly as before.
     """
-    ledger = indicator_ledger(st)
-    # The scorecards (and sign-off) are unioned in directly as well as via the
-    # ledger: they can name a pair the current long table no longer carries —
-    # or, for sign-off, a pair the (still-imperfect) driver universe never
-    # carried at all (C1) — and an exclude entry for an absent indicator is
-    # free. `include` below stays metric-only and is never widened by this.
-    exclude = frozenset({r.key for r in ledger if not r.adopted}
-                        | quality_drop_pairs(st) | stat_drop_pairs(st)
-                        | signoff_drop_pairs(st))
+    from app.agents.dataset_cache import model_objects
 
+    ledger = indicator_ledger(st)
     cfg: OlsConfig | None = getattr(st, "ols_config", None)
-    include: frozenset[str] | None = None
+
+    exclude: dict[str, frozenset[tuple[str, str]]] = {}
+    include: dict[str, Optional[frozenset[str]]] = {}
+    for obj in (model_objects(st) or [OBJECT_ANY]):
+        # This object's own ledger rows, plus whatever a still-global layer
+        # (mapping, sign-off) rejected for everyone (OBJECT_ANY rows).
+        obj_rows = [r for r in ledger if r.object in (obj, OBJECT_ANY)]
+        adopted = {r.key for r in obj_rows if r.adopted}
+        # The scorecards (and sign-off) are unioned in directly as well as via
+        # the ledger: they can name a pair the current long table no longer
+        # carries — or, for sign-off, a pair the (still-imperfect) driver
+        # universe never carried at all (C1) — and an exclude entry for an
+        # absent indicator is free.
+        exclude[obj] = frozenset(
+            {r.key for r in obj_rows if not r.adopted}
+            | _object_drops(quality_drop_pairs_by_object(st), obj)
+            | _object_drops(stat_drop_pairs_by_object(st), obj)
+            | _object_drops(signoff_drop_pairs_by_object(st), obj)
+        )
+        if cfg is not None and cfg.x_candidates:
+            # A tick only counts if the indicator is still adopted for THIS
+            # object — a stale config must never resurrect what a later
+            # review rejected, and one channel's tick must never leak into
+            # another's fit.
+            include[obj] = frozenset(
+                _norm(c.metric) for c in cfg.x_candidates
+                if c.selected
+                and (_obj(getattr(c, "object", "")) or OBJECT_ANY) in (OBJECT_ANY, obj)
+                and _norm_pair(c.l4, c.metric) in adopted
+            )
+        else:
+            include[obj] = None
+
     y: dict[str, str] = {}
     params: OlsParams | None = None
     if cfg is not None:
-        if cfg.x_candidates:
-            # A tick only counts if the indicator is still adopted — a stale
-            # config must never resurrect what a later review rejected.
-            adopted = {r.key for r in ledger if r.adopted}
-            include = frozenset(
-                _norm(c.metric) for c in cfg.x_candidates
-                if c.selected and _norm_pair(c.l4, c.metric) in adopted
-            )
         y = {c.object: c.metric for c in cfg.y if c.metric}
         # The 2.3 anomaly handlings are folded in here rather than stored on the
         # params: the review is their source of truth, so a stale params draft

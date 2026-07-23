@@ -14,6 +14,7 @@ from app.agents import data_rules
 from app.agents.common import agent_system
 from app.agents.ledger import (
     LAYER_LABEL,
+    OBJECT_ANY,
     funnel,
     indicator_ledger,
     model_selection,
@@ -68,6 +69,45 @@ _VERDICT_EN = {"pass": "Accept", "borderline": "Human decision", "unusable": "Re
 _DISPOSITION_EN = {"accept": "Accept", "flag": "Flag", "drop": "Drop"}
 _DISPOSITION_DEFAULT = {"pass": "accept", "borderline": "flag", "unusable": "drop"}
 
+
+def _ledger_row_dict(r, *, rejected: bool) -> dict:
+    body = {"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4, "indicator": r.indicator,
+            "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
+                          "status": v.status, "note": v.note} for v in r.verdicts]}
+    if rejected:
+        body["rejectedAt"] = r.rejected_at
+        body["reason"] = r.reason
+    return body
+
+
+def _ledger_by_object(led: tuple) -> dict[str, dict]:
+    """Group the indicator ledger per model object, for the Master Data (2.6)
+    artifact's Tab 2 — one channel's adopted/rejected indicators at a time.
+
+    Mirrors ``funnel``'s own per-object resolution: this object's own ledger
+    rows plus whatever a still-global layer (mapping, sign-off) ruled for
+    every object (``OBJECT_ANY``). Both adopted *and* rejected rows carry
+    their full verdict chain (spec §3.5) — a rejected row explains why it was
+    dropped, an adopted row explains why it survived every layer.
+    """
+    objects = sorted({r.object for r in led if r.object != OBJECT_ANY}) or [OBJECT_ANY]
+    out: dict[str, dict] = {}
+    for obj in objects:
+        rows = [r for r in led if r.object in (obj, OBJECT_ANY)]
+        seen: dict[bool, set] = {True: set(), False: set()}
+        adopted: list[dict] = []
+        rejected: list[dict] = []
+        for r in rows:
+            bucket = seen[r.adopted]
+            if r.key in bucket:
+                continue
+            bucket.add(r.key)
+            (adopted if r.adopted else rejected).append(
+                _ledger_row_dict(r, rejected=not r.adopted))
+        out[obj] = {"adopted": adopted, "rejected": rejected}
+    return out
+
+
 _QUALITY_COLUMNS = ["L1", "L2", "L3", "L4", "Indicator",
                     "Consistency", "Consistency notes", "Completeness", "Completeness notes",
                     "Granularity", "Granularity notes", "Accuracy", "Accuracy notes",
@@ -96,9 +136,23 @@ def quality_sheet(card: QualityScorecard) -> dict:
 
 
 def accepted_metric_labels(card: QualityScorecard) -> list[str]:
-    """Metric labels the human kept (disposition != drop) — the S2 blackboard."""
-    return [f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
-            for r in card.rows if r.disposition != "drop"]
+    """Metric labels the human kept (disposition != drop) — the S2 blackboard.
+
+    Rows are now per (object, indicator) — dedup by label (first occurrence
+    wins) so the count reflects distinct indicators, not channel-multiplied
+    rows.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in card.rows:
+        if r.disposition == "drop":
+            continue
+        label = f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
+        if label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
 
 
 _MAP_STATUS_EN = {"mapped": "Mapped", "ignored": "Ignored", "pending": "Pending"}
@@ -1016,10 +1070,12 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
 
     obj_rows: list[dict] = []
     total_features = 0
+    from app.agents.vocabulary import vocab_for
+    _vocab = vocab_for(st)
     for obj in model_objects(st):
         try:
-            mf = build_model_frame(df, obj, exclude=sel.exclude,
-                                   y_metric=sel.y_for(obj), include=sel.include)
+            mf = build_model_frame(df, obj, vocab=_vocab, exclude=sel.exclude_for(obj),
+                                   y_metric=sel.y_for(obj), include=sel.include_for(obj))
         except Exception as e:  # noqa: BLE001 — one unfittable object must not
             # sink the others; the object reports its own error on the card.
             obj_rows.append({"object": obj, "months": 0, "features": 0,
@@ -1030,21 +1086,47 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
                          "features": len(mf.x_cols), "y": mf.y_col})
 
     led = indicator_ledger(st)
-    rejected = [r for r in led if not r.adopted]
+    # interim: dedup by indicator key; Task 7 replaces with per-object grouping
+    # `indicator_ledger` now yields one LedgerRow per (object, l4, metric), so a
+    # multi-object project (danone-mizone has 4) repeats every indicator once
+    # per object. Dedup by the indicator identity key here — first occurrence
+    # wins — so the 2.6 lock-gate lists/counts aren't channel-inflated.
+    adopted_rows: list = []
+    seen_adopted: set = set()
+    for r in led:
+        if r.adopted and r.key not in seen_adopted:
+            seen_adopted.add(r.key)
+            adopted_rows.append(r)
+    rejected_rows: list = []
+    seen_rejected: set = set()
+    for r in led:
+        if not r.adopted and r.key not in seen_rejected:
+            seen_rejected.add(r.key)
+            rejected_rows.append(r)
+    rejected = rejected_rows
     body = {
         "objects": obj_rows,
-        # TODO(Task 7): serialize the per-object funnel; for now the combined
-        # rollup keeps this artifact body on the pre-per-object shape.
-        "funnel": funnel(st)["combined"],
+        # {"combined": [...], "byObject": {object: [...]}} — combined stays the
+        # pre-per-object rollup any un-migrated reader still expects; byObject
+        # is each channel's own funnel (the same indicator can die at a
+        # different layer, or survive, in a different channel).
+        "funnel": funnel(st),
         "dimensions": dimensions(st),
+        # per-object adopted/rejected, each row carrying its full verdict
+        # chain — Tab 2's per-channel breakdown (spec §3.5).
+        "byObject": _ledger_by_object(led),
+        # flat rollups kept for one release so an un-migrated reader still
+        # works; deduped by indicator key (first occurrence wins) so a
+        # multi-object project's per-object ledger rows don't channel-inflate
+        # these counts/lists.
         "adopted": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
-                     "indicator": r.indicator} for r in led if r.adopted],
+                     "indicator": r.indicator} for r in adopted_rows],
         "rejected": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
                       "indicator": r.indicator, "rejectedAt": r.rejected_at,
                       "reason": r.reason,
                       "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
                                     "status": v.status, "note": v.note} for v in r.verdicts]}
-                     for r in rejected],
+                     for r in rejected_rows],
         "note": ("The master table carries only the indicators that survived every filter "
                  "layer, over the response confirmed at 2.5y and the variables ticked at "
                  "2.5x. Slice it by product × channel × region below; every rejected "
@@ -1053,7 +1135,7 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     eng.produce(st, "a-master-data", body=body, state="proposed", agent="data")
     eng.set_analysis(st, "master_data", {
         "objects": len(obj_rows), "features": total_features,
-        "adopted": sum(1 for r in led if r.adopted), "rejected": len(rejected),
+        "adopted": len(adopted_rows), "rejected": len(rejected),
         "excluded": sorted(f"{r.l4} · {r.indicator}" for r in rejected)[:20],
     })
     by_layer: dict[str, int] = {}
@@ -1062,13 +1144,13 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     trail = ", ".join(f"{LAYER_LABEL.get(k, k)} {v}" for k, v in by_layer.items()) or "none"
     eng.add_findings(st, task["id"], [TaskFinding(
         text=f"Master data assembled: {len(obj_rows)} model object(s), {total_features} feature "
-        f"column(s) from {sum(1 for r in led if r.adopted)} adopted indicator(s). "
+        f"column(s) from {len(adopted_rows)} adopted indicator(s). "
         f"Rejected along the way — {trail}. Review and lock it as the modeling input.",
         evidence=[EvidenceRef(artifactId="a-master-data")])])
     # Make the lock gate state what is actually being locked.
     if "d-2.6" in st.decisions:
         st.decisions["d-2.6"].question = (
             f"The master table carries {total_features} feature column(s) across "
-            f"{len(obj_rows)} model object(s), assembled from {sum(1 for r in led if r.adopted)} "
+            f"{len(obj_rows)} model object(s), assembled from {len(adopted_rows)} "
             f"adopted indicator(s) ({len(rejected)} rejected upstream). Lock it as the "
             "modeling input?")
