@@ -143,7 +143,7 @@ def _s(v: object) -> str:
 
 def build_stat_scorecard(st: ProjectState, *, eng=None,
                          task_id: str | None = None) -> StatScorecard:
-    """Score the indicators still in play on CV / Pearson / VIF.
+    """Score the indicators still in play on CV / Pearson / VIF, per model object.
 
     Pass ``eng``/``task_id`` (the 2.4 handler does) to record the three checks as
     explicit tool invocations. Secondary callers that merely re-derive the card
@@ -154,91 +154,98 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
     them would put a settled decision back in front of the human as if it were
     open, and — because VIF is computed across the whole set at once — the dead
     indicators' collinearity would inflate the VIF of the ones still in play.
+
+    Each model object (channel_type) is screened on its own data slice — an
+    indicator can be a legitimate drop in one channel (e.g. constant there) and
+    a fine driver in another, so CV / Pearson / VIF are computed per channel,
+    not once globally.
     """
-    from app.agents.dataset_cache import model_df
+    from app.agents.dataset_cache import model_df, model_objects
     from app.agents.ledger import _matches, _norm_pair, drops_before
 
-    df = model_df(st)
-    y = _monthly_y(df)
-    metas, wide = _indicator_series(df)
-    if not metas or y is None:
-        return StatScorecard(rows=[])
+    full = model_df(st)
+    all_rows: list[StatScoreRow] = []
+    for obj in model_objects(st):
+        df = full[full["channel_type"].astype("string").str.strip() == obj]
+        y = _monthly_y(df)
+        metas, wide = _indicator_series(df)
+        if not metas or y is None:
+            continue
 
-    # Reindex onto the complete, contiguous calendar range before anything is
-    # differenced positionally — a month missing anywhere in the panel would
-    # otherwise silently shift a[12:]-a[:-12] across the gap. New months are
-    # zero-filled, consistent with how _indicator_series already zero-fills gaps.
-    wide = wide.reindex(_complete_month_index(wide.index), fill_value=0.0)
+        # Reindex onto the complete, contiguous calendar range before anything is
+        # differenced positionally — a month missing anywhere in the panel would
+        # otherwise silently shift a[12:]-a[:-12] across the gap. New months are
+        # zero-filled, consistent with how _indicator_series already zero-fills gaps.
+        wide = wide.reindex(_complete_month_index(wide.index), fill_value=0.0)
 
-    inherited = drops_before(st, "statistical")
-    if inherited:
-        metas = [m for m in metas
-                 if not _matches(_norm_pair(m["l4"], m["indicator"]), inherited)]
-        if not metas:
-            return StatScorecard(rows=[])
+        inherited = drops_before(st, "statistical", obj)
+        if inherited:
+            metas = [m for m in metas
+                     if not _matches(_norm_pair(m["l4"], m["indicator"]), inherited)]
+            if not metas:
+                continue
 
-    cols = [m["col"] for m in metas]
-    n = len(cols)
-    # The three 2.33 tests, each a registered tool — one explicit call per test,
-    # batched over every indicator (see app/tools/registry.py).
-    cvs = traced(
-        eng, st, task_id, "stat.cv", f"{n} indicator series",
-        get_tool("stat.cv").run, [wide[c].to_numpy(dtype=float) for c in cols],
-        summarize=lambda vals: f"CV {min(vals):.2f}–{max(vals):.2f}" if vals else "no indicators",
-    )
-    cv_by_col = dict(zip(cols, cvs))
+        cols = [m["col"] for m in metas]
+        n = len(cols)
+        # The three 2.33 tests, each a registered tool — one explicit call per test,
+        # batched over every indicator (see app/tools/registry.py).
+        cvs = traced(
+            eng, st, task_id, "stat.cv", f"{obj}: {n} indicator series",
+            get_tool("stat.cv").run, [wide[c].to_numpy(dtype=float) for c in cols],
+            summarize=lambda vals: f"CV {min(vals):.2f}–{max(vals):.2f}" if vals else "no indicators",
+        )
+        cv_by_col = dict(zip(cols, cvs))
 
-    # CV stays on raw levels — see DETREND_PERIOD. The two correlation tests run on
-    # year-over-year differences (or, on a too-short project — see
-    # MIN_DETRENDED_POINTS — on the raw levels; the trace below says which).
-    n_rows = len(wide)
-    detr = _yoy(wide[cols].to_numpy(dtype=float))
-    y_aligned = y.reindex(wide.index)
-    y_detr = _yoy(y_aligned.to_numpy(dtype=float))
-    was_detrended = len(detr) < n_rows
-    period_label = (
-        f"{len(detr)} year-over-year periods" if was_detrended
-        else f"{len(detr)} monthly points (too short to detrend)"
-    )
+        # CV stays on raw levels — see DETREND_PERIOD. The two correlation tests run on
+        # year-over-year differences (or, on a too-short project — see
+        # MIN_DETRENDED_POINTS — on the raw levels; the trace below says which).
+        n_rows = len(wide)
+        detr = _yoy(wide[cols].to_numpy(dtype=float))
+        y_aligned = y.reindex(wide.index)
+        y_detr = _yoy(y_aligned.to_numpy(dtype=float))
+        was_detrended = len(detr) < n_rows
+        period_label = (
+            f"{len(detr)} year-over-year periods" if was_detrended
+            else f"{len(detr)} monthly points (too short to detrend)"
+        )
 
-    # VIF is computed once across the whole candidate set, at indicator granularity.
-    vifs = traced(
-        eng, st, task_id, "stat.vif", f"{n} indicators × {period_label}",
-        get_tool("stat.vif").run, detr,
-        summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
-                            f"{int(np.nansum(np.asarray(v) >= 5))} at or above 5"
-                            if len(v) else "no indicators",
-    )
-    vif_by_col = dict(zip(cols, vifs))
+        # VIF is computed once across the whole candidate set, at indicator granularity.
+        vifs = traced(
+            eng, st, task_id, "stat.vif", f"{obj}: {n} indicators × {period_label}",
+            get_tool("stat.vif").run, detr,
+            summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
+                                f"{int(np.nansum(np.asarray(v) >= 5))} at or above 5"
+                                if len(v) else "no indicators",
+        )
+        vif_by_col = dict(zip(cols, vifs))
 
-    rs = traced(
-        eng, st, task_id, "stat.pearson",
-        f"{n} indicators vs KPI ({period_label})",
-        get_tool("stat.pearson").run,
-        [pd.Series(detr[:, i]) for i in range(len(cols))], pd.Series(y_detr),
-        summarize=lambda vals: f"|r| up to {max(abs(v) for v in vals):.2f} · "
-                               f"{sum(1 for v in vals if abs(v) >= 0.3)} at or above 0.3"
-                               if vals else "no indicators",
-    )
-    r_by_col = dict(zip(cols, rs))
+        rs = traced(
+            eng, st, task_id, "stat.pearson",
+            f"{obj}: {n} indicators vs KPI ({period_label})",
+            get_tool("stat.pearson").run,
+            [pd.Series(detr[:, i]) for i in range(len(cols))], pd.Series(y_detr),
+            summarize=lambda vals: f"|r| up to {max(abs(v) for v in vals):.2f} · "
+                                   f"{sum(1 for v in vals if abs(v) >= 0.3)} at or above 0.3"
+                                   if vals else "no indicators",
+        )
+        r_by_col = dict(zip(cols, rs))
 
-    rows: list[StatScoreRow] = []
-    for m in metas:
-        col = m["col"]
-        cv = cv_by_col[col]
-        corr = r_by_col[col]
-        vif = float(vif_by_col.get(col, 1.0))
-        sc = score_statistical(cv, corr, vif)
-        rows.append(StatScoreRow(
-            id=f"s-{col}", l1=m["l1"], l2=m["l2"], l3=m["l3"], l4=m["l4"],
-            indicator=m["indicator"], cv=round(cv, 4), pearson=round(corr, 4),
-            vif=round(vif, 3), cvScore=sc.cv_score, pearsonScore=sc.pearson_score,
-            vifScore=sc.vif_score, total=sc.total, autoVerdict=sc.verdict,
-            disposition=_DISPOSITION_DEFAULT.get(sc.verdict, "review"),
-        ))
+        for m in metas:
+            col = m["col"]
+            cv = cv_by_col[col]
+            corr = r_by_col[col]
+            vif = float(vif_by_col.get(col, 1.0))
+            sc = score_statistical(cv, corr, vif)
+            all_rows.append(StatScoreRow(
+                id=f"{obj}|s-{col}", object=obj, l1=m["l1"], l2=m["l2"], l3=m["l3"], l4=m["l4"],
+                indicator=m["indicator"], cv=round(cv, 4), pearson=round(corr, 4),
+                vif=round(vif, 3), cvScore=sc.cv_score, pearsonScore=sc.pearson_score,
+                vifScore=sc.vif_score, total=sc.total, autoVerdict=sc.verdict,
+                disposition=_DISPOSITION_DEFAULT.get(sc.verdict, "review"),
+            ))
     # Worst first so the reviewer sees the risky indicators at the top.
-    rows.sort(key=lambda r: (r.total, r.indicator))
-    return StatScorecard(rows=rows)
+    all_rows.sort(key=lambda r: (r.object, r.total, r.indicator))
+    return StatScorecard(rows=all_rows)
 
 
 def pearson(x: pd.Series, y: pd.Series) -> float:
