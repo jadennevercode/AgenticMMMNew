@@ -69,7 +69,10 @@ def make_two_channel_state(pid: str = "t-per-channel"):
 
 def test_fixture() -> None:
     st = make_two_channel_state()
-    assert model_objects(st) == ["MT", "TT"], model_objects(st)
+    # MT and TT carry equal row counts in this fixture, so `model_objects`'
+    # busiest-first ordering does not guarantee a specific tie order — assert
+    # membership, not position (see test_model_objects_ordered_by_data below).
+    assert sorted(model_objects(st)) == ["MT", "TT"], model_objects(st)
     print("  fixture: MT + TT bound")
 
 
@@ -322,6 +325,31 @@ def test_adopted_mask_screens_unmapped_channel_rows() -> None:
     mask = adopted_mask(st, df)
     assert list(mask) == [False, False, True, True, True], list(mask)
     print("  adopted_mask screens unmapped-channel rows against all-object excludes")
+
+
+def test_legacy_global_rows_apply_to_all_objects() -> None:
+    from app.agents.stat_scoring import build_stat_scorecard
+    from app.agents import ledger
+    st = make_two_channel_state()
+    # Simulate a legacy scorecard: object="" on a drop → must hit BOTH channels.
+    st.stat_scorecard = build_stat_scorecard(st)
+    for r in st.stat_scorecard.rows:
+        r.object = ""      # legacy state
+    for r in st.stat_scorecard.rows:
+        if r.indicator == "渠道库存":
+            r.disposition = "drop"
+    by_obj = ledger.stat_drop_pairs_by_object(st)
+    assert ("渠道库存", "渠道库存") in by_obj.get(ledger.OBJECT_ANY, set())
+    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", "MT")
+    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", "TT")
+    print("  legacy global rows apply to every channel")
+
+
+def test_model_objects_ordered_by_data() -> None:
+    from app.agents.dataset_cache import model_objects
+    st = make_two_channel_state()  # MT and TT have equal row counts → name order
+    assert set(model_objects(st)) == {"MT", "TT"}
+    print("  model_objects derived from data, no hardcoded list")
 
 
 if __name__ == "__main__":

@@ -142,14 +142,15 @@ def dataset_blocker(st: object | None = None) -> str:
 
 
 def model_objects(st: object | None = None) -> list[str]:
-    """The MMM model objects present in the resolved data (channel_type groups)."""
+    """The MMM model objects present in the resolved data (channel_type groups),
+    ordered by in-data row count descending (busiest channel first) — no
+    hardcoded channel list, so coverage and ordering are fully data-derived."""
     df = model_df(st)
     if df.empty or "channel_type" not in df.columns:
         return []
-    types = [t for t in df["channel_type"].dropna().unique().tolist() if str(t).strip()]
-    preferred = ["MT", "TT", "AFH", "EC", "O2O", "WS", "社区团购"]
-    present = [p for p in preferred if p in types]
-    return present or types
+    ct = df["channel_type"].astype("string").str.strip()
+    counts = ct[ct.ne("") & ct.ne("nan")].value_counts()
+    return [str(k) for k in counts.index]  # busiest channel first, ties by pandas order
 
 
 def diagnose_taxonomy(st: object | None = None) -> TaxonomyDiagnosis:

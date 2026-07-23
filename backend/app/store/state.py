@@ -252,6 +252,11 @@ def heal_state(st: ProjectState) -> ProjectState:
     # Back-fill for projects saved before validation_specs existed.
     if not hasattr(st, "validation_specs") or st.validation_specs is None:
         st.validation_specs = {}
+    # Per-channel-type screening migration: legacy scorecard rows / OLS candidates
+    # carry object="" (pre-migration global verdicts). The ledger resolvers treat an
+    # empty object as OBJECT_ANY (applies to every channel), so a saved global verdict
+    # keeps its exact effect — no row rewrite required. Left as a comment so a future
+    # reader does not "fix" the empty object by guessing a channel.
     # Prune entries removed from the blueprint.
     st.tasks = {tid: rt for tid, rt in st.tasks.items() if tid in template.tasks}
     st.decisions = {did: dr for did, dr in st.decisions.items() if did in template.decisions}

@@ -43,6 +43,25 @@ def _fresh():
     return initial_state(danone_meta())
 
 
+def _pick_unique_victim(ticked):
+    """A ticked candidate whose (object, metric) is not shared by another still-
+    ticked candidate — the real dataset carries many indicators with the same
+    generic metric name (e.g. multiple "花费" spend lines under different l4
+    campaigns) for one object. Unticking one such candidate while a same-metric
+    sibling stays selected leaves the metric itself still included, which is
+    correct behaviour but makes a plain "pick the last ticked row" victim
+    flaky against candidate-ordering changes (`model_objects` is now
+    data-derived, not a fixed channel list, so `x_candidates` order is no
+    longer stable run to run). Picking a victim whose metric is unique within
+    its object keeps the assertion meaningful regardless of ordering."""
+    from collections import Counter
+    key = lambda c: (c.object, c.metric.strip().lower())  # noqa: E731
+    counts = Counter(key(c) for c in ticked)
+    unique = [c for c in ticked if counts[key(c)] == 1]
+    assert unique, "need a ticked candidate whose metric is unique within its object"
+    return unique[-1]
+
+
 # ── 2.2 · Data Quality Score ────────────────────────────────────────────────
 
 
@@ -221,15 +240,22 @@ def test_2_6_honours_the_2_5x_variable_selection() -> None:
     cfg = st.ols_config
     ticked = [c for c in cfg.x_candidates if c.selected]
     assert len(ticked) >= 2, "need at least two ticked variables to untick one"
-    victim = ticked[-1]
+    victim = _pick_unique_victim(ticked)
     victim.selected = False
 
     sel = model_selection(st)
     assert victim.metric.strip().lower() not in (sel.include_for(victim.object) or frozenset())
     _run(data_agent.assemble_master_data, st, "2.6")
 
-    adopted = {r["indicator"].strip().lower() for r in st.artifact("a-master-data").body["adopted"]}
-    assert victim.metric.strip().lower() not in adopted
+    # Check the victim's own channel, not the flat "adopted" rollup: that
+    # rollup is an intentional adopted-anywhere summary (dedup by indicator
+    # key, first occurrence wins — see `assemble_master_data`'s docstring) and
+    # the same (l4, metric) can legitimately still be adopted in another
+    # channel that never rejected it.
+    body = st.artifact("a-master-data").body
+    by_object_adopted = {r["indicator"].strip().lower()
+                          for r in body["byObject"][victim.object]["adopted"]}
+    assert victim.metric.strip().lower() not in by_object_adopted
 
 
 def test_master_table_slices_by_product_channel_region() -> None:
@@ -265,13 +291,17 @@ def test_s4_training_fits_the_same_selection_s2_locked() -> None:
     cfg = st.ols_config
     ticked = [c for c in cfg.x_candidates if c.selected]
     assert len(ticked) >= 2
-    victim = ticked[-1]
+    victim = _pick_unique_victim(ticked)
     victim.selected = False
 
     sel = model_selection(st)
-    from app.agents.dataset_cache import model_df, model_objects
+    from app.agents.dataset_cache import model_df
     df = model_df(st)
-    obj = model_objects(st)[0]
+    # Train the object the victim actually belongs to — `model_objects` order
+    # is data-derived (busiest channel first), not guaranteed to put the
+    # victim's own object first, and this test is about S4 honouring the
+    # human's tick for that object specifically.
+    obj = victim.object
     mf = build_model_frame(df, obj, exclude=sel.exclude_for(obj), y_metric=sel.y_for(obj),
                            include=sel.include_for(obj))
     # The frame S4 trains on carries the human's response and none of the
