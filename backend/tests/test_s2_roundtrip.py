@@ -16,7 +16,7 @@ import asyncio
 
 from app.agents import data as data_agent
 from app.agents.data import accepted_metric_labels, quality_sheet
-from app.agents.ledger import indicator_ledger, model_selection
+from app.agents.ledger import model_selection
 from app.agents.registry import build_engine
 from app.domain import blueprint as bp
 from app.domain.models import QualityScorecard
@@ -109,16 +109,21 @@ def test_2_4_screening_produces_the_scorecard_and_acceptable_bucket() -> None:
 
 
 def test_2_4_does_not_rescore_what_2_2_dropped() -> None:
-    """A settled quality drop must not come back as an open 2.4 row."""
+    """A settled quality drop must not come back as an open 2.4 row — in the
+    SAME channel it was dropped in. Quality (2.2) screens each model object
+    (channel_type) on its own data slice, so a drop recorded in one channel
+    must not block 2.4 from scoring the same indicator in a channel whose own
+    quality review never dropped it — that per-channel divergence is the
+    whole point of per-object screening, not a leak."""
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     victim = st.quality_scorecard.rows[0]
     victim.disposition = "drop"
 
     _run(data_agent.stat_screening, st, "2.4")
-    scored = {(r.l4.strip().lower(), r.indicator.strip().lower())
-              for r in st.stat_scorecard.rows}
-    assert (victim.l4.strip().lower(), victim.indicator.strip().lower()) not in scored
+    scored_in_object = {(r.l4.strip().lower(), r.indicator.strip().lower())
+                        for r in st.stat_scorecard.rows if r.object == victim.object}
+    assert (victim.l4.strip().lower(), victim.indicator.strip().lower()) not in scored_in_object
 
 
 # ── 2.5 · the OLS setup proposal ────────────────────────────────────────────
@@ -127,7 +132,14 @@ def test_2_4_does_not_rescore_what_2_2_dropped() -> None:
 def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
     """A rejected indicator stays visible in 2.5x — locked, and labelled with
     the layer that rejected it. Hiding it would leave the human no way to see
-    where their variable went."""
+    where their variable went.
+
+    2.5x candidates are per model object (channel_type), and quality is too —
+    the same (l4, metric) can appear as a candidate in several channels, only
+    one of which is the victim's own. Looking it up by (l4, metric) alone
+    would silently grab an unrelated, unlocked channel's candidate instead of
+    the one the quality drop actually applies to — the lookup must be
+    object-aware."""
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     victim = st.quality_scorecard.rows[0]
@@ -139,12 +151,13 @@ def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
     assert cfg is not None and cfg.x_candidates
     key = (victim.l4.strip().lower(), victim.indicator.strip().lower())
     hit = next((c for c in cfg.x_candidates
-                if (c.l4.strip().lower(), c.metric.strip().lower()) == key), None)
+                if c.object == victim.object
+                and (c.l4.strip().lower(), c.metric.strip().lower()) == key), None)
     if hit is not None:  # only if the victim is a driver (KPI rows are not offered)
         assert hit.locked and hit.locked_by == "quality"
         assert not hit.selected
         assert "quality" in hit.rationale.lower()
-    # Nothing locked may ever be pre-ticked.
+    # Nothing locked may ever be pre-ticked, in the victim's channel or any other.
     assert not any(c.selected for c in cfg.x_candidates if c.locked)
 
 
@@ -152,6 +165,12 @@ def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
 
 
 def test_2_6_master_data_carries_only_adopted_indicators() -> None:
+    """Per-channel screening legitimately allows an indicator adopted in one
+    channel and rejected in another to appear in BOTH flat `adopted`/
+    `rejected` lists — those are a global rollup across every model object,
+    deduped by indicator key only. The invariant that actually matters is
+    per-object exclusivity: within a single channel's own `byObject` entry,
+    adopted ∩ rejected must be empty."""
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     _run(data_agent.stat_screening, st, "2.4")
@@ -162,20 +181,30 @@ def test_2_6_master_data_carries_only_adopted_indicators() -> None:
     assert art is not None
     body = art.body
     assert body["objects"], "at least one model object must assemble"
-    assert [f["layer"] for f in body["funnel"]] == [
+    funnel = body["funnel"]
+    assert set(funnel) == {"combined", "byObject"}
+    assert [f["layer"] for f in funnel["combined"]] == [
         "mapping", "quality", "signoff", "statistical", "selection", "range"]
     # The dimensions the user slices product × channel × region by.
     for dim in ("brand", "provinceGroup", "channelType", "channel", "grains"):
         assert dim in body["dimensions"]
 
-    adopted = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
-               for r in body["adopted"]}
-    rejected = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
-                for r in body["rejected"]}
-    assert not (adopted & rejected), "an indicator cannot be both adopted and rejected"
-    # Every rejected row explains itself.
-    for r in body["rejected"]:
-        assert r["rejectedAt"] and r["reason"]
+    by_object = body["byObject"]
+    assert set(by_object) == {o["object"] for o in body["objects"]}
+    for obj, rows in by_object.items():
+        adopted = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
+                   for r in rows["adopted"]}
+        rejected = {(r["l4"].strip().lower(), r["indicator"].strip().lower())
+                    for r in rows["rejected"]}
+        assert not (adopted & rejected), \
+            f"{obj}: an indicator cannot be both adopted and rejected in the same channel"
+        # Every rejected row explains itself; adopted rows now carry their
+        # own verdict chain too (spec §3.5) — why an indicator survived, not
+        # only why one was dropped.
+        for r in rows["rejected"]:
+            assert r["rejectedAt"] and r["reason"]
+        for r in rows["adopted"] + rows["rejected"]:
+            assert r["verdicts"], "every ledger row must carry its verdict chain"
 
     # The 2.6d gate reports what is actually being locked.
     assert "feature column" in st.decisions["d-2.6"].question
@@ -253,6 +282,14 @@ def test_s4_training_fits_the_same_selection_s2_locked() -> None:
 
 
 def test_master_table_never_carries_a_rejected_indicator() -> None:
+    """A quality drop is per-object (2.2 screens each channel_type on its own
+    data slice) — the dropped indicator must vanish from ITS OWN channel's
+    master table. It may legitimately still be a column in another channel
+    that never dropped it (see `_test_per_channel.py::
+    test_master_table_columns_differ_by_channel`), so an UN-sliced table that
+    spans every channel can still surface it via a surviving channel's data —
+    that is per-channel screening working as designed, not a leak. The
+    invariant that actually matters is the channel-scoped slice."""
     from app.agents.master_data import master_table
 
     st = _fresh()
@@ -260,10 +297,10 @@ def test_master_table_never_carries_a_rejected_indicator() -> None:
     victim = next(r for r in st.quality_scorecard.rows if r.indicator.strip())
     victim.disposition = "drop"
 
-    t = master_table(st, grain="month")
+    t = master_table(st, channel_type=[victim.object], grain="month")
     cols = {c.strip().lower() for c in t["columns"]}
-    rejected = {r.key[1] for r in indicator_ledger(st) if not r.adopted}
-    assert not (cols & rejected), "a dropped indicator must not reach the master table"
+    assert victim.indicator.strip().lower() not in cols, \
+        "a dropped indicator must not reach its own channel's master table"
 
 
 def test_d_2_1_gates_2_2_and_reopens_2_1_on_rework() -> None:

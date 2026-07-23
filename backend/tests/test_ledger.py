@@ -183,18 +183,46 @@ def test_selection_include_never_carries_a_rejected_indicator() -> None:
 
 
 def test_funnel_layers_account_for_every_indicator() -> None:
+    """`funnel(st)` resolves per model object and returns
+    ``{"combined": [...], "byObject": {object: [...]}}`` — `combined` mirrors
+    the pre-per-object shape (one funnel over every row, any object), so the
+    "every layer accounted for" invariant still holds there. `byObject` is
+    checked too: each channel's own funnel must independently account for
+    every indicator it carries."""
     st = _state()
     _quality_drop(st, indicator_ledger(st)[0])
 
-    f = funnel(st)
+    funnel_dict = funnel(st)
+    assert set(funnel_dict) == {"combined", "byObject"}
+
+    objects = model_objects(st)
+    f = funnel_dict["combined"]
     assert [x["layer"] for x in f] == [
         "mapping", "quality", "signoff", "statistical", "selection", "range"]
     # Each layer's survivors feed the next layer's intake — no indicator vanishes.
     for prev, nxt in zip(f, f[1:]):
         assert prev["survivors"] == nxt["intake"]
     quality = next(x for x in f if x["layer"] == "quality")
-    assert quality["rejected"] == 1 and len(quality["dropped"]) == 1
+    # `_quality_drop` records the drop under OBJECT_ANY (no object pinned), so
+    # every real model object inherits it — `combined` concatenates every
+    # object's own ledger rows, so one globally-dropped indicator shows up as
+    # one rejection PER object, not once.
+    assert quality["rejected"] == len(objects) and len(quality["dropped"]) == len(objects)
     assert quality["dropped"][0]["reason"]
+
+    # Every model object's own funnel is internally consistent too — the same
+    # layer-chaining invariant, resolved independently per channel — and each
+    # channel's own quality layer sees the globally-dropped indicator exactly
+    # once (not multiplied by every other channel).
+    by_object = funnel_dict["byObject"]
+    assert set(by_object) == set(objects)
+    for obj_layers in by_object.values():
+        assert [x["layer"] for x in obj_layers] == [
+            "mapping", "quality", "signoff", "statistical", "selection", "range"]
+        for prev, nxt in zip(obj_layers, obj_layers[1:]):
+            assert prev["survivors"] == nxt["intake"]
+        obj_quality = next(x for x in obj_layers if x["layer"] == "quality")
+        assert obj_quality["rejected"] == 1 and len(obj_quality["dropped"]) == 1
 
 
 if __name__ == "__main__":

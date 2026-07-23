@@ -188,9 +188,17 @@ def test_end_to_end_reference() -> None:
         assert _approx(r.total, r.cv_score * r.pearson_score * r.vif_score)
         assert r.auto_verdict in ("Good", "Acceptable", "unconsiderable")
         assert r.disposition in ("include", "review", "drop")
-    # Worst-first ordering.
-    totals = [r.total for r in card.rows]
-    assert totals == sorted(totals), "rows should be worst-first by total"
+    # Worst-first ordering, per model object: rows are grouped by object first
+    # (`all_rows.sort(key=lambda r: (r.object, r.total, r.indicator))`, per-channel
+    # screening screens each channel_type on its own data slice) and worst-first
+    # by total within each group — not a single global total ordering across
+    # every channel, which per-object grouping makes impossible to satisfy in
+    # general (a later object's best row can easily beat an earlier object's
+    # worst one).
+    from itertools import groupby
+    for _obj, rows in groupby(card.rows, key=lambda r: r.object):
+        totals = [r.total for r in rows]
+        assert totals == sorted(totals), "rows should be worst-first by total within each object"
     # Kept set excludes dropped.
     kept = accepted_stat_labels(card)
     dropped = [r for r in card.rows if r.disposition == "drop"]

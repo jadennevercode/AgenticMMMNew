@@ -255,6 +255,32 @@ def test_model_selection_is_per_object() -> None:
     print("  model_selection excludes per object")
 
 
+def test_master_table_columns_differ_by_channel() -> None:
+    """Task 7: ``adopted_mask`` resolves per channel_type, so the same indicator
+    can be a column in one channel's master table and absent from another's.
+
+    Built directly (as `test_stat_drops_are_per_object` / `test_ledger_is_per_object`
+    above do) rather than via `build_stat_scorecard()`: the fixture's TT 渠道库存
+    is a constant series, which the real scorer excludes from scoring entirely
+    (see `test_stat_scorecard_is_per_object`) rather than scoring it "drop" — so
+    a natural scorecard never carries the TT disposition this test needs to force.
+    """
+    from app.domain.models import StatScorecard, StatScoreRow
+    from app.agents.master_data import master_table
+    st = make_two_channel_state()
+    st.stat_scorecard = StatScorecard(rows=[
+        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+                     disposition="include"),
+        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                     disposition="drop"),
+    ])
+    mt = master_table(st, channel_type=["MT"])
+    tt = master_table(st, channel_type=["TT"])
+    assert "渠道库存" in [c for c in mt["columns"]], mt["columns"]
+    assert "渠道库存" not in [c for c in tt["columns"]], tt["columns"]
+    print("  master table columns differ by channel")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

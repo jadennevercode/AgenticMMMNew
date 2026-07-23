@@ -72,27 +72,31 @@ def adopted_mask(st: ProjectState, df: pd.DataFrame) -> pd.Series:
 
     ``model_selection``'s ``exclude``/``include`` are keyed per model object
     (channel type) so 2.5r/2.6/3.2's per-object fits never let one channel's
-    drop or tick leak into another's. This mask still runs over every
-    channel_type row in one pass, so — deliberately, pending the per-row
-    channel-aware pass — it flattens each into the union across every object,
-    the same aggregate behaviour this had before that per-object split.
-    Narrowing this to each row's own channel_type is Task 7's job, not this one.
+    drop or tick leak into another's. This mask resolves the keep/drop
+    decision **per channel_type present in df** — a master-table call is
+    already sliced to (at most) a handful of channels via ``_apply_dims``, so
+    it walks each one's own rows against its own ``exclude_for``/
+    ``include_for`` rather than flattening every object's verdicts into one
+    union. That is the whole point of per-channel screening: a wide table
+    sliced to one Channel Type shows exactly that channel's surviving
+    indicators, and the same indicator can appear as a column in one channel
+    and be absent in another.
     """
     sel = model_selection(st)
     l4 = df["l4"].astype("string").map(_lower) if "l4" in df.columns else pd.Series("", index=df.index)
     metric = df["metric"].astype("string").map(_lower)
-
-    exclude = frozenset().union(*sel.exclude.values()) if sel.exclude else frozenset()
-    metric_only = {m for excl_l4, m in exclude if not excl_l4}
-    rejected = pd.Series(
-        [(a, b) in exclude or b in metric_only for a, b in zip(l4, metric)],
-        index=df.index,
-    )
-    keep = ~rejected
-    include_sets = [v for v in sel.include.values() if v is not None]
-    if include_sets:
-        include = frozenset().union(*include_sets)
-        keep &= metric.isin(include)
+    ct = df["channel_type"].astype("string").map(lambda s: str(s).strip()) if "channel_type" in df.columns \
+        else pd.Series("", index=df.index)
+    keep = pd.Series(True, index=df.index)
+    for obj in sorted(set(ct) - {""}):
+        excl = sel.exclude_for(obj)
+        metric_only = {m for excl_l4, m in excl if not excl_l4}
+        inc = sel.include_for(obj)
+        rowsel = ct == obj
+        rej = pd.Series([(a, b) in excl or b in metric_only
+                         for a, b in zip(l4[rowsel], metric[rowsel])], index=l4[rowsel].index)
+        block = rej if inc is None else (rej | ~metric[rowsel].isin(inc))
+        keep.loc[rowsel] = ~block
     return keep | _kpi_mask(df)
 
 

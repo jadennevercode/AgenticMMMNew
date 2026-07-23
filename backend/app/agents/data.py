@@ -14,6 +14,7 @@ from app.agents import data_rules
 from app.agents.common import agent_system
 from app.agents.ledger import (
     LAYER_LABEL,
+    OBJECT_ANY,
     funnel,
     indicator_ledger,
     model_selection,
@@ -67,6 +68,45 @@ SYS = agent_system("data")
 _VERDICT_EN = {"pass": "Accept", "borderline": "Human decision", "unusable": "Reject · alert"}
 _DISPOSITION_EN = {"accept": "Accept", "flag": "Flag", "drop": "Drop"}
 _DISPOSITION_DEFAULT = {"pass": "accept", "borderline": "flag", "unusable": "drop"}
+
+
+def _ledger_row_dict(r, *, rejected: bool) -> dict:
+    body = {"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4, "indicator": r.indicator,
+            "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
+                          "status": v.status, "note": v.note} for v in r.verdicts]}
+    if rejected:
+        body["rejectedAt"] = r.rejected_at
+        body["reason"] = r.reason
+    return body
+
+
+def _ledger_by_object(led: tuple) -> dict[str, dict]:
+    """Group the indicator ledger per model object, for the Master Data (2.6)
+    artifact's Tab 2 — one channel's adopted/rejected indicators at a time.
+
+    Mirrors ``funnel``'s own per-object resolution: this object's own ledger
+    rows plus whatever a still-global layer (mapping, sign-off) ruled for
+    every object (``OBJECT_ANY``). Both adopted *and* rejected rows carry
+    their full verdict chain (spec §3.5) — a rejected row explains why it was
+    dropped, an adopted row explains why it survived every layer.
+    """
+    objects = sorted({r.object for r in led if r.object != OBJECT_ANY}) or [OBJECT_ANY]
+    out: dict[str, dict] = {}
+    for obj in objects:
+        rows = [r for r in led if r.object in (obj, OBJECT_ANY)]
+        seen: dict[bool, set] = {True: set(), False: set()}
+        adopted: list[dict] = []
+        rejected: list[dict] = []
+        for r in rows:
+            bucket = seen[r.adopted]
+            if r.key in bucket:
+                continue
+            bucket.add(r.key)
+            (adopted if r.adopted else rejected).append(
+                _ledger_row_dict(r, rejected=not r.adopted))
+        out[obj] = {"adopted": adopted, "rejected": rejected}
+    return out
+
 
 _QUALITY_COLUMNS = ["L1", "L2", "L3", "L4", "Indicator",
                     "Consistency", "Consistency notes", "Completeness", "Completeness notes",
@@ -1050,10 +1090,19 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     rejected = rejected_rows
     body = {
         "objects": obj_rows,
-        # TODO(Task 7): serialize the per-object funnel; for now the combined
-        # rollup keeps this artifact body on the pre-per-object shape.
-        "funnel": funnel(st)["combined"],
+        # {"combined": [...], "byObject": {object: [...]}} — combined stays the
+        # pre-per-object rollup any un-migrated reader still expects; byObject
+        # is each channel's own funnel (the same indicator can die at a
+        # different layer, or survive, in a different channel).
+        "funnel": funnel(st),
         "dimensions": dimensions(st),
+        # per-object adopted/rejected, each row carrying its full verdict
+        # chain — Tab 2's per-channel breakdown (spec §3.5).
+        "byObject": _ledger_by_object(led),
+        # flat rollups kept for one release so an un-migrated reader still
+        # works; deduped by indicator key (first occurrence wins) so a
+        # multi-object project's per-object ledger rows don't channel-inflate
+        # these counts/lists.
         "adopted": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
                      "indicator": r.indicator} for r in adopted_rows],
         "rejected": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
