@@ -154,37 +154,46 @@ def stat_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
     return _scorecard_pairs(getattr(st, "stat_scorecard", None), ("drop",))
 
 
-def signoff_key(l4: object, metric: object) -> str:
-    """The ``st.signoffs`` key for one indicator: ``i:<norm_l4>|<norm_metric>``.
+def signoff_key(l4: object, metric: object, object: str = OBJECT_ANY) -> str:
+    """The ``st.signoffs`` key for one indicator:
+    ``i:<object>:<norm_l4>|<norm_metric>``.
 
-    The ``i:`` prefix makes the shape self-describing instead of inferred from
-    the mere presence of ``|`` — an uploaded factor/metric name can itself
-    contain a ``|`` (e.g. ``"Search | Brand"``), which under the old bare
-    ``"<l4>|<metric>"`` vs bare-L3 scheme was ambiguous with the factor shape.
-    See :func:`_parse_signoff_key`.
+    ``object`` is the model object (channel type) the verdict applies to;
+    it defaults to ``OBJECT_ANY`` — a single "Deny" from the 2.3 deck still
+    denies the indicator for every channel unless a caller explicitly names
+    one. The ``i:`` prefix makes the shape self-describing instead of
+    inferred from the mere presence of ``|`` — an uploaded factor/metric name
+    can itself contain a ``|`` (e.g. ``"Search | Brand"``), which under the
+    old bare ``"<l4>|<metric>"`` vs bare-L3 scheme was ambiguous with the
+    factor shape. See :func:`_parse_signoff_key`.
     """
     a, b = _norm_pair(l4, metric)
-    return f"i:{a}|{b}"
+    return f"i:{_obj(object) or OBJECT_ANY}:{a}|{b}"
 
 
-def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
+def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str, str]]:
     """Decode one ``st.signoffs`` key.
 
-    Returns ``(kind, l4_or_l3, metric)`` — ``kind`` is ``"indicator"`` or
-    ``"factor"``; ``metric`` is ``""`` for a factor. Returns ``None`` when the
-    key cannot be trusted (the round-trip guard below): the caller must treat
-    that as "no recorded verdict", never act on a guess.
+    Returns ``(kind, object, l4_or_l3, metric)`` — ``kind`` is ``"indicator"``
+    or ``"factor"``; ``metric`` is ``""`` for a factor; ``object`` is
+    ``OBJECT_ANY`` unless the key names a concrete channel. Returns ``None``
+    when the key cannot be trusted (the round-trip guards below): the caller
+    must treat that as "no recorded verdict", never act on a guess.
 
-    Accepts two shapes so nothing already stored is lost:
-      * ``"i:<l4>|<metric>"`` — the current indicator shape (`signoff_key`).
-      * unprefixed legacy     — predates the ``i:`` prefix: a bare
+    Accepts three shapes so nothing already stored is lost:
+      * ``"i:<object>:<l4>|<metric>"`` — the current shape (`signoff_key`).
+      * ``"i:<l4>|<metric>"``   — pre-Task-4 shape (no object segment); reads
+        as ``OBJECT_ANY``.
+      * unprefixed legacy      — predates the ``i:`` prefix entirely: a bare
         ``"<l4>|<metric>"`` (has a ``|``) reads as an indicator, a bare
-        ``"<l3>"`` (no ``|``) reads as a whole-factor verdict. This is the
-        same rule the prefix exists to replace, kept only so state saved
-        before this change keeps its verdicts — a legacy L3 name that itself
-        contains ``|`` is a known, accepted gap in that old data (today's
-        reference dataset has none), not something re-parsing can resolve
-        after the fact.
+        ``"<l3>"`` (no ``|``) reads as a whole-factor verdict, both under
+        ``OBJECT_ANY``. This is the same rule the prefix exists to replace,
+        kept only so state saved before this change keeps its verdicts — a
+        legacy L3 name that itself contains ``|`` is a known, accepted gap in
+        that old data (today's reference dataset has none), not something
+        re-parsing can resolve after the fact. Likewise an object-free legacy
+        L4 that itself contains ``:`` before its ``|`` is a known, accepted
+        gap — indistinguishable from the object-prefixed shape.
 
     There is no ``"f:"`` factor-key shape: nothing ever writes one (only the
     ``l3`` fallback in ``PUT /signoff`` exists, and it fans out to per-indicator
@@ -192,23 +201,40 @@ def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str]]:
     verdict only ever reaches this parser via the unprefixed-legacy path above.
     """
     if key.startswith("i:"):
-        l4, sep, metric = key[2:].partition("|")
-        if not sep or f"i:{l4}|{metric}" != key:
+        rest = key[2:]
+        head, psep, tail = rest.partition("|")
+        if not psep:
             return None  # malformed — an "i:" key must carry a '|'
-        return ("indicator", l4, metric)
+        if ":" in head:
+            # Current shape: "<object>:<l4>" before the '|'.
+            obj, _, l4 = head.partition(":")
+            metric = tail
+            if f"i:{obj}:{l4}|{metric}" != key:
+                return None
+            return ("indicator", obj or OBJECT_ANY, l4, metric)
+        # Pre-Task-4 shape: no object segment at all.
+        l4, metric = head, tail
+        if f"i:{l4}|{metric}" != key:
+            return None
+        return ("indicator", OBJECT_ANY, l4, metric)
     if "|" in key:
         l4, _, metric = key.partition("|")
-        return ("indicator", l4, metric)
-    return ("factor", key, "")
+        return ("indicator", OBJECT_ANY, l4, metric)
+    return ("factor", OBJECT_ANY, key, "")
 
 
 def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
-    """Everything the client denied at 2.3, split by key shape.
+    """Everything the client denied at 2.3, split by key shape, flattened
+    across every model object.
 
     Returns (denied_pairs, denied_l3). Only an explicit "no" rejects: a missing
     entry means "not individually reviewed", which the d-2.3 gate covers —
     treating it as a rejection would empty the model before the human ever
     opened the deck.
+
+    This is the object-agnostic view for callers that only care whether an
+    indicator was denied anywhere; see :func:`_signoff_denied_by_object` for
+    the per-channel breakdown that :func:`signoff_drop_pairs_by_object` uses.
     """
     pairs: set[tuple[str, str]] = set()
     l3s: set[str] = set()
@@ -218,12 +244,37 @@ def signoff_denied(st: ProjectState) -> tuple[set[tuple[str, str]], set[str]]:
         parsed = _parse_signoff_key(key)
         if parsed is None:
             continue  # unparseable / ambiguous key — see _parse_signoff_key
-        kind, a, b = parsed
+        kind, _obj_, a, b = parsed
         if kind == "indicator":
             pairs.add((_norm(a), _norm(b)))
         else:
             l3s.add(_norm(a))
     return pairs, l3s
+
+
+def _signoff_denied_by_object(st: ProjectState) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]]]:
+    """Everything the client denied at 2.3, split by key shape, per object.
+
+    Returns (denied_triples, denied_l3s) where a triple is
+    ``(object, l4, metric)`` and an l3 entry is ``(object, l3)`` — object is
+    ``OBJECT_ANY`` for a key with no explicit channel (the default: a plain
+    "Deny" applies to every channel).
+    """
+    triples: set[tuple[str, str, str]] = set()
+    l3s: set[tuple[str, str]] = set()
+    for key, verdict in (getattr(st, "signoffs", None) or {}).items():
+        if _norm(verdict) != "no":
+            continue
+        parsed = _parse_signoff_key(key)
+        if parsed is None:
+            continue
+        kind, obj, a, b = parsed
+        obj = _obj(obj) or OBJECT_ANY
+        if kind == "indicator":
+            triples.add((obj, _norm(a), _norm(b)))
+        else:
+            l3s.add((obj, _norm(a)))
+    return triples, l3s
 
 
 def stale_factor_keys(st: ProjectState, l3: object) -> list[str]:
@@ -241,7 +292,7 @@ def stale_factor_keys(st: ProjectState, l3: object) -> list[str]:
     out: list[str] = []
     for key in getattr(st, "signoffs", None) or {}:
         parsed = _parse_signoff_key(key)
-        if parsed is not None and parsed[0] == "factor" and _norm(parsed[1]) == target:
+        if parsed is not None and parsed[0] == "factor" and _norm(parsed[2]) == target:
             out.append(key)
     return out
 
@@ -298,16 +349,16 @@ def freeze_range_drops(st: ProjectState, option_id: str) -> None:
 
 
 def signoff_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
-    """Indicators 2.3 rejected, in the (l4, metric) key space everything filters on.
+    """Indicators 2.3 rejected, in the (l4, metric) key space everything filters
+    on, flattened across every model object.
 
-    Per-indicator denials are already in that space. Legacy per-L3 denials are
-    expanded against the indicator universe, so projects saved before sign-off
-    became indicator-granular keep their verdicts.
+    Used by ``model_selection``'s defensive union, which is still flat/global
+    (Task 6 will make it per-object — see the TODO there). Defined as the
+    union of :func:`signoff_drop_pairs_by_object`, which already expands
+    legacy per-L3 denials against the indicator universe.
     """
-    pairs, l3s = signoff_denied(st)
-    if l3s:
-        pairs |= {key for key, c in _universe(st).items() if _norm(c.get("l3")) in l3s}
-    return pairs
+    by_obj = signoff_drop_pairs_by_object(st)
+    return set().union(*by_obj.values()) if by_obj else set()
 
 
 def unticked_pairs(st: ProjectState) -> set[tuple[str, str]]:
@@ -361,8 +412,24 @@ def mapping_ignored_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]
 
 
 def signoff_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
-    # Object-aware sign-off keys land in Task 4; until then every denial is global.
-    return {OBJECT_ANY: signoff_drop_pairs(st)}
+    """Per-object breakdown of what 2.3 denied, keyed by model object.
+
+    A denial recorded under ``OBJECT_ANY`` (the default — see
+    :func:`signoff_key`) belongs to every channel; ``_object_drops`` is what
+    merges that bucket into a concrete object's own. Legacy per-L3 denials are
+    expanded against the (still object-agnostic) indicator universe, same as
+    the old flat ``signoff_drop_pairs``.
+    """
+    triples, l3s = _signoff_denied_by_object(st)
+    out: dict[str, set[tuple[str, str]]] = {}
+    for obj, l4, metric in triples:
+        out.setdefault(obj, set()).add((l4, metric))
+    if l3s:
+        uni = _universe(st)
+        for obj, l3 in l3s:
+            out.setdefault(obj, set()).update(
+                key for key, c in uni.items() if _norm(c.get("l3")) == l3)
+    return out
 
 
 def range_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:

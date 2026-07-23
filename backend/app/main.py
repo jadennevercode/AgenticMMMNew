@@ -837,12 +837,17 @@ class SignoffBody(BaseModel):
     card's "Accept all" / "Deny all" should send, so the write matches exactly
     what the card rendered — or `l3` alone as a fallback that fans the verdict
     over every indicator the ledger's universe currently attributes to that
-    factor. An empty `verdict` clears the entry back to un-reviewed."""
+    factor. An empty `verdict` clears the entry back to un-reviewed.
+
+    `object` names the model object (channel type) the verdict applies to;
+    left empty (the default) it applies to every channel — see
+    `ledger.OBJECT_ANY`."""
     l3: str = ""
     l4: str = ""
     indicator: str = ""
     pairs: list[dict] = []
     verdict: str = ""  # "yes" | "no" | ""
+    object: str = ""
 
 
 @app.put("/api/projects/{project_id}/signoff")
@@ -880,14 +885,14 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
             indicator = str(p.get("indicator", "")) if isinstance(p, dict) else ""
             if not indicator and not l4:
                 continue
-            keys.append(ledger.signoff_key(l4, indicator))
+            keys.append(ledger.signoff_key(l4, indicator, body.object))
             target_l4, target_ind = l4.strip().lower(), indicator.strip().lower()
             row = next((r for r in rows if r.l4.strip().lower() == target_l4
                         and r.indicator.strip().lower() == target_ind), None)
             if row is not None and row.l3:
                 stale_l3s.add(row.l3)
     elif body.l4 or body.indicator:
-        keys = [ledger.signoff_key(body.l4, body.indicator)]
+        keys = [ledger.signoff_key(body.l4, body.indicator, body.object)]
         target_l4 = body.l4.strip().lower()
         target_ind = body.indicator.strip().lower()
         row = next((r for r in ledger.indicator_ledger(st)
@@ -901,7 +906,7 @@ async def put_signoff(project_id: str, body: SignoffBody) -> dict:
         # now matches what the card displays instead of an arbitrary-L4 collapse.
         target = body.l3.strip().lower()
         rows = ledger.indicator_ledger(st)
-        keys = [ledger.signoff_key(r.l4, r.indicator) for r in rows
+        keys = [ledger.signoff_key(r.l4, r.indicator, body.object) for r in rows
                 if r.l3.strip().lower() == target]
         stale_l3s.add(body.l3)
     else:

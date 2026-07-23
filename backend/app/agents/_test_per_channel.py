@@ -61,6 +61,32 @@ def test_fixture() -> None:
     print("  fixture: MT + TT bound")
 
 
+def test_signoff_key_carries_object() -> None:
+    from app.agents import ledger
+    k_all = ledger.signoff_key("广告投放", "广告投放")
+    k_tt = ledger.signoff_key("广告投放", "广告投放", "TT")
+    assert k_all == "i:*:广告投放|广告投放", k_all
+    kind, obj, l4, metric = ledger._parse_signoff_key(k_tt)
+    assert (kind, obj, l4, metric) == ("indicator", "TT", "广告投放", "广告投放")
+    st = make_two_channel_state()
+    st.signoffs = {k_tt: "no"}
+    by_obj = ledger.signoff_drop_pairs_by_object(st)
+    assert ("广告投放", "广告投放") in by_obj.get("TT", set())
+    assert ("广告投放", "广告投放") not in by_obj.get("MT", set())
+    # A legacy unprefixed key still parses and applies to all objects.
+    st.signoffs = {"广告投放|广告投放": "no"}
+    by_obj = ledger.signoff_drop_pairs_by_object(st)
+    assert ("广告投放", "广告投放") in by_obj.get(ledger.OBJECT_ANY, set())
+    # A legacy pre-Task-4 "i:" key (no object segment) also still parses.
+    old_key = "i:广告投放|广告投放"
+    kind, obj, l4, metric = ledger._parse_signoff_key(old_key)
+    assert (kind, obj, l4, metric) == ("indicator", ledger.OBJECT_ANY, "广告投放", "广告投放")
+    st.signoffs = {old_key: "no"}
+    by_obj = ledger.signoff_drop_pairs_by_object(st)
+    assert ("广告投放", "广告投放") in by_obj.get(ledger.OBJECT_ANY, set())
+    print("  sign-off keys are object-aware, legacy keys still parse")
+
+
 def test_stat_drops_are_per_object() -> None:
     from app.agents import ledger
     # For this test we craft stat dispositions directly rather than fitting.
