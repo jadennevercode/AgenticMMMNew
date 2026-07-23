@@ -196,7 +196,7 @@ def test_2_6_honours_the_2_5x_variable_selection() -> None:
     victim.selected = False
 
     sel = model_selection(st)
-    assert victim.metric.strip().lower() not in (sel.include or frozenset())
+    assert victim.metric.strip().lower() not in (sel.include_for(victim.object) or frozenset())
     _run(data_agent.assemble_master_data, st, "2.6")
 
     adopted = {r["indicator"].strip().lower() for r in st.artifact("a-master-data").body["adopted"]}
@@ -243,8 +243,8 @@ def test_s4_training_fits_the_same_selection_s2_locked() -> None:
     from app.agents.dataset_cache import model_df, model_objects
     df = model_df(st)
     obj = model_objects(st)[0]
-    mf = build_model_frame(df, obj, exclude=sel.exclude, y_metric=sel.y_for(obj),
-                           include=sel.include)
+    mf = build_model_frame(df, obj, exclude=sel.exclude_for(obj), y_metric=sel.y_for(obj),
+                           include=sel.include_for(obj))
     # The frame S4 trains on carries the human's response and none of the
     # variables they unticked.
     assert sel.y_for(obj) is None or mf.y_col

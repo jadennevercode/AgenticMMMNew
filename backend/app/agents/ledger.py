@@ -118,14 +118,30 @@ class LedgerRow:
 class ModelSelection:
     """The resolved model input every downstream consumer must filter on.
 
-    ``exclude``/``include``/``y``/``params`` map 1:1 onto ``build_model_frame``
-    and ``run_mmm`` arguments, so a consumer cannot accidentally honour some
-    layers and skip others.
+    ``exclude``/``include`` are keyed per model object (channel type): a
+    per-object layer (quality, statistical, selection) can reach a different
+    verdict per channel, so one channel's drop must never exclude an indicator
+    from another channel's fit. Still-global layers (mapping, sign-off, and any
+    layer that has not run yet) record under ``OBJECT_ANY``, which every object
+    inherits — see :meth:`exclude_for` / :meth:`include_for`. ``y``/``params``
+    map 1:1 onto ``build_model_frame`` and ``run_mmm`` arguments, so a consumer
+    cannot accidentally honour some layers and skip others.
     """
-    exclude: frozenset[tuple[str, str]] = frozenset()
-    include: Optional[frozenset[str]] = None
+    exclude: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
+    include: dict[str, Optional[frozenset[str]]] = field(default_factory=dict)
     y: dict[str, str] = field(default_factory=dict)
     params: Optional[OlsParams] = None
+
+    def exclude_for(self, obj: str) -> frozenset[tuple[str, str]]:
+        """This object's own drops, plus whatever a still-global layer dropped
+        for everyone (``OBJECT_ANY``)."""
+        return frozenset(self.exclude.get(obj, frozenset()) | self.exclude.get(OBJECT_ANY, frozenset()))
+
+    def include_for(self, obj: str) -> Optional[frozenset[str]]:
+        """This object's own ticked set, falling back to a global one;
+        ``None`` means the legacy auto-select path (no setup confirmed yet)."""
+        v = self.include.get(obj)
+        return v if v is not None else self.include.get(OBJECT_ANY)
 
     def y_for(self, obj: str) -> Optional[str]:
         return self.y.get(obj) or None
@@ -339,6 +355,13 @@ def freeze_range_drops(st: ProjectState, option_id: str) -> None:
 
     Registered on the engine so it runs the instant the gate is answered, while
     ``analysis['ols_flagged']`` still describes the fit the human was looking at.
+
+    Freezes both shapes: the legacy flat ``droppedPairs`` (still read by
+    :func:`range_drop_pairs`, and by anything saved before this per-object
+    freeze existed) and the new per-object ``droppedPairsByObject`` (read by
+    :func:`range_drop_pairs_by_object`) — each channel screens its own driver
+    universe (Task 5), so the same indicator can be out-of-range in one channel
+    and fine in another; freezing one flat set would drop it everywhere.
     """
     if option_id != "drop":
         return
@@ -346,15 +369,25 @@ def freeze_range_drops(st: ProjectState, option_id: str) -> None:
     if dec is None or not dec.resolution:
         return
     dec.resolution["droppedPairs"] = [list(p) for p in sorted(ols_flagged_pairs(st))]
+    by_object: dict[str, set[tuple[str, str]]] = {}
+    for f in st.analysis.get("ols_flagged") or []:
+        if not isinstance(f, dict):
+            continue
+        obj = _obj(f.get("object")) or OBJECT_ANY
+        by_object.setdefault(obj, set()).add(_norm_pair(f.get("l4", ""), f.get("indicator", "")))
+    dec.resolution["droppedPairsByObject"] = {
+        obj: [list(p) for p in sorted(pairs)] for obj, pairs in sorted(by_object.items())
+    }
 
 
 def signoff_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
     """Indicators 2.3 rejected, in the (l4, metric) key space everything filters
     on, flattened across every model object.
 
-    Used by ``model_selection``'s defensive union, which is still flat/global
-    (Task 6 will make it per-object — see the TODO there). Defined as the
-    union of :func:`signoff_drop_pairs_by_object`, which already expands
+    Kept as a flat/global view for callers that only care whether an indicator
+    was denied anywhere (``model_selection`` now reads the per-object
+    breakdown directly — see :func:`signoff_drop_pairs_by_object`). Defined as
+    the union of :func:`signoff_drop_pairs_by_object`, which already expands
     legacy per-L3 denials against the indicator universe.
     """
     by_obj = signoff_drop_pairs_by_object(st)
@@ -433,8 +466,28 @@ def signoff_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, s
 
 
 def range_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
-    # d-2.5 freeze becomes per-object in Task 6; until then it is global.
-    return {OBJECT_ANY: range_drop_pairs(st)}
+    """Per-object breakdown of what the human dropped at the ``d-2.5`` range gate.
+
+    Read from ``droppedPairsByObject``, frozen by :func:`freeze_range_drops` at
+    the moment the gate was answered. Falls back to the legacy flat
+    ``droppedPairs`` (via :func:`range_drop_pairs`), applied under
+    ``OBJECT_ANY`` so every object still inherits it, for resolutions frozen
+    before this per-object shape existed.
+    """
+    dec = st.decisions.get("d-2.5")
+    res = (dec.resolution or {}) if dec else {}
+    if res.get("optionId") != "drop":
+        return {}
+    frozen = res.get("droppedPairsByObject")
+    if frozen is None:
+        return {OBJECT_ANY: range_drop_pairs(st)}
+    out: dict[str, set[tuple[str, str]]] = {}
+    for obj, pairs in frozen.items():
+        out[_obj(obj) or OBJECT_ANY] = {
+            (_norm(p[0]), _norm(p[1])) for p in pairs
+            if isinstance(p, (list, tuple)) and len(p) == 2
+        }
+    return out
 
 
 # Each layer's own rejection set, in its own key space.
@@ -574,10 +627,10 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
     ``inherited`` rather than ruling again. That inheritance is the whole point:
     it is what stops a 2.2-dropped indicator from being re-scored at 2.4, from
     being re-offered at 2.5x, and from re-entering the master table at 2.6. A
-    layer that is still global (mapping, sign-off, range) rules the same for
-    every object via ``OBJECT_ANY``; a layer that is per-object (quality,
-    statistical, selection) can reach a different verdict per channel — the
-    same indicator can die in one channel and survive in another.
+    layer that is still global (mapping, sign-off) rules the same for every
+    object via ``OBJECT_ANY``; a layer that is per-object (quality,
+    statistical, selection, range) can reach a different verdict per channel —
+    the same indicator can die in one channel and survive in another.
     """
     from app.agents.dataset_cache import model_objects
 
@@ -664,7 +717,7 @@ def indicator_ledger(st: ProjectState) -> tuple[LedgerRow, ...]:
             else:
                 rule("selection", STATUS_PENDING, "The model setup has not been proposed yet.")
 
-            # 2.5r — the ROI / contribution range check. Still global until Task 6.
+            # 2.5r — the ROI / contribution range check, this object's own frozen drops.
             if _matches(key, r_drop):
                 rule("range", STATUS_REJECTED,
                      "Outside its knowledge-base ROI / contribution band; dropped at the d-2.5 gate.")
@@ -738,37 +791,54 @@ def rejected_pairs(st: ProjectState, object: str | None = None) -> frozenset[tup
 def model_selection(st: ProjectState) -> ModelSelection:
     """The one resolved selection every downstream fit must use.
 
-    ``include`` stays ``None`` until 2.5 has proposed a setup — that is the
-    legacy auto-select path, which keeps reference/demo projects (and any
-    project that has not reached 2.5) fitting exactly as before.
+    ``exclude``/``include`` are resolved per model object: a per-object layer
+    (quality, statistical, selection) can drop or keep an indicator in one
+    channel without touching another, so the same key can be excluded from
+    one object's fit and included in another's. ``include_for(obj)`` stays
+    ``None`` until 2.5 has proposed a setup — that is the legacy auto-select
+    path, which keeps reference/demo projects (and any project that has not
+    reached 2.5) fitting exactly as before.
     """
-    ledger = indicator_ledger(st)
-    # The scorecards (and sign-off) are unioned in directly as well as via the
-    # ledger: they can name a pair the current long table no longer carries —
-    # or, for sign-off, a pair the (still-imperfect) driver universe never
-    # carried at all (C1) — and an exclude entry for an absent indicator is
-    # free. `include` below stays metric-only and is never widened by this.
-    # TODO(Task 6): this exclude set is flat across model objects — once
-    # x_candidates become per-object, one object's un-tick must NOT exclude
-    # that variable from every object's fit; Task 6 must key include/exclude
-    # per object instead of unioning one global exclude set here.
-    exclude = frozenset({r.key for r in ledger if not r.adopted}
-                        | quality_drop_pairs(st) | stat_drop_pairs(st)
-                        | signoff_drop_pairs(st))
+    from app.agents.dataset_cache import model_objects
 
+    ledger = indicator_ledger(st)
     cfg: OlsConfig | None = getattr(st, "ols_config", None)
-    include: frozenset[str] | None = None
+
+    exclude: dict[str, frozenset[tuple[str, str]]] = {}
+    include: dict[str, Optional[frozenset[str]]] = {}
+    for obj in (model_objects(st) or [OBJECT_ANY]):
+        # This object's own ledger rows, plus whatever a still-global layer
+        # (mapping, sign-off) rejected for everyone (OBJECT_ANY rows).
+        obj_rows = [r for r in ledger if r.object in (obj, OBJECT_ANY)]
+        adopted = {r.key for r in obj_rows if r.adopted}
+        # The scorecards (and sign-off) are unioned in directly as well as via
+        # the ledger: they can name a pair the current long table no longer
+        # carries — or, for sign-off, a pair the (still-imperfect) driver
+        # universe never carried at all (C1) — and an exclude entry for an
+        # absent indicator is free.
+        exclude[obj] = frozenset(
+            {r.key for r in obj_rows if not r.adopted}
+            | _object_drops(quality_drop_pairs_by_object(st), obj)
+            | _object_drops(stat_drop_pairs_by_object(st), obj)
+            | _object_drops(signoff_drop_pairs_by_object(st), obj)
+        )
+        if cfg is not None and cfg.x_candidates:
+            # A tick only counts if the indicator is still adopted for THIS
+            # object — a stale config must never resurrect what a later
+            # review rejected, and one channel's tick must never leak into
+            # another's fit.
+            include[obj] = frozenset(
+                _norm(c.metric) for c in cfg.x_candidates
+                if c.selected
+                and (_obj(getattr(c, "object", "")) or OBJECT_ANY) in (OBJECT_ANY, obj)
+                and _norm_pair(c.l4, c.metric) in adopted
+            )
+        else:
+            include[obj] = None
+
     y: dict[str, str] = {}
     params: OlsParams | None = None
     if cfg is not None:
-        if cfg.x_candidates:
-            # A tick only counts if the indicator is still adopted — a stale
-            # config must never resurrect what a later review rejected.
-            adopted = {r.key for r in ledger if r.adopted}
-            include = frozenset(
-                _norm(c.metric) for c in cfg.x_candidates
-                if c.selected and _norm_pair(c.l4, c.metric) in adopted
-            )
         y = {c.object: c.metric for c in cfg.y if c.metric}
         # The 2.3 anomaly handlings are folded in here rather than stored on the
         # params: the review is their source of truth, so a stale params draft

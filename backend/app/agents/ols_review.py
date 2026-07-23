@@ -25,6 +25,7 @@ from app.agents.ledger import (
     LAYER_LABEL,
     LAYER_TASK,
     OBJECT_ANY,
+    ModelSelection,
     _matches,
     _obj,
     _object_drops,
@@ -269,7 +270,7 @@ def y_metric_for(cfg: OlsConfig | None, obj: str) -> str | None:
 
 def _collect_records(
     st: ProjectState,
-    exclude: frozenset[tuple[str, str]],
+    sel: ModelSelection,
     cfg: OlsConfig | None = None,
     *,
     eng=None,
@@ -280,6 +281,10 @@ def _collect_records(
     When ``cfg`` is present the fit honours the human's confirmed setup — the Y
     they chose, the X they ticked, and their transform/control parameters.
     Without it we fall back to the legacy auto-fit so old projects still run.
+
+    ``sel`` is the resolved :class:`ModelSelection` — its exclude set is read
+    per object (``sel.exclude_for(obj)``) so one channel's drop never excludes
+    an indicator from another channel's fit.
 
     ``eng``/``task_id`` record each object's regression as an explicit
     ``model.ols`` tool invocation; without them the fit runs untraced.
@@ -301,7 +306,7 @@ def _collect_records(
                 eng, st, task_id, "model.ols",
                 f"{obj} · Y={y_metric or 'auto'} · {len(inc) if inc else 'auto'} X",
                 get_tool("model.ols").run, df, obj,
-                adstock=0.5, hill_half=1.0, exclude=exclude,
+                adstock=0.5, hill_half=1.0, exclude=sel.exclude_for(obj),
                 y_metric=y_metric, include=inc, params=params,
                 summarize=lambda r: f"R²={r.r2:.3f} · {int(r.n_obs)} obs · {len(r.drivers)} drivers",
             )
@@ -461,7 +466,6 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
     # One resolved selection — the same one 2.6 and 3.2 fit on, so what the tree
     # shows as in-model is exactly what the master table and training will carry.
     sel = model_selection(st)
-    exclude = sel.exclude
     # Where each rejected indicator died, for the tree's `droppedBy` column.
     # Keyed by (object, key): a rejection at a per-object layer (quality,
     # statistical, selection) only applies to that channel, so the same
@@ -482,7 +486,7 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
                      "they are confirmed."),
         }
         return body, {}, []
-    objects, prefit, records = _collect_records(st, exclude, cfg, eng=eng, task_id=task_id)
+    objects, prefit, records = _collect_records(st, sel, cfg, eng=eng, task_id=task_id)
 
     industry = getattr(getattr(st, "meta", None), "industry", None)
     idx = build_range_index(getattr(industry, "l1", None), getattr(industry, "l2", None))
@@ -580,7 +584,11 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
             "is a revenue/spend ratio.")
     body = {"objects": objects, "tree": tree, "summary": summary,
             "setup": _setup_section(cfg, objects), "note": note}
-    flagged = [{"l4": r["l4"], "indicator": r["indicator"], "reason": r["flagReason"]}
+    # `object` rides along so the d-2.5 gate can freeze the drop per channel
+    # (`ledger.freeze_range_drops`) — the same indicator can be out of range in
+    # one channel and fine in another (Task 5's per-object screening).
+    flagged = [{"l4": r["l4"], "indicator": r["indicator"], "reason": r["flagReason"],
+               "object": r["object"]}
                for r in tree if r["status"] == "review"]
     return body, prefit, flagged
 

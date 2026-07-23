@@ -42,8 +42,8 @@ async def train_models(eng: Engine, st: ProjectState, task: dict) -> None:
     conv_rows: list[list[str]] = []
     for obj in objects:
         try:
-            cands = make_candidates(df, obj, n=3, exclude=sel.exclude,
-                                    y_metric=sel.y_for(obj), include=sel.include,
+            cands = make_candidates(df, obj, n=3, exclude=sel.exclude_for(obj),
+                                    y_metric=sel.y_for(obj), include=sel.include_for(obj),
                                     params=sel.params)
             candidates[obj] = [c.to_dict() for c in cands]
             conv_rows.append([obj, f"{len(cands)} candidates", "converged"])

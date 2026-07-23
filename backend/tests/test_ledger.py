@@ -8,6 +8,7 @@ dataset; no LLM calls. Runnable with pytest or plain python.
 """
 from __future__ import annotations
 
+from app.agents.dataset_cache import model_objects
 from app.agents.ledger import (
     STATUS_INHERITED,
     STATUS_REJECTED,
@@ -70,7 +71,10 @@ def test_quality_drop_is_inherited_by_every_later_layer() -> None:
     after = [v for v in row.verdicts if v.layer in ("signoff", "statistical", "selection", "range")]
     assert all(v.status == STATUS_INHERITED for v in after), \
         "a later layer re-ruling on a dropped indicator is exactly the leak this prevents"
-    assert key in model_selection(st).exclude
+    # A quality drop has no `object` on the row, so it lands under OBJECT_ANY —
+    # every real model object inherits it.
+    sel = model_selection(st)
+    assert all(key in sel.exclude_for(obj) for obj in model_objects(st))
 
 
 def test_statistical_drop_rejects_and_is_excluded_from_the_selection() -> None:
@@ -79,7 +83,10 @@ def test_statistical_drop_rejects_and_is_excluded_from_the_selection() -> None:
 
     row = next(r for r in indicator_ledger(st) if r.key == key)
     assert row.rejected_at == "statistical" and not row.adopted
-    assert key in model_selection(st).exclude
+    # `_stat_drop` doesn't pin an object, so the drop lands under OBJECT_ANY —
+    # every real model object inherits it.
+    sel = model_selection(st)
+    assert all(key in sel.exclude_for(obj) for obj in model_objects(st))
 
 
 def test_signoff_rejects_one_indicator_without_taking_its_siblings() -> None:
@@ -100,7 +107,9 @@ def test_signoff_rejects_one_indicator_without_taking_its_siblings() -> None:
     st.signoffs = {signoff_key(target.l4, target.indicator): "no"}
     hit = next(r for r in indicator_ledger(st) if r.key == target.key)
     assert not hit.adopted and hit.rejected_at == "signoff"
-    assert target.key in model_selection(st).exclude
+    # `signoff_key` defaults to OBJECT_ANY — every real model object inherits it.
+    sel = model_selection(st)
+    assert all(target.key in sel.exclude_for(obj) for obj in model_objects(st))
     if sibling is not None:
         assert next(r for r in indicator_ledger(st) if r.key == sibling.key).adopted, \
             "denying one indicator must not deny its L3 siblings"
@@ -151,9 +160,9 @@ def test_selection_layer_rejects_unticked_variables() -> None:
     assert not led[drop.key].adopted and led[drop.key].rejected_at == "selection"
 
     sel = model_selection(st)
-    assert sel.include is not None
-    assert keep.metric.strip().lower() in sel.include
-    assert drop.metric.strip().lower() not in sel.include
+    assert sel.include_for(keep.object) is not None
+    assert keep.metric.strip().lower() in (sel.include_for(keep.object) or frozenset())
+    assert drop.metric.strip().lower() not in (sel.include_for(drop.object) or frozenset())
     assert sel.y_for("MT") == "Y"
 
 
@@ -169,8 +178,8 @@ def test_selection_include_never_carries_a_rejected_indicator() -> None:
         metric=victim.metric, selected=True)])
 
     sel = model_selection(st)
-    assert victim.metric.strip().lower() not in (sel.include or frozenset())
-    assert key in sel.exclude
+    assert victim.metric.strip().lower() not in (sel.include_for(victim.object) or frozenset())
+    assert all(key in sel.exclude_for(obj) for obj in model_objects(st))
 
 
 def test_funnel_layers_account_for_every_indicator() -> None:

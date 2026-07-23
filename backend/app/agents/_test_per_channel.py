@@ -229,6 +229,32 @@ def test_ols_tree_droppedby_is_per_object() -> None:
     print("  ols tree droppedBy per object: 渠道库存 dropped-by-statistical in TT only")
 
 
+def test_model_selection_is_per_object() -> None:
+    """Task 6: `ModelSelection.exclude`/`include` are resolved per model object,
+    so one channel's drop must not exclude an indicator from another channel's
+    fit.
+
+    Built directly (as `test_stat_drops_are_per_object` / `test_ledger_is_per_object`
+    above do) rather than via `build_stat_scorecard()`: the fixture's TT 渠道库存
+    is a constant series, which the real scorer excludes from scoring entirely
+    (see `test_stat_scorecard_is_per_object`) rather than scoring it "drop" — so
+    a natural scorecard never carries the TT disposition this test needs to force.
+    """
+    from app.agents.ledger import model_selection
+    from app.domain.models import StatScorecard, StatScoreRow
+    st = make_two_channel_state()
+    st.stat_scorecard = StatScorecard(rows=[
+        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+                     disposition="include"),
+        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                     disposition="drop"),
+    ])
+    sel = model_selection(st)
+    assert ("渠道库存", "渠道库存") in sel.exclude_for("TT")
+    assert ("渠道库存", "渠道库存") not in sel.exclude_for("MT")
+    print("  model_selection excludes per object")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

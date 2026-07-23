@@ -69,19 +69,30 @@ def adopted_mask(st: ProjectState, df: pd.DataFrame) -> pd.Series:
 
     The KPI is the response, not a factor — no layer rules on it, so it is never
     in the ledger and must be admitted explicitly or the table loses its Y.
+
+    ``model_selection``'s ``exclude``/``include`` are keyed per model object
+    (channel type) so 2.5r/2.6/3.2's per-object fits never let one channel's
+    drop or tick leak into another's. This mask still runs over every
+    channel_type row in one pass, so — deliberately, pending the per-row
+    channel-aware pass — it flattens each into the union across every object,
+    the same aggregate behaviour this had before that per-object split.
+    Narrowing this to each row's own channel_type is Task 7's job, not this one.
     """
     sel = model_selection(st)
     l4 = df["l4"].astype("string").map(_lower) if "l4" in df.columns else pd.Series("", index=df.index)
     metric = df["metric"].astype("string").map(_lower)
 
-    metric_only = {m for excl_l4, m in sel.exclude if not excl_l4}
+    exclude = frozenset().union(*sel.exclude.values()) if sel.exclude else frozenset()
+    metric_only = {m for excl_l4, m in exclude if not excl_l4}
     rejected = pd.Series(
-        [(a, b) in sel.exclude or b in metric_only for a, b in zip(l4, metric)],
+        [(a, b) in exclude or b in metric_only for a, b in zip(l4, metric)],
         index=df.index,
     )
     keep = ~rejected
-    if sel.include is not None:
-        keep &= metric.isin(sel.include)
+    include_sets = [v for v in sel.include.values() if v is not None]
+    if include_sets:
+        include = frozenset().union(*include_sets)
+        keep &= metric.isin(include)
     return keep | _kpi_mask(df)
 
 

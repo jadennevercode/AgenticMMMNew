@@ -1018,8 +1018,8 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     total_features = 0
     for obj in model_objects(st):
         try:
-            mf = build_model_frame(df, obj, exclude=sel.exclude,
-                                   y_metric=sel.y_for(obj), include=sel.include)
+            mf = build_model_frame(df, obj, exclude=sel.exclude_for(obj),
+                                   y_metric=sel.y_for(obj), include=sel.include_for(obj))
         except Exception as e:  # noqa: BLE001 — one unfittable object must not
             # sink the others; the object reports its own error on the card.
             obj_rows.append({"object": obj, "months": 0, "features": 0,
