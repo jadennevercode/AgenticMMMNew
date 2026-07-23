@@ -592,10 +592,12 @@ def _universe(st: ProjectState) -> dict[tuple[str, str], dict]:
     except Exception:  # noqa: BLE001 — no bound data yet; the ledger is simply empty
         return {}
 
+    from app.agents.vocabulary import vocab_for
+    vocab = vocab_for(st)
     universe: dict[tuple[str, str], dict] = {}
     for obj in objects:
         try:
-            cands = driver_candidates_by_l4(df, obj)
+            cands = driver_candidates_by_l4(df, obj, vocab)
         except Exception:  # noqa: BLE001
             continue
         for c in cands:

@@ -694,6 +694,27 @@ class KnowledgeNote(CamelModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class VocabRules(CamelModel):
+    """Per-industry model classification vocabulary override (on a `rules` template).
+
+    Every field is optional; an empty list falls back to the built-in default
+    (``app.agents.vocabulary.DEFAULT_VOCAB``), so a partial override changes only
+    the banks it names and no current number moves without an explicit edit.
+    Interview role tokens live here too so the whole classification vocabulary is
+    one editable Knowledge surface."""
+    y_metric_types: list[str] = Field(default_factory=list, alias="yMetricTypes")
+    y_keywords: list[str] = Field(default_factory=list, alias="yKeywords")
+    y_tags: list[str] = Field(default_factory=list, alias="yTags")
+    driver_tags: list[str] = Field(default_factory=list, alias="driverTags")
+    spend_types: list[str] = Field(default_factory=list, alias="spendTypes")
+    spend_keywords: list[str] = Field(default_factory=list, alias="spendKeywords")
+    volume_keywords: list[str] = Field(default_factory=list, alias="volumeKeywords")
+    money_keywords: list[str] = Field(default_factory=list, alias="moneyKeywords")
+    y_l1_labels: list[str] = Field(default_factory=list, alias="yL1Labels")
+    driver_l1_labels: list[str] = Field(default_factory=list, alias="driverL1Labels")
+    role_tokens: list[str] = Field(default_factory=list, alias="roleTokens")
+
+
 class KnowledgeTemplate(CamelModel):
     """One reusable, editable section of an industry knowledge pack.
 
@@ -712,6 +733,9 @@ class KnowledgeTemplate(CamelModel):
     rule_rows: list[RuleRow] = Field(default_factory=list, alias="ruleRows")
     knowledge_notes: list[KnowledgeNote] = Field(
         default_factory=list, alias="knowledgeNotes")
+    # Optional classification-vocabulary override (only meaningful on a `rules`
+    # template); None → the built-in DEFAULT_VOCAB is used. See app.agents.vocabulary.
+    vocab: Optional[VocabRules] = None
     updated_at: str = Field(default="", alias="updatedAt")
 
 

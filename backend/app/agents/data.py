@@ -1070,9 +1070,11 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
 
     obj_rows: list[dict] = []
     total_features = 0
+    from app.agents.vocabulary import vocab_for
+    _vocab = vocab_for(st)
     for obj in model_objects(st):
         try:
-            mf = build_model_frame(df, obj, exclude=sel.exclude_for(obj),
+            mf = build_model_frame(df, obj, vocab=_vocab, exclude=sel.exclude_for(obj),
                                    y_metric=sel.y_for(obj), include=sel.include_for(obj))
         except Exception as e:  # noqa: BLE001 — one unfittable object must not
             # sink the others; the object reports its own error on the card.

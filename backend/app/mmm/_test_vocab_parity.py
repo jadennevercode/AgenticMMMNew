@@ -86,6 +86,20 @@ def test_vocab_override_reclassifies() -> None:
     print("  vocab override reclassifies")
 
 
+def test_vocab_rules_model_merges() -> None:
+    # A VocabRules payload (as stored on a Knowledge `rules` template) merges into
+    # a Vocab, overriding only the banks it names.
+    from app.agents.vocabulary import DEFAULT_VOCAB, _merge
+    from app.domain.models import VocabRules
+    vr = VocabRules(driverL1Labels=["marketing factor", "my factor"], yKeywords=["salesx"])
+    merged = _merge(DEFAULT_VOCAB, vr)
+    assert merged.driver_l1_labels == frozenset({"MARKETING FACTOR", "MY FACTOR"}), merged.driver_l1_labels
+    assert merged.y_keywords == frozenset({"salesx"}), merged.y_keywords
+    # unset banks fall back to the default
+    assert merged.spend_keywords == DEFAULT_VOCAB.spend_keywords
+    print("  VocabRules model merges into Vocab")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

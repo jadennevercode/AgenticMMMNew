@@ -149,11 +149,14 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
     objects = model_objects(st)
     stats = _stat_index(st)
 
+    from app.agents.vocabulary import vocab_for
+    vocab = vocab_for(st)
+
     # ── Y: one candidate list per model object; recommend the KPI volume ──
     y_cands: list[OlsYCandidate] = []
     y_choice: list[OlsYChoice] = []
     for obj in objects:
-        cands = y_candidates(df, obj)
+        cands = y_candidates(df, obj, vocab)
         for i, c in enumerate(cands):
             rec = i == 0  # y_candidates() puts the volume-preferring default first
             y_cands.append(OlsYCandidate(
@@ -177,7 +180,7 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
     x_cands: list[OlsXCandidate] = []
     for obj in objects:
         seen: dict[tuple[str, str], OlsXCandidate] = {}
-        for c in driver_candidates_by_l4(df, obj):
+        for c in driver_candidates_by_l4(df, obj, vocab):
             key = _norm_pair(c["l4"], c["metric"])
             if key in seen:
                 continue
