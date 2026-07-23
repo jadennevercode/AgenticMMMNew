@@ -914,7 +914,7 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
         return {}
 
 
-def accept_factor_rows(st: ProjectState, sources: set[str]) -> None:
+def accept_factor_rows(st: ProjectState, source_set: set[str]) -> None:
     """Flip this gate's still-proposed rows to accepted; respect manual rejects.
 
     `proposed` is excluded by mapping._ACTIVE_STATUSES, so a row only reaches the
@@ -925,7 +925,7 @@ def accept_factor_rows(st: ProjectState, sources: set[str]) -> None:
     if st.factor_tree is None:
         return
     for r in st.factor_tree.rows:
-        if r.status == "proposed" and r.source in sources:
+        if r.status == "proposed" and r.source in source_set:
             r.status = "accepted"
     art = st.artifact("a-factor-tree")
     if art is not None:
