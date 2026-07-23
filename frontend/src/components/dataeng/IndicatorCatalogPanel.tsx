@@ -162,8 +162,11 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
             </div>
             <table className="w-full border-collapse text-[12px]">
               <thead className="bg-muted/50 text-left text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-1.5 font-medium">Factor path</th>
+                <tr className="uppercase tracking-[0.12em] text-[10px]">
+                  <th className="px-2 py-1.5 font-semibold">L1</th>
+                  <th className="px-2 py-1.5 font-medium">L2</th>
+                  <th className="px-2 py-1.5 font-medium">L3</th>
+                  <th className="px-2 py-1.5 font-medium">L4</th>
                   <th className="px-3 py-1.5 font-medium">Indicator</th>
                   <th className="px-3 py-1.5 font-medium">Status</th>
                   <th className="px-3 py-1.5 font-medium">Data asset / note</th>
@@ -171,11 +174,17 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
                 </tr>
               </thead>
               <tbody>
-                {factorMap.rows.map((r) => (
+                {factorMap.rows.map((r, i, arr) => {
+                  const prev = arr[i - 1]
+                  const f1 = !prev || prev.l1 !== r.l1
+                  const f2 = f1 || prev.l2 !== r.l2
+                  const f3 = f2 || prev.l3 !== r.l3
+                  return (
                   <tr key={r.rowId} className="border-t border-border align-top">
-                    <td className="px-4 py-1.5 font-mono text-[11px] text-muted-foreground">
-                      {[r.l1, r.l2, r.l3, r.l4].filter(Boolean).join(' › ') || '—'}
-                    </td>
+                    <td className="px-2 py-1.5 text-[11px] font-semibold">{f1 ? r.l1 || '—' : ''}</td>
+                    <td className="px-2 py-1.5 text-[11px] text-foreground/80">{f2 ? r.l2 : ''}</td>
+                    <td className="px-2 py-1.5 text-[11px] text-foreground/70">{f3 ? r.l3 : ''}</td>
+                    <td className="px-2 py-1.5 text-[11px] text-muted-foreground">{r.l4}</td>
                     <td className="px-3 py-1.5 font-medium">{r.indicator || '—'}</td>
                     <td className="px-3 py-1.5"><StatusBadge status={r.status} /></td>
                     <td className="px-3 py-1.5 text-muted-foreground">
@@ -213,7 +222,8 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
                       )}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </Card>
