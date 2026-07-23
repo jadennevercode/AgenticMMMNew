@@ -94,6 +94,30 @@ def test_stat_scorecard_is_per_object() -> None:
     print("  stat scorecard per object")
 
 
+def test_ledger_is_per_object() -> None:
+    # Built directly (as in test_stat_drops_are_per_object above) rather than via
+    # build_stat_scorecard(): the fixture's TT 渠道库存 is a constant series, which
+    # the real scorer excludes from scoring entirely (see
+    # test_stat_scorecard_is_per_object) rather than scoring it "drop" — so a
+    # natural scorecard never carries the TT disposition this test needs to force.
+    from app.agents import ledger
+    from app.domain.models import StatScorecard, StatScoreRow
+    st = make_two_channel_state()
+    # Force TT to drop 渠道库存, MT to keep it.
+    st.stat_scorecard = StatScorecard(rows=[
+        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+                     disposition="include"),
+        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                     disposition="drop"),
+    ])
+    rows = ledger.indicator_ledger(st)
+    tt = next(r for r in rows if r.object == "TT" and r.indicator == "渠道库存")
+    mt = next(r for r in rows if r.object == "MT" and r.indicator == "渠道库存")
+    assert not tt.adopted and tt.rejected_at == "statistical", (tt.rejected_at, tt.adopted)
+    assert mt.adopted, mt.rejected_at
+    print("  ledger per object: 渠道库存 dropped in TT, kept in MT")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

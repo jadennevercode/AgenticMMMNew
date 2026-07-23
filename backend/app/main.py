@@ -971,7 +971,9 @@ async def get_indicator_ledger(project_id: str) -> dict:
             "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
                           "status": v.status, "note": v.note} for v in r.verdicts],
         } for r in rows],
-        "funnel": ledger.funnel(st),
+        # TODO(Task 7): serialize the per-object funnel; for now the combined
+        # rollup keeps this endpoint's response shape unchanged.
+        "funnel": ledger.funnel(st)["combined"],
         "adopted": sum(1 for r in rows if r.adopted),
         "rejected": sum(1 for r in rows if not r.adopted),
     }
