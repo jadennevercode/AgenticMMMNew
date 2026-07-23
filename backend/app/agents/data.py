@@ -1030,7 +1030,24 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
                          "features": len(mf.x_cols), "y": mf.y_col})
 
     led = indicator_ledger(st)
-    rejected = [r for r in led if not r.adopted]
+    # interim: dedup by indicator key; Task 7 replaces with per-object grouping
+    # `indicator_ledger` now yields one LedgerRow per (object, l4, metric), so a
+    # multi-object project (danone-mizone has 4) repeats every indicator once
+    # per object. Dedup by the indicator identity key here — first occurrence
+    # wins — so the 2.6 lock-gate lists/counts aren't channel-inflated.
+    adopted_rows: list = []
+    seen_adopted: set = set()
+    for r in led:
+        if r.adopted and r.key not in seen_adopted:
+            seen_adopted.add(r.key)
+            adopted_rows.append(r)
+    rejected_rows: list = []
+    seen_rejected: set = set()
+    for r in led:
+        if not r.adopted and r.key not in seen_rejected:
+            seen_rejected.add(r.key)
+            rejected_rows.append(r)
+    rejected = rejected_rows
     body = {
         "objects": obj_rows,
         # TODO(Task 7): serialize the per-object funnel; for now the combined
@@ -1038,13 +1055,13 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
         "funnel": funnel(st)["combined"],
         "dimensions": dimensions(st),
         "adopted": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
-                     "indicator": r.indicator} for r in led if r.adopted],
+                     "indicator": r.indicator} for r in adopted_rows],
         "rejected": [{"l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
                       "indicator": r.indicator, "rejectedAt": r.rejected_at,
                       "reason": r.reason,
                       "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
                                     "status": v.status, "note": v.note} for v in r.verdicts]}
-                     for r in rejected],
+                     for r in rejected_rows],
         "note": ("The master table carries only the indicators that survived every filter "
                  "layer, over the response confirmed at 2.5y and the variables ticked at "
                  "2.5x. Slice it by product × channel × region below; every rejected "
@@ -1053,7 +1070,7 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     eng.produce(st, "a-master-data", body=body, state="proposed", agent="data")
     eng.set_analysis(st, "master_data", {
         "objects": len(obj_rows), "features": total_features,
-        "adopted": sum(1 for r in led if r.adopted), "rejected": len(rejected),
+        "adopted": len(adopted_rows), "rejected": len(rejected),
         "excluded": sorted(f"{r.l4} · {r.indicator}" for r in rejected)[:20],
     })
     by_layer: dict[str, int] = {}
@@ -1062,13 +1079,13 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     trail = ", ".join(f"{LAYER_LABEL.get(k, k)} {v}" for k, v in by_layer.items()) or "none"
     eng.add_findings(st, task["id"], [TaskFinding(
         text=f"Master data assembled: {len(obj_rows)} model object(s), {total_features} feature "
-        f"column(s) from {sum(1 for r in led if r.adopted)} adopted indicator(s). "
+        f"column(s) from {len(adopted_rows)} adopted indicator(s). "
         f"Rejected along the way — {trail}. Review and lock it as the modeling input.",
         evidence=[EvidenceRef(artifactId="a-master-data")])])
     # Make the lock gate state what is actually being locked.
     if "d-2.6" in st.decisions:
         st.decisions["d-2.6"].question = (
             f"The master table carries {total_features} feature column(s) across "
-            f"{len(obj_rows)} model object(s), assembled from {sum(1 for r in led if r.adopted)} "
+            f"{len(obj_rows)} model object(s), assembled from {len(adopted_rows)} "
             f"adopted indicator(s) ({len(rejected)} rejected upstream). Lock it as the "
             "modeling input?")

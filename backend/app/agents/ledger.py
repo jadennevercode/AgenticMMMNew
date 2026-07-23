@@ -681,6 +681,10 @@ def model_selection(st: ProjectState) -> ModelSelection:
     # or, for sign-off, a pair the (still-imperfect) driver universe never
     # carried at all (C1) — and an exclude entry for an absent indicator is
     # free. `include` below stays metric-only and is never widened by this.
+    # TODO(Task 6): this exclude set is flat across model objects — once
+    # x_candidates become per-object, one object's un-tick must NOT exclude
+    # that variable from every object's fit; Task 6 must key include/exclude
+    # per object instead of unioning one global exclude set here.
     exclude = frozenset({r.key for r in ledger if not r.adopted}
                         | quality_drop_pairs(st) | stat_drop_pairs(st)
                         | signoff_drop_pairs(st))
