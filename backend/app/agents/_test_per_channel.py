@@ -172,6 +172,63 @@ def test_ols_candidates_are_per_object() -> None:
     print("  OLS candidates + selection are per object")
 
 
+def test_ols_tree_droppedby_is_per_object() -> None:
+    """Task 5 regression guard: `build_ols_review`'s ``tree``/``rejected_by`` must
+    key per (object, factor), not collapse "last-object-wins" across channels —
+    the same bug shape `test_ledger_is_per_object` guards at the ledger layer,
+    now exercised through the real ``olsTree`` artifact body.
+
+    `resolve_factor_map(make_two_channel_state())` is empty (no factor tree on
+    the synthetic fixture), and the record-only leftover-sweep can never carry a
+    dropped-in-one-channel row (a locked/dropped candidate is never fit, so it
+    never becomes a ``records`` entry) — so a minimal one-row factor tree is
+    added here to drive the tree through its primary (fmap) path, matching how
+    a real project always has a factor tree by the time 2.5 runs.
+    """
+    from app.agents.ledger import indicator_ledger
+    from app.agents.ols_review import build_ols_proposal, build_ols_review
+    from app.agents.stat_scoring import build_stat_scorecard
+    from app.domain.models import FactorRow, FactorTree, StatScorecard, StatScoreRow
+
+    st = make_two_channel_state()
+    st.factor_tree = FactorTree(rows=[
+        FactorRow(id="f-stock", l1="COMMERCIAL FACTOR", l2="", l3="渠道",
+                   l4="渠道库存", indicator="渠道库存"),
+    ])
+    # Force the divergence: TT drops 渠道库存 at the statistical layer, MT keeps
+    # it — same pattern as test_ledger_is_per_object, built off the naturally
+    # scored MT row (so it still carries real pearson/vif/cv for 2.5's proposal)
+    # plus a synthetic TT row (TT's stock series is constant/degenerate in this
+    # fixture, so the real scorer never emits a row for it at all — see
+    # test_stat_scorecard_is_per_object).
+    card = build_stat_scorecard(st)
+    rows = [r if r.indicator != "渠道库存" else r.model_copy(update={"disposition": "include"})
+            for r in card.rows]
+    rows.append(StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                              disposition="drop"))
+    st.stat_scorecard = StatScorecard(rows=rows)
+    # Sanity check the fixture actually forces the divergence at the ledger
+    # layer before trusting the tree assertion below.
+    ledger_rows = {r.object: r for r in indicator_ledger(st) if r.indicator == "渠道库存"}
+    assert not ledger_rows["TT"].adopted and ledger_rows["TT"].rejected_at == "statistical"
+    assert ledger_rows["MT"].adopted
+
+    st.ols_config = build_ols_proposal(st)
+    body, _prefit, _flagged = build_ols_review(st, fit=True)
+    tree_rows = {r["object"]: r for r in body["tree"] if r["indicator"] == "渠道库存"}
+    assert set(tree_rows) == {"MT", "TT"}, tree_rows
+
+    tt = tree_rows["TT"]
+    assert tt["droppedBy"] == "statistical", tt
+    assert tt["status"] == "dropped", tt
+    assert tt["inModel"] is False, tt
+
+    mt = tree_rows["MT"]
+    assert mt["droppedBy"] == "", mt
+    assert mt["status"] != "dropped", mt
+    print("  ols tree droppedBy per object: 渠道库存 dropped-by-statistical in TT only")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
