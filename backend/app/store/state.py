@@ -106,6 +106,10 @@ class ProjectState(BaseModel):
     # was never persisted at all: the UI only mutated its local copy).
     # No alias — see the note on `ols_config`.
     signoffs: dict[str, str] = Field(default_factory=dict)
+    # S2 · 2.3: per-tab Graphic Walker chart specs the user saved in the Business
+    # Validation explorer, as {"specs": [...], "version": int}. Empty {} → the
+    # frontend falls back to the generated default tabs. NO alias (see ols_config).
+    validation_specs: dict = Field(default_factory=dict)
     # 2.1 Data Processing: factor rows the user explicitly ignores in the
     # FactorTree↔DataAssets mapping (rowId → note). A row is resolved when it is
     # either mapped by a published indicator or listed here; the 2.1 gate blocks
@@ -245,6 +249,9 @@ def heal_state(st: ProjectState) -> ProjectState:
             # existing.chosen_source is runtime — preserved across heal.
     for sid, ao in template.ai_choices.items():
         st.ai_choices.setdefault(sid, ao)
+    # Back-fill for projects saved before validation_specs existed.
+    if not hasattr(st, "validation_specs") or st.validation_specs is None:
+        st.validation_specs = {}
     # Prune entries removed from the blueprint.
     st.tasks = {tid: rt for tid, rt in st.tasks.items() if tid in template.tasks}
     st.decisions = {did: dr for did, dr in st.decisions.items() if did in template.decisions}
