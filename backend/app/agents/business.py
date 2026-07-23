@@ -822,12 +822,54 @@ async def pre_answer(eng: Engine, st: ProjectState, task: dict) -> None:
              "AI pre-answers added inline (knowledge for reference, to validate in interviews)", task["id"])
 
 
-def _load_minutes_text(st: ProjectState) -> tuple[str, str]:
-    """Interview minutes text — uploaded files only (no reference transcripts)."""
-    uploaded = sources.category_text(st.project_id, "interview_minutes", max_chars=9000)
-    if uploaded:
-        return uploaded, "uploaded minutes"
-    return "", "none"
+_MINUTES_PER_FILE_CHARS = 12000   # single-file cap; real transcripts are 1–9k
+_MAX_INSIGHTS = 3                  # merged insight cap (was [:2] on one call)
+
+
+def _minutes_files(st: ProjectState) -> list[tuple[str, str]]:
+    """Per-file interview text — uploaded interview_minutes only, no reference.
+
+    Each transcript is extracted and capped independently so every one reaches
+    the model, not just the first few that fit under a shared budget.
+    """
+    return sources.category_files(st.project_id, "interview_minutes",
+                                  per_file_cap=_MINUTES_PER_FILE_CHARS)
+
+
+def _merge_minutes_digests(results: list[dict]) -> dict:
+    """Merge per-transcript digests. Answers fill-first per question number, factor
+    changes dedup by (op, l1..l4, indicator), insights cap at _MAX_INSIGHTS."""
+    answers: dict[int, dict] = {}
+    changes: list[dict] = []
+    change_keys: set[tuple] = set()
+    insights: list[dict] = []
+    for res in results:
+        if not isinstance(res, dict):
+            continue
+        for a in res.get("answers", []) or []:
+            if not isinstance(a, dict):
+                continue
+            try:
+                n = int(a.get("n", 0))
+            except (TypeError, ValueError):
+                continue
+            if n <= 0 or n in answers:
+                continue
+            if str(a.get("answer", "")).strip():
+                answers[n] = a
+        for ch in res.get("factor_changes", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            key = (str(ch.get("op", "add")), str(ch.get("l1", "")), str(ch.get("l2", "")),
+                   str(ch.get("l3", "")), str(ch.get("l4", "")), str(ch.get("indicator", "")))
+            if key in change_keys:
+                continue
+            change_keys.add(key)
+            changes.append(ch)
+        for ins in res.get("insights", []) or []:
+            if isinstance(ins, dict) and len(insights) < _MAX_INSIGHTS:
+                insights.append(ins)
+    return {"answers": answers, "factor_changes": changes, "insights": insights}
 
 
 async def _minutes_answers(qlist: str, transcripts: str) -> dict:

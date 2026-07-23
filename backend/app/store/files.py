@@ -181,6 +181,28 @@ class ProjectFiles:
                     parts.append(f"### {rec.filename}\n{result.text}")
             return "\n\n".join(parts)[:max_chars]
 
+    def extract_category_files(self, project_id: str, category: FileCategory,
+                               per_file_cap: int = 12000) -> list[tuple[str, str]]:
+        """Per-file extracted text: [(filename, text), ...] for each parsed file.
+
+        Unlike extract_category_text (which concatenates every file then truncates
+        the whole to one cap — starving all but the first few), this keeps each
+        file separate and caps each independently, so a caller can process every
+        file instead of only the ones that fit under a shared budget.
+        """
+        with self._lock:
+            records = [f for f in self._read_index(project_id)
+                       if f.category == category and f.parsed]
+            out: list[tuple[str, str]] = []
+            for rec in records:
+                found = self.get_path(project_id, rec.id)
+                if found is None:
+                    continue
+                result = extract_document(found[1])
+                if result.text:
+                    out.append((rec.filename, result.text[:per_file_cap]))
+            return out
+
     def has_category(self, project_id: str, category: FileCategory) -> bool:
         # An audio interview upload satisfies the upload gate even before it's
         # transcribed — the ASR step (1.4b) runs after the gate clears.

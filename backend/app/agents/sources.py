@@ -17,5 +17,12 @@ def category_text(project_id: str, category: FileCategory, max_chars: int = 9000
     return get_files().extract_category_text(project_id, category, max_chars=max_chars)
 
 
+def category_files(project_id: str, category: FileCategory,
+                   per_file_cap: int = 12000) -> list[tuple[str, str]]:
+    """Per-file extracted text for a project-folder category (uploads only)."""
+    return get_files().extract_category_files(project_id, category,
+                                              per_file_cap=per_file_cap)
+
+
 def has_uploads(project_id: str, category: FileCategory) -> bool:
     return get_files().has_category(project_id, category)
