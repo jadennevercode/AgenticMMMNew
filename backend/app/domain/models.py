@@ -441,6 +441,7 @@ class QualitySubScore(CamelModel):
 class QualityRow(CamelModel):
     """One factor×metric quality score (2.11) with its human disposition."""
     id: str
+    object: str = ""   # model object (channel_type) this row was screened under
     l1: str = ""
     l2: str = ""
     l3: str = ""
@@ -479,6 +480,7 @@ class StatScoreRow(CamelModel):
     Verdict follows the KB thresholds; disposition is the human's keep decision.
     """
     id: str
+    object: str = ""   # model object (channel_type) this row was screened under
     l1: str = ""
     l2: str = ""
     l3: str = ""
@@ -535,6 +537,7 @@ class OlsYChoice(CamelModel):
 class OlsXCandidate(CamelModel):
     """One candidate model variable, with the 2.4 statistics behind the advice."""
     key: str = ""                   # f"{norm(l4)}|{norm(metric)}"
+    object: str = ""   # model object (channel_type) this row was screened under
     l1: str = ""
     l2: str = ""
     l3: str = ""

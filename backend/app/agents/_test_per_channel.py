@@ -61,6 +61,26 @@ def test_fixture() -> None:
     print("  fixture: MT + TT bound")
 
 
+def test_stat_drops_are_per_object() -> None:
+    from app.agents import ledger
+    # For this test we craft stat dispositions directly rather than fitting.
+    from app.domain.models import StatScorecard, StatScoreRow
+    st = make_two_channel_state()
+    st.stat_scorecard = StatScorecard(rows=[
+        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+                     disposition="include"),
+        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                     disposition="drop"),
+    ])
+    by_obj = ledger.stat_drop_pairs_by_object(st)
+    assert ("渠道库存", "渠道库存") in by_obj.get("TT", set()), by_obj
+    assert ("渠道库存", "渠道库存") not in by_obj.get("MT", set()), by_obj
+    # drops_before for the statistical layer must reflect the channel asked for.
+    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", "TT")
+    assert ("渠道库存", "渠道库存") not in ledger.drops_before(st, "range", "MT")
+    print("  stat drops per object")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
