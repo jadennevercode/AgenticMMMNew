@@ -625,6 +625,7 @@ async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None
     series themselves are queried live (`/validation/series`). Anomalies are localized
     here; ends at the client sign-off gate."""
     from app.dataeng import validation_query as vq
+    from app.dataeng import validation_specs as vspecs
     df = model_df(st)
     anomalies = _anomalies(df)
     eng.set_analysis(st, "anomalies", anomalies)
@@ -636,11 +637,11 @@ async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None
     body = {
         "kpiMetric": kpi_metric,
         "groups": groups,
+        "specs": vspecs.default_specs(st),
         "anomalies": [{"channel": a["channel"], "year": a["year"],
                        "growthPct": a["growth_pct"]} for a in anomalies],
-        "note": ("Each factor (L3) is overlaid on the constant sell-out area. Filter by data "
-                 "source, sub-factor, indicator, time grain, and model dimension, then sign off "
-                 "each factor to admit it into modeling."),
+        "note": ("Explore each factor against sell-out — adjust axes, chart type, and "
+                 "dimensions freely, then sign off indicators in the Sign-off tab."),
     }
     eng.produce(st, "a-business-validation", body=body, state="proposed", agent="data")
     findings = [TaskFinding(
