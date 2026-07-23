@@ -289,7 +289,10 @@ export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
   const rejected = pickedLayer
     ? data.rejected.filter((r) => r.rejectedAt === pickedLayer)
     : data.rejected
-  const pickedLabel = data.funnel.find((f) => f.layer === pickedLayer)?.label
+  // funnel is now {combined, byObject}; the combined rollup is what this
+  // view has always rendered — per-object breakdown is the Phase 1 UI.
+  const funnelLayers = data.funnel.combined ?? []
+  const pickedLabel = funnelLayers.find((f) => f.layer === pickedLayer)?.label
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
@@ -299,7 +302,7 @@ export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
             Master Data · {data.adopted.length} adopted indicator{data.adopted.length === 1 ? '' : 's'}
           </h2>
           <span className="text-xs text-muted-foreground">
-            {data.rejected.length} rejected across {data.funnel.length} filter layers
+            {data.rejected.length} rejected across {funnelLayers.length} filter layers
           </span>
         </div>
         {data.note && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{data.note}</p>}
@@ -315,7 +318,7 @@ export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
         <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           Filter funnel
         </h3>
-        <FunnelBar layers={data.funnel} picked={pickedLayer} onPick={setPickedLayer} />
+        <FunnelBar layers={funnelLayers} picked={pickedLayer} onPick={setPickedLayer} />
       </section>
 
       {data.rejected.length > 0 && (

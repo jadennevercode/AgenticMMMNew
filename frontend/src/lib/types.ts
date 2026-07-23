@@ -378,6 +378,8 @@ export interface OlsYChoice {
 }
 export interface OlsXCandidate {
   key: string
+  /** Model object (channel type) this row was screened under. */
+  object?: string
   l1: string
   l2: string
   l3: string
@@ -467,12 +469,22 @@ export interface MasterDataRejected extends MasterDataAdopted {
   reason: string
   verdicts: LedgerVerdict[]
 }
+/** Per-object adopted row (Tab 2's per-channel breakdown) — the flat
+ *  MasterDataAdopted shape plus the row's full verdict chain. */
+export interface MasterDataObjectAdopted extends MasterDataAdopted {
+  verdicts: LedgerVerdict[]
+}
 export interface MasterData {
   objects: MasterDataObject[]
-  funnel: FunnelLayer[]
+  /** {combined, byObject} — combined is the pre-per-object rollup every
+   *  reader used to get directly; byObject is each channel's own funnel. */
+  funnel: { combined: FunnelLayer[]; byObject: Record<string, FunnelLayer[]> }
   dimensions: MasterDataDimensions
   adopted: MasterDataAdopted[]
   rejected: MasterDataRejected[]
+  /** Per-object adopted/rejected indicators, each carrying its full verdict
+   *  chain (spec §3.5) — Tab 2's per-channel breakdown. */
+  byObject?: Record<string, { adopted: MasterDataObjectAdopted[]; rejected: MasterDataRejected[] }>
   note?: string
 }
 /** One live slice of the master feature table (POST /master-data/table). */
@@ -1131,6 +1143,8 @@ export interface QualitySubScore {
 
 export interface QualityRow {
   id: string
+  /** Model object (channel type) this row was screened under. */
+  object?: string
   l1: string
   l2: string
   l3: string
@@ -1162,6 +1176,8 @@ export type StatDisposition = 'include' | 'review' | 'drop'
 
 export interface StatScoreRow {
   id: string
+  /** Model object (channel type) this row was screened under. */
+  object?: string
   l1: string
   l2: string
   l3: string
