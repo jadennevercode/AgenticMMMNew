@@ -13,8 +13,20 @@ from app.agents.dataset_cache import invalidate_project, model_objects, set_proj
 from app.domain.models import IndustryRef, ProjectMeta
 from app.store.state import initial_state
 
-_MONTHS = [202301 + m if (202301 + m) % 100 <= 12 else 202400 + ((202301 + m) % 100)
-           for m in range(24)]  # 24 contiguous yyyymm from 2023-01
+
+def _month_seq(start_ym: int, n: int) -> list[int]:
+    """``n`` contiguous yyyymm values starting at ``start_ym`` (calendar rollover,
+    not integer increment — yyyymm skips 88 values a year, so ``start_ym + m``
+    walks off the end of the year instead of rolling to the next one)."""
+    y, m = divmod(start_ym, 100)
+    out = []
+    for i in range(n):
+        total = m - 1 + i
+        out.append((y + total // 12) * 100 + total % 12 + 1)
+    return out
+
+
+_MONTHS = _month_seq(202301, 24)  # 24 contiguous yyyymm from 2023-01
 
 
 def _rows_for(channel_type: str, degenerate_stock: bool) -> list[dict]:
@@ -142,6 +154,22 @@ def test_ledger_is_per_object() -> None:
     assert not tt.adopted and tt.rejected_at == "statistical", (tt.rejected_at, tt.adopted)
     assert mt.adopted, mt.rejected_at
     print("  ledger per object: 渠道库存 dropped in TT, kept in MT")
+
+
+def test_ols_candidates_are_per_object() -> None:
+    from app.agents.stat_scoring import build_stat_scorecard
+    from app.agents.ols_review import build_ols_proposal, selected_x_metrics
+    st = make_two_channel_state()
+    st.stat_scorecard = build_stat_scorecard(st)
+    cfg = build_ols_proposal(st)
+    objs = {c.object for c in cfg.x_candidates}
+    assert objs == {"MT", "TT"}, objs
+    # 广告投放 offered separately in each channel.
+    ads = [c for c in cfg.x_candidates if c.metric == "广告投放"]
+    assert {c.object for c in ads} == {"MT", "TT"}, [c.object for c in ads]
+    sel = selected_x_metrics(cfg)
+    assert isinstance(sel, dict) and set(sel) <= {"MT", "TT"}
+    print("  OLS candidates + selection are per object")
 
 
 if __name__ == "__main__":
