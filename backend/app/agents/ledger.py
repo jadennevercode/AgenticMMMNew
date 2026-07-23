@@ -65,6 +65,13 @@ def _norm_pair(l4: object, metric: object) -> tuple[str, str]:
     return (_norm(l4), _norm(metric))
 
 
+OBJECT_ANY = "*"   # sentinel: a verdict recorded for every model object
+
+
+def _obj(v: object) -> str:
+    return str(v).strip() if v is not None else ""
+
+
 def _matches(key: tuple[str, str], pairs: set[tuple[str, str]]) -> bool:
     """Mirror ``build_model_frame``'s exclude semantics: an exact (l4, metric)
     hit, or a metric-only entry (empty l4) that drops the metric under any L4.
@@ -309,6 +316,58 @@ def unticked_pairs(st: ProjectState) -> set[tuple[str, str]]:
     return {_norm_pair(c.l4, c.metric) for c in cfg.x_candidates if not c.selected}
 
 
+# ── per-object variants ─────────────────────────────────────────────────────
+# Each maps object (channel_type) → that channel's own drop set. Layers that
+# are still global report everything under ``OBJECT_ANY``, which every object
+# inherits — see ``_object_drops``.
+
+
+def _scorecard_pairs_by_object(card: object, dispositions: tuple[str, ...]) -> dict[str, set[tuple[str, str]]]:
+    out: dict[str, set[tuple[str, str]]] = {}
+    for row in getattr(card, "rows", None) or []:
+        if getattr(row, "disposition", "") in dispositions:
+            out.setdefault(_obj(getattr(row, "object", "")) or OBJECT_ANY, set()).add(
+                _norm_pair(row.l4, row.indicator))
+    return out
+
+
+def quality_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    return _scorecard_pairs_by_object(getattr(st, "quality_scorecard", None), ("drop",))
+
+
+def quality_flag_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    return _scorecard_pairs_by_object(getattr(st, "quality_scorecard", None), ("flag",))
+
+
+def stat_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    return _scorecard_pairs_by_object(getattr(st, "stat_scorecard", None), ("drop",))
+
+
+def unticked_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    cfg: OlsConfig | None = getattr(st, "ols_config", None)
+    out: dict[str, set[tuple[str, str]]] = {}
+    for c in (getattr(cfg, "x_candidates", None) or []):
+        if not c.selected:
+            out.setdefault(_obj(getattr(c, "object", "")) or OBJECT_ANY, set()).add(
+                _norm_pair(c.l4, c.metric))
+    return out
+
+
+def mapping_ignored_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    # Mapping is global — one ignore applies to every object.
+    return {OBJECT_ANY: set(_mapping_ignored(st))}
+
+
+def signoff_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    # Object-aware sign-off keys land in Task 4; until then every denial is global.
+    return {OBJECT_ANY: signoff_drop_pairs(st)}
+
+
+def range_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
+    # d-2.5 freeze becomes per-object in Task 6; until then it is global.
+    return {OBJECT_ANY: range_drop_pairs(st)}
+
+
 # Each layer's own rejection set, in its own key space.
 _LAYER_PAIRS = {
     "mapping": lambda st: set(_mapping_ignored(st)),
@@ -319,20 +378,43 @@ _LAYER_PAIRS = {
     "range": range_drop_pairs,
 }
 
+# Object-aware counterpart of ``_LAYER_PAIRS`` — same keys, each resolver
+# returns a per-object mapping instead of one flat set.
+_LAYER_PAIRS_BY_OBJECT = {
+    "mapping": mapping_ignored_by_object,
+    "quality": quality_drop_pairs_by_object,
+    "signoff": signoff_drop_pairs_by_object,
+    "statistical": stat_drop_pairs_by_object,
+    "selection": unticked_pairs_by_object,
+    "range": range_drop_pairs_by_object,
+}
 
-def drops_before(st: ProjectState, layer: str) -> set[tuple[str, str]]:
+
+def _object_drops(by_object: dict[str, set[tuple[str, str]]], object: str | None) -> set[tuple[str, str]]:
+    """The drop set that applies to ``object`` (``None`` → union of everything)."""
+    if object is None:
+        return set().union(*by_object.values()) if by_object else set()
+    return set(by_object.get(OBJECT_ANY, set())) | set(by_object.get(object, set()))
+
+
+def drops_before(st: ProjectState, layer: str, object: str | None = None) -> set[tuple[str, str]]:
     """Indicators already rejected by a layer that rules *before* ``layer``.
 
     Always reach for this instead of hand-unioning drop sets at a call site: a
     layer must inherit every earlier verdict, and must never inherit its own —
     that would stop the human from revising the call they just made.
+
+    ``object=None`` keeps the legacy global-union behaviour (every un-migrated
+    caller). Passing a concrete model object narrows each layer's drop set to
+    that channel's own verdicts plus whatever a still-global layer rejected
+    for everyone (``OBJECT_ANY``).
     """
     order = [lid for lid, _task, _label in LAYERS]
     if layer not in order:
         raise ValueError(f"unknown layer {layer!r}; expected one of {order}")
     out: set[tuple[str, str]] = set()
     for lid in order[:order.index(layer)]:
-        out |= _LAYER_PAIRS[lid](st)
+        out |= _object_drops(_LAYER_PAIRS_BY_OBJECT[lid](st), object)
     return out
 
 
