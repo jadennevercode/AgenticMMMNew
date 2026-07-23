@@ -20,18 +20,20 @@ def _s(v: object) -> str:
     return "" if v is None or (isinstance(v, float) and pd.isna(v)) or v is pd.NA else str(v).strip()
 
 
-def _kpi_metric(df: pd.DataFrame) -> str:
+def _kpi_metric_and_l3(df: pd.DataFrame) -> tuple[str, str]:
     kpi = df[vq._kpi_mask(df)]
     if kpi.empty:
-        return ""
-    return str(kpi["metric"].mode().iloc[0])
+        return "", ""
+    metric = _s(kpi["metric"].mode().iloc[0])
+    l3 = _s(kpi["l3"].mode().iloc[0]) if "l3" in kpi.columns else ""
+    return metric, l3
 
 
 def default_specs(st: object) -> list[dict]:
     df = dataset_cache.model_df(st)
     if df.empty:
         return []
-    kpi_metric = _kpi_metric(df)
+    kpi_metric, kpi_l3 = _kpi_metric_and_l3(df)
     overlay = df[~vq._kpi_mask(df)]
     combo = (overlay[["l1", "l2", "l3"]].astype("string").apply(lambda s: s.str.strip())
              .dropna(subset=["l3"]).drop_duplicates())
@@ -64,6 +66,6 @@ def default_specs(st: object) -> list[dict]:
                 "yOverlay": indicators,
                 "overlayKind": "bar" if is_spend else "line",
             },
-            "filter": {"l3": l3},
+            "filter": {"l3": l3, "kpiL3": kpi_l3},
         })
     return specs

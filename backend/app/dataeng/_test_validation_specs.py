@@ -43,6 +43,9 @@ def main() -> None:
     assert "花费" in enc["yOverlay"]
     assert enc["overlayKind"] == "bar"     # spend-type factor → bars
     assert tv[0]["filter"]["l3"] == "TV"
+    # Fix (kpiL3): the l3 filter must also admit the KPI's own l3 so the sell-out
+    # backdrop survives the preset's l3 filter (it lives under a different l3).
+    assert tv[0]["filter"]["kpiL3"] == "Sell-out"
 
     # Fix 1: a missing L2 (pd.NA) must not leak "nan" into the title.
     digital = [s for s in specs if s["l3"] == "Digital"]

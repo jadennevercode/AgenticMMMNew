@@ -58,11 +58,15 @@ export function ExploreTab({ projectId, specs }: ExploreTabProps) {
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
-    // Reset (not synchronize): clears the previous project's frozen charts so GW
-    // never renders one project's saved layout under another project's data while
-    // the new project's charts load.
+    // Reset (not synchronize): clears the previous project's frozen charts AND
+    // dataset so GW never renders one project's saved layout under another
+    // project's data while the new project's charts load. Clearing `dataset` also
+    // re-triggers the `!dataset` render/persist guards below, closing the window
+    // where the persist-effect interval could PUT stale (old-project) refs onto
+    // the new projectId (Fix 3).
     // eslint-disable-next-line react-hooks/set-state-in-effect -- prop-driven reset keyed on projectId, not an external-system sync
     setInitialCharts(null)
+    setDataset(null)
     Promise.all([api.getValidationDataset(projectId), api.getValidationSpecs(projectId)])
       .then(([ds, sp]) => {
         if (cancelled) return

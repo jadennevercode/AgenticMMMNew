@@ -799,10 +799,11 @@ async def get_validation_specs(project_id: str) -> dict:
 async def put_validation_specs(project_id: str, body: dict) -> dict:
     """Persist the explorer's current check specs."""
     st = _require_state(project_id)
-    st.validation_specs = {
-        "specs": body.get("specs", []),
-        "version": int(body.get("version", 1)),
-    }
+    try:
+        version = int(body.get("version", 1))
+    except (TypeError, ValueError):
+        version = 1
+    st.validation_specs = {"specs": body.get("specs", []), "version": version}
     get_store().save(project_id)
     return st.validation_specs
 

@@ -169,7 +169,7 @@ export interface ValidationSpec {
   l3: string
   title: string
   encoding: { x: string; yKpi: string; yOverlay: string[]; overlayKind: 'bar' | 'line' }
-  filter: { l3: string }
+  filter: { l3: string; kpiL3?: string }
 }
 /** A saved Graphic Walker chart list + version (opaque GW chart JSON). */
 export interface ValidationSpecStore {

@@ -650,9 +650,9 @@ async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None
     """2.3 — Business Validation: one interactive chart per FactorTree L3 (a constant
     sell-out area background overlaid with the factor's indicators; filterable by data
     source / sub-factor / indicator / time grain / model dimension) plus a yearly+YoY
-    table. The artifact stores per-factor metadata + interpretation + sign-off; the
-    series themselves are queried live (`/validation/series`). Anomalies are localized
-    here; ends at the client sign-off gate."""
+    table. The artifact carries per-factor metadata + interpretation + the `specs` that
+    drive the self-serve Graphic Walker explorer (`ExploreTab`); sign-off is a separate
+    tab. Anomalies are localized here; ends at the client sign-off gate."""
     from app.dataeng import validation_query as vq
     from app.dataeng import validation_specs as vspecs
     df = model_df(st)

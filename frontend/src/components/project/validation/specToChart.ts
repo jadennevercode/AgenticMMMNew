@@ -87,8 +87,9 @@ export function specToChart(spec: ValidationSpec, fields: ValidationField[]): un
   const color = metrics.length > 1 && has('metric') ? [dim('metric')] : []
 
   const filters: unknown[] = []
-  if (has('l3')) {
-    filters.push({ ...dim('l3'), rule: { type: 'one of', value: [spec.filter.l3] } })
+  const l3Values = [spec.filter.l3, spec.filter.kpiL3].filter((v): v is string => Boolean(v))
+  if (has('l3') && l3Values.length) {
+    filters.push({ ...dim('l3'), rule: { type: 'one of', value: l3Values } })
   }
   if (has('metric') && metrics.length) {
     filters.push({ ...dim('metric'), rule: { type: 'one of', value: metrics } })
