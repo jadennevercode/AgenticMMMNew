@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useMemo, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Lock } from 'lucide-react'
 
 import { cn } from '../../../lib/cn'
@@ -11,38 +11,46 @@ const TONE: Record<FactorCanvasTone, string> = {
   muted: 'bg-muted text-muted-foreground',
 }
 
-interface Group {
-  key: string
-  l1: string
-  l2: string
-  l3: string
-  rows: FactorCanvasRow[]
+/** A row plus its vertical-merge flags: whether each L-level is the first of its run. */
+interface Laid {
+  row: FactorCanvasRow
+  groupKey: string // l1›l2›l3 — the collapse unit
+  firstL1: boolean
+  firstL2: boolean
+  firstL3: boolean
+  groupFirst: boolean // first row of this l1›l2›l3 group
+  groupCount: number
 }
 
-function groupRows(rows: FactorCanvasRow[]): Group[] {
-  const out: Group[] = []
-  const byKey = new Map<string, Group>()
+function layout(rows: FactorCanvasRow[]): Laid[] {
+  const out: Laid[] = []
+  const counts = new Map<string, number>()
   for (const r of rows) {
-    const key = `${r.l1}›${r.l2}›${r.l3}`
-    let g = byKey.get(key)
-    if (!g) {
-      g = { key, l1: r.l1, l2: r.l2, l3: r.l3, rows: [] }
-      byKey.set(key, g)
-      out.push(g)
-    }
-    g.rows.push(r)
+    const g = `${r.l1}›${r.l2}›${r.l3}`
+    counts.set(g, (counts.get(g) ?? 0) + 1)
+  }
+  let prev: FactorCanvasRow | undefined
+  const seenGroup = new Set<string>()
+  for (const row of rows) {
+    const groupKey = `${row.l1}›${row.l2}›${row.l3}`
+    const firstL1 = !prev || prev.l1 !== row.l1
+    const firstL2 = firstL1 || prev!.l2 !== row.l2
+    const firstL3 = firstL2 || prev!.l3 !== row.l3
+    const groupFirst = !seenGroup.has(groupKey)
+    seenGroup.add(groupKey)
+    out.push({ row, groupKey, firstL1, firstL2, firstL3, groupFirst, groupCount: counts.get(groupKey) ?? 1 })
+    prev = row
   }
   return out
 }
 
 /**
- * The FactorTree, rendered once and reused by every S2 module.
+ * The FactorTree, rendered once and reused by every S2 module — now as a true
+ * horizontal `L1 | L2 | L3 | L4 | Indicator | …columns | Status | Action` table.
  *
- * Every S2 step is doing the same thing to the same object — integrating and
- * filtering the factor tree — so they share this canvas and differ only in the
- * status each row carries. The component owns no data and derives no verdicts:
- * modules pass rows they built from their own slice, which is what keeps an
- * overlay from disagreeing with the thing it is displaying.
+ * Repeated parent values are merged vertically (shown once per run), giving the
+ * editorial-table hierarchy without a repeated-value grid. The component owns no
+ * data and derives no verdicts: modules pass rows built from their own slice.
  */
 export function FactorTreeCanvas({
   rows,
@@ -61,7 +69,7 @@ export function FactorTreeCanvas({
   header?: ReactNode
   emptyHint?: string
 }) {
-  const groups = useMemo(() => groupRows(rows), [rows])
+  const laid = useMemo(() => layout(rows), [rows])
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   function toggle(key: string) {
@@ -82,88 +90,112 @@ export function FactorTreeCanvas({
     )
   }
 
+  const lastCols = 1 /*Status*/ + (actions ? 1 : 0)
+
   return (
     <div className="min-h-0 flex-1 overflow-auto p-4">
       {header}
-      <table className="mt-3 w-full border-collapse text-[11.5px]">
-        <thead>
-          <tr className="border-b border-border text-left text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-            <th className="px-2 py-1.5 font-medium">Factor · Indicator</th>
-            {columns.map((c) => (
-              <th key={c} className="px-2 py-1.5 text-right font-medium">{c}</th>
-            ))}
-            <th className="px-2 py-1.5 font-medium">Status</th>
-            {actions && <th className="px-2 py-1.5 font-medium">Action</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {groups.map((g) => {
-            const isCollapsed = collapsed.has(g.key)
-            const span = 2 + columns.length + (actions ? 1 : 0)
-            return (
-              <Fragment key={g.key}>
-                <tr className="bg-muted/30">
-                  <td colSpan={span} className="px-2 py-1">
-                    <button
-                      type="button"
-                      onClick={() => toggle(g.key)}
-                      className="flex items-center gap-1 text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
-                    >
-                      {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                      <span>{g.l1 || '—'}</span>
-                      {g.l2 && <span className="text-muted-foreground/60">› {g.l2}</span>}
-                      {g.l3 && <span className="text-muted-foreground/60">› {g.l3}</span>}
-                      <span className="ml-1 text-muted-foreground/50">({g.rows.length})</span>
-                    </button>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[720px] border-collapse text-[11.5px]">
+          <thead>
+            <tr className="border-b border-border text-left text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              <th className="px-2 py-1.5 font-semibold">L1</th>
+              <th className="px-2 py-1.5 font-medium">L2</th>
+              <th className="px-2 py-1.5 font-medium">L3</th>
+              <th className="px-2 py-1.5 font-medium">L4</th>
+              <th className="px-2 py-1.5 font-medium">Indicator</th>
+              {columns.map((c) => (
+                <th key={c} className="px-2 py-1.5 text-right font-medium">{c}</th>
+              ))}
+              <th className="px-2 py-1.5 font-medium">Status</th>
+              {actions && <th className="px-2 py-1.5 font-medium">Action</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {laid.map(({ row: r, groupKey, firstL1, firstL2, firstL3, groupFirst, groupCount }) => {
+              const isCollapsed = collapsed.has(groupKey)
+              // A collapsed group shows only a single summary row (its first).
+              if (isCollapsed && !groupFirst) return null
+              const blocked = Boolean(r.blockedBy)
+              if (isCollapsed) {
+                return (
+                  <tr key={groupKey} className="border-b border-border/40 bg-muted/20">
+                    <td className="px-2 py-1 align-top font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => toggle(groupKey)}
+                        className="flex items-center gap-1 text-left hover:text-foreground"
+                      >
+                        <ChevronRight className="h-3 w-3 shrink-0" />
+                        <span>{r.l1 || '—'}</span>
+                      </button>
+                    </td>
+                    <td className="px-2 py-1 align-top text-muted-foreground">{r.l2}</td>
+                    <td className="px-2 py-1 align-top text-muted-foreground">{r.l3}</td>
+                    <td className="px-2 py-1 align-top text-muted-foreground/60" colSpan={2 + columns.length + lastCols}>
+                      {groupCount} indicator{groupCount === 1 ? '' : 's'} — collapsed
+                    </td>
+                  </tr>
+                )
+              }
+              return (
+                <tr
+                  key={r.key}
+                  onClick={() => !blocked && onSelect?.(r.key)}
+                  className={cn(
+                    'border-b border-border/40',
+                    firstL1 && 'border-t border-border/70',
+                    blocked ? 'opacity-45' : 'cursor-pointer hover:bg-accent/50',
+                    selectedKey === r.key && 'bg-accent',
+                  )}
+                >
+                  <td className="px-2 py-1 align-top font-semibold">
+                    {firstL1 ? r.l1 || '—' : ''}
                   </td>
+                  <td className="px-2 py-1 align-top text-foreground/80">{firstL2 ? r.l2 : ''}</td>
+                  <td className="px-2 py-1 align-top text-foreground/70">
+                    {firstL3 ? (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); toggle(groupKey) }}
+                        className="flex items-center gap-1 text-left hover:text-foreground"
+                        title="Collapse this factor"
+                      >
+                        <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                        <span>{r.l3}</span>
+                      </button>
+                    ) : ''}
+                  </td>
+                  <td className="px-2 py-1 align-top text-muted-foreground">{r.l4}</td>
+                  <td className="px-2 py-1 align-top font-medium">{r.indicator}</td>
+                  {columns.map((c, i) => (
+                    <td key={c} className="px-2 py-1 text-right align-top tabular-nums text-muted-foreground">
+                      {r.cells?.[i] ?? ''}
+                    </td>
+                  ))}
+                  <td className="px-2 py-1 align-top">
+                    {blocked ? (
+                      <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] bg-muted text-muted-foreground">
+                        <Lock className="h-2.5 w-2.5" />
+                        Denied @ {r.blockedBy}
+                      </span>
+                    ) : (
+                      <span className={cn('rounded px-1.5 py-0.5 text-[10.5px]', TONE[r.tone])}>
+                        {r.statusLabel}
+                      </span>
+                    )}
+                  </td>
+                  {actions && (
+                    <td className="px-2 py-1 align-top" onClick={(e) => e.stopPropagation()}>
+                      {blocked ? null : actions(r)}
+                    </td>
+                  )}
                 </tr>
-                {!isCollapsed && g.rows.map((r) => {
-                  const blocked = Boolean(r.blockedBy)
-                  return (
-                    <tr
-                      key={r.key}
-                      onClick={() => !blocked && onSelect?.(r.key)}
-                      className={cn(
-                        'border-b border-border/40',
-                        blocked ? 'opacity-45' : 'cursor-pointer hover:bg-accent/50',
-                        selectedKey === r.key && 'bg-accent',
-                      )}
-                    >
-                      <td className="px-2 py-1">
-                        <span className="text-muted-foreground">{r.l4 || r.l3 || '—'}</span>
-                        <span className="text-muted-foreground/50"> · </span>
-                        <span className="font-medium">{r.indicator}</span>
-                      </td>
-                      {columns.map((c, i) => (
-                        <td key={c} className="px-2 py-1 text-right tabular-nums text-muted-foreground">
-                          {r.cells?.[i] ?? ''}
-                        </td>
-                      ))}
-                      <td className="px-2 py-1">
-                        {blocked ? (
-                          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] bg-muted text-muted-foreground">
-                            <Lock className="h-2.5 w-2.5" />
-                            Denied @ {r.blockedBy}
-                          </span>
-                        ) : (
-                          <span className={cn('rounded px-1.5 py-0.5 text-[10.5px]', TONE[r.tone])}>
-                            {r.statusLabel}
-                          </span>
-                        )}
-                      </td>
-                      {actions && (
-                        <td className="px-2 py-1" onClick={(e) => e.stopPropagation()}>
-                          {blocked ? null : actions(r)}
-                        </td>
-                      )}
-                    </tr>
-                  )
-                })}
-              </Fragment>
-            )
-          })}
-        </tbody>
-      </table>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

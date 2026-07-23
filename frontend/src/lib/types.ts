@@ -509,6 +509,9 @@ export interface MasterTableQuery {
 
 /** GET /indicator-ledger — every indicator's fate across the six S2 layers. */
 export interface IndicatorLedgerRow {
+  /** Model object (channel type) this row was screened under. Present only on the
+   *  per-object `rowsByObject` rows; undefined on the collapsed `rows`. */
+  object?: string
   l1: string
   l2: string
   l3: string
@@ -522,6 +525,8 @@ export interface IndicatorLedgerRow {
 export interface IndicatorLedger {
   layers: { layer: string; task: string; label: string }[]
   rows: IndicatorLedgerRow[]
+  /** Per-Channel-Type verdicts (additive); the collapsed `rows` stays one-per-indicator. */
+  rowsByObject?: Record<string, IndicatorLedgerRow[]>
   funnel: FunnelLayer[]
   adopted: number
   rejected: number

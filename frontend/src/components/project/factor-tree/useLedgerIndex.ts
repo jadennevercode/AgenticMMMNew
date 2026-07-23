@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../../api/client'
 import type { IndicatorLedger, IndicatorLedgerRow } from '../../../lib/types'
 import { useSimStore } from '../../../store/useSimStore'
-import { indicatorKey } from './keys'
+import { indicatorKey, objectKey } from './keys'
 
 /**
  * Every indicator's fate across the six S2 layers, indexed by `indicatorKey`.
@@ -15,6 +15,8 @@ import { indicatorKey } from './keys'
  */
 export function useLedgerIndex(): {
   index: Map<string, IndicatorLedgerRow>
+  byObject: Map<string, IndicatorLedgerRow>
+  blockedBeforeFor: (l4: string, indicator: string, layer: string, object?: string) => string | undefined
   reload: () => void
 } {
   const projectId = useSimStore((s) => s.activeProjectId)
@@ -37,8 +39,28 @@ export function useLedgerIndex(): {
     return m
   }, [ledger])
 
+  // Per-Channel-Type index, keyed `object|l4|indicator`, so a channel-scoped
+  // canvas resolves that channel's own verdict chain instead of the collapsed one.
+  const byObject = useMemo(() => {
+    const m = new Map<string, IndicatorLedgerRow>()
+    for (const [obj, rows] of Object.entries(ledger?.rowsByObject ?? {})) {
+      for (const r of rows) m.set(objectKey(obj, r.l4, r.indicator), r)
+    }
+    return m
+  }, [ledger])
+
+  const blockedBeforeFor = useCallback(
+    (l4: string, indicator: string, layer: string, object?: string) => {
+      const row = object
+        ? byObject.get(objectKey(object, l4, indicator))
+        : index.get(indicatorKey(l4, indicator))
+      return blockedBefore(row, layer)
+    },
+    [byObject, index],
+  )
+
   const reload = useCallback(() => setNonce((n) => n + 1), [])
-  return { index, reload }
+  return { index, byObject, blockedBeforeFor, reload }
 }
 
 /** The six S2 layers in the order they rule. Mirrors `ledger.LAYERS`. */
