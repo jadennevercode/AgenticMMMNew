@@ -81,12 +81,26 @@ def adopted_mask(st: ProjectState, df: pd.DataFrame) -> pd.Series:
     sliced to one Channel Type shows exactly that channel's surviving
     indicators, and the same indicator can appear as a column in one channel
     and be absent in another.
+
+    A row whose ``channel_type`` is missing/blank cannot be screened against
+    "its" object — there isn't one. ``.astype("string")`` turns NaN into the
+    literal string ``"<NA>"``, which — left unnormalized — the per-object loop
+    would treat as a real object; ``exclude_for("<NA>")`` then resolves only
+    the OBJECT_ANY-level drops, never a real object's own per-object drops, so
+    a channel-specific rejection could leak in through any unmapped row. So
+    missing/blank/``"<NA>"`` is normalized to ``""`` up front, and the
+    unmapped remainder is screened against the **union** of every model
+    object's excludes instead (the strict, pre-per-channel-screening
+    behaviour) — the safe fallback when a row cannot be pinned to one object.
     """
     sel = model_selection(st)
     l4 = df["l4"].astype("string").map(_lower) if "l4" in df.columns else pd.Series("", index=df.index)
     metric = df["metric"].astype("string").map(_lower)
-    ct = df["channel_type"].astype("string").map(lambda s: str(s).strip()) if "channel_type" in df.columns \
-        else pd.Series("", index=df.index)
+    if "channel_type" in df.columns:
+        raw_ct = df["channel_type"].astype("string")
+        ct = raw_ct.map(lambda s: "" if pd.isna(s) or str(s).strip() in ("", "<NA>") else str(s).strip())
+    else:
+        ct = pd.Series("", index=df.index)
     keep = pd.Series(True, index=df.index)
     for obj in sorted(set(ct) - {""}):
         excl = sel.exclude_for(obj)
@@ -97,6 +111,18 @@ def adopted_mask(st: ProjectState, df: pd.DataFrame) -> pd.Series:
                          for a, b in zip(l4[rowsel], metric[rowsel])], index=l4[rowsel].index)
         block = rej if inc is None else (rej | ~metric[rowsel].isin(inc))
         keep.loc[rowsel] = ~block
+
+    unmapped = ct == ""
+    if unmapped.any():
+        from app.agents.dataset_cache import model_objects
+        objects = model_objects(st)
+        rejected_union: frozenset[tuple[str, str]] = frozenset().union(
+            *(sel.exclude_for(o) for o in objects)) if objects else sel.exclude_for("")
+        metric_only_union = {m for excl_l4, m in rejected_union if not excl_l4}
+        rej = pd.Series([(a, b) in rejected_union or b in metric_only_union
+                         for a, b in zip(l4[unmapped], metric[unmapped])], index=l4[unmapped].index)
+        keep.loc[unmapped] = keep.loc[unmapped] & ~rej
+
     return keep | _kpi_mask(df)
 
 

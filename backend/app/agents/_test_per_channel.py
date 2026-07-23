@@ -281,6 +281,49 @@ def test_master_table_columns_differ_by_channel() -> None:
     print("  master table columns differ by channel")
 
 
+def test_adopted_mask_screens_unmapped_channel_rows() -> None:
+    """Task 7 fix: a MISSING/NaN ``channel_type`` must not escape per-object
+    screening. ``channel_type.astype("string")`` turns NaN into the literal
+    string ``"<NA>"``, which the old per-object loop treated as a real model
+    object — ``sel.exclude_for("<NA>")`` only resolves OBJECT_ANY-level drops,
+    never a per-object (TT-only) drop — so a TT-rejected indicator could leak
+    into the master table via any row whose channel could not be mapped. The
+    fix screens unmapped rows against the union of every model object's
+    excludes instead (the strict, pre-Task-7 behaviour), so a rejected-
+    anywhere indicator can never surface through an unmapped row while a
+    genuinely-adopted indicator (and the KPI) still passes through.
+    """
+    from app.agents.master_data import adopted_mask
+    from app.domain.models import StatScorecard, StatScoreRow
+
+    st = make_two_channel_state()
+    # 渠道库存 is dropped in TT only (a per-object drop, not OBJECT_ANY) —
+    # exactly the shape exclude_for("<NA>") cannot see.
+    st.stat_scorecard = StatScorecard(rows=[
+        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+                     disposition="include"),
+        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+                     disposition="drop"),
+    ])
+
+    df = pd.DataFrame([
+        # rejected-in-TT indicator, channel unmapped — must NOT leak through.
+        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type=np.nan),
+        # same indicator, mapped to the channel that actually rejected it.
+        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type="TT"),
+        # same indicator, mapped to the channel that kept it.
+        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type="MT"),
+        # genuinely-adopted indicator, channel unmapped — must stay in.
+        dict(l4="广告投放", metric="广告投放", metric_type="spending", channel_type=np.nan),
+        # KPI row, channel unmapped — must stay in unconditionally.
+        dict(l4="本品销量", metric="销量", metric_type="Y", channel_type=np.nan),
+    ])
+
+    mask = adopted_mask(st, df)
+    assert list(mask) == [False, False, True, True, True], list(mask)
+    print("  adopted_mask screens unmapped-channel rows against all-object excludes")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
