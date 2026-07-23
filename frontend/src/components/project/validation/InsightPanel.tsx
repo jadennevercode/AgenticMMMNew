@@ -1,16 +1,17 @@
 // frontend/src/components/project/validation/InsightPanel.tsx
 import { useState } from 'react'
 import { api } from '../../../api/client'
-import type { ValidationSpec } from '../../../lib/types'
 
 interface InsightPanelProps {
   projectId: string
-  spec: ValidationSpec | unknown
-  rows: unknown[]
+  /** Read live at click-time — GW tab switches don't re-render the parent,
+   * so a static prop would go stale as soon as the user changes charts. */
+  getSpec: () => unknown
+  getRows: () => unknown[]
   preset?: string
 }
 
-export function InsightPanel({ projectId, spec, rows, preset }: InsightPanelProps) {
+export function InsightPanel({ projectId, getSpec, getRows, preset }: InsightPanelProps) {
   const [text, setText] = useState(preset ?? '')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -19,6 +20,8 @@ export function InsightPanel({ projectId, spec, rows, preset }: InsightPanelProp
     setLoading(true)
     setError('')
     try {
+      const spec = getSpec()
+      const rows = getRows()
       const { insight } = await api.generateValidationInsight(projectId, spec, rows)
       setText(insight || 'No insight returned — try adjusting the chart.')
     } catch (e) {

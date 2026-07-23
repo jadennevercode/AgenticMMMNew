@@ -5,6 +5,7 @@ import '@kanaries/graphic-walker/dist/style.css'
 import { api } from '../../../api/client'
 import type { ValidationDataset, ValidationSpec, ValidationSpecStore } from '../../../lib/types'
 import { specToChart } from './specToChart'
+import { InsightPanel } from './InsightPanel'
 
 /**
  * The subset of Graphic Walker's (0.4.84) local-computation props we drive.
@@ -162,21 +163,28 @@ export function ExploreTab({ projectId, specs }: ExploreTabProps) {
           Couldn’t save your latest changes — retrying…
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-auto">
-        <Suspense
-          fallback={
-            <div className="grid h-full place-items-center text-xs text-muted-foreground">
-              Loading explorer…
-            </div>
-          }
-        >
-          <GraphicWalker
-            storeRef={storeRef}
-            data={dataset.rows}
-            fields={dataset.columns}
-            chart={initialCharts && initialCharts.length ? initialCharts : undefined}
-          />
-        </Suspense>
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-auto">
+          <Suspense
+            fallback={
+              <div className="grid h-full place-items-center text-xs text-muted-foreground">
+                Loading explorer…
+              </div>
+            }
+          >
+            <GraphicWalker
+              storeRef={storeRef}
+              data={dataset.rows}
+              fields={dataset.columns}
+              chart={initialCharts && initialCharts.length ? initialCharts : undefined}
+            />
+          </Suspense>
+        </div>
+        <InsightPanel
+          projectId={projectId}
+          getSpec={() => storeRef.current?.currentVis ?? {}}
+          getRows={() => dataset.rows}
+        />
       </div>
     </div>
   )
