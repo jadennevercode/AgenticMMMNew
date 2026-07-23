@@ -186,16 +186,13 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
   const laidRows: Laid[] = useMemo(() => {
     if (!data) return []
     const rows = filter.size ? data.tree.filter((r) => filter.has(r.status)) : data.tree
-    const out: Laid[] = []
-    let prev: OlsTreeRow | undefined
-    for (const row of rows) {
+    return rows.map((row, i, arr) => {
+      const prev = arr[i - 1]
       const firstL1 = !prev || prev.l1 !== row.l1
-      const firstL2 = firstL1 || prev!.l2 !== row.l2
-      const firstL3 = firstL2 || prev!.l3 !== row.l3
-      out.push({ row, firstL1, firstL2, firstL3 })
-      prev = row
-    }
-    return out
+      const firstL2 = firstL1 || prev?.l2 !== row.l2
+      const firstL3 = firstL2 || prev?.l3 !== row.l3
+      return { row, firstL1, firstL2, firstL3 }
+    })
   }, [data, filter])
 
   if (!data) {

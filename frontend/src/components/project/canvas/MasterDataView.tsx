@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react'
-import { ChevronRight, Loader2, TriangleAlert } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { ChevronRight, Download, Loader2, TriangleAlert } from 'lucide-react'
 import { api } from '../../../api/client'
 import { asMasterData } from '../../../lib/artifact-format'
+import { exportMasterDataXlsx } from '../../../lib/export'
 import { cn } from '../../../lib/cn'
 import { useSimStore } from '../../../store/useSimStore'
 import type {
   ArtifactInstance,
   FunnelLayer,
+  LedgerVerdict,
+  MasterData,
   MasterDataObject,
   MasterDataRejected,
   MasterTable,
@@ -235,6 +238,163 @@ function WideTable({ table, loading }: { table: MasterTable | null; loading: boo
   )
 }
 
+/* ── a per-layer verdict chain (shared by rejected list + tree matrix) ── */
+function VerdictChain({ verdicts }: { verdicts: LedgerVerdict[] }) {
+  return (
+    <ol className="space-y-1 border-l border-border pl-3">
+      {verdicts.map((v) => (
+        <li key={v.layer} className="flex items-baseline gap-2 text-[10.5px]">
+          <span
+            className={cn(
+              'w-[4.5rem] shrink-0 rounded px-1 text-center text-[9px] font-medium uppercase',
+              v.status === 'rejected' ? 'bg-destructive/15 text-destructive'
+                : v.status === 'inherited' ? 'bg-muted text-muted-foreground'
+                  : v.status === 'flagged' ? 'bg-amber-500/15 text-amber-600'
+                    : v.status === 'pending' ? 'bg-slate-400/15 text-slate-500'
+                      : 'bg-emerald-500/15 text-emerald-600',
+            )}
+          >
+            {v.status}
+          </span>
+          <span className="min-w-0">
+            <span className="font-medium">{v.label}</span>
+            <span className="ml-1 font-mono text-[9px] text-muted-foreground">{v.task}</span>
+            <span className="block text-muted-foreground">{v.note}</span>
+          </span>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+/* ── Tab 2: the full factor tree × per-Channel-Type status matrix ── */
+interface TreeCell {
+  status: 'accepted' | 'rejected' | 'pending'
+  rejectedAt?: string
+  verdicts: LedgerVerdict[]
+}
+interface TreeRow {
+  key: string
+  l1: string; l2: string; l3: string; l4: string; indicator: string
+  byChannel: Record<string, TreeCell>
+}
+
+function FactorTreeTab({ data }: { data: MasterData }) {
+  const channels = useMemo(() => Object.keys(data.byObject ?? {}).sort(), [data])
+  const [open, setOpen] = useState<string>('') // `${rowKey}::${channel}`
+
+  const rows: TreeRow[] = useMemo(() => {
+    const map = new Map<string, TreeRow>()
+    const ensure = (l1: string, l2: string, l3: string, l4: string, indicator: string): TreeRow => {
+      const key = `${l1}|${l2}|${l3}|${l4}|${indicator}`
+      let row = map.get(key)
+      if (!row) { row = { key, l1, l2, l3, l4, indicator, byChannel: {} }; map.set(key, row) }
+      return row
+    }
+    for (const [ch, { adopted, rejected }] of Object.entries(data.byObject ?? {})) {
+      for (const a of adopted) {
+        ensure(a.l1, a.l2, a.l3, a.l4, a.indicator).byChannel[ch] = { status: 'accepted', verdicts: a.verdicts }
+      }
+      for (const r of rejected) {
+        ensure(r.l1, r.l2, r.l3, r.l4, r.indicator).byChannel[ch] = { status: 'rejected', rejectedAt: r.rejectedAt, verdicts: r.verdicts }
+      }
+    }
+    return [...map.values()].sort((a, b) =>
+      (a.l1 + a.l2 + a.l3 + a.l4 + a.indicator).localeCompare(b.l1 + b.l2 + b.l3 + b.l4 + b.indicator))
+  }, [data])
+
+  const laid = useMemo(
+    () => rows.map((r, i, arr) => {
+      const prev = arr[i - 1]
+      const f1 = !prev || prev.l1 !== r.l1
+      const f2 = f1 || prev?.l2 !== r.l2
+      const f3 = f2 || prev?.l3 !== r.l3
+      return { r, f1, f2, f3 }
+    }),
+    [rows],
+  )
+
+  if (!data.byObject || !channels.length) {
+    return (
+      <div className="rounded-xl border border-dashed border-border p-6 text-center text-[12px] text-muted-foreground">
+        No per-channel breakdown on this artifact — re-run 2.6 to assemble the per-Channel-Type view.
+      </div>
+    )
+  }
+
+  const openRow = open ? rows.find((r) => open.startsWith(`${r.key}::`)) : undefined
+  const openCh = open ? open.split('::')[1] : ''
+  const openCell = openRow?.byChannel[openCh]
+
+  return (
+    <div className="space-y-3">
+      <div className="overflow-x-auto rounded-xl border border-border">
+        <table className="w-full min-w-[760px] border-collapse text-[11.5px]">
+          <thead className="bg-muted/50">
+            <tr className="text-left text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+              <th className="px-2 py-2 font-semibold">L1</th>
+              <th className="px-2 py-2 font-medium">L2</th>
+              <th className="px-2 py-2 font-medium">L3</th>
+              <th className="px-2 py-2 font-medium">L4</th>
+              <th className="px-2 py-2 font-medium">Indicator</th>
+              {channels.map((c) => (
+                <th key={c} className="px-2 py-2 text-center font-medium" title={c}>{c}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {laid.map(({ r, f1, f2, f3 }) => {
+              return (
+                <tr key={r.key} className={cn('border-b border-border/40', f1 && 'border-t border-border/70')}>
+                  <td className="px-2 py-1.5 align-top font-semibold">{f1 ? r.l1 || '—' : ''}</td>
+                  <td className="px-2 py-1.5 align-top text-foreground/80">{f2 ? r.l2 : ''}</td>
+                  <td className="px-2 py-1.5 align-top text-foreground/70">{f3 ? r.l3 : ''}</td>
+                  <td className="px-2 py-1.5 align-top text-muted-foreground">{r.l4}</td>
+                  <td className="px-2 py-1.5 align-top font-medium">{r.indicator}</td>
+                  {channels.map((c) => {
+                    const cell = r.byChannel[c]
+                    const status = cell?.status ?? 'pending'
+                    const id = `${r.key}::${c}`
+                    const chip =
+                      status === 'accepted' ? 'bg-emerald-500/15 text-emerald-600'
+                        : status === 'rejected' ? 'bg-rose-500/15 text-rose-600'
+                          : 'bg-muted text-muted-foreground'
+                    const label =
+                      status === 'accepted' ? 'Accepted'
+                        : status === 'rejected' ? `Rej @ ${cell?.rejectedAt || '—'}`
+                          : 'Pending'
+                    return (
+                      <td key={c} className="px-2 py-1.5 text-center align-top">
+                        <button
+                          type="button"
+                          disabled={!cell}
+                          onClick={() => setOpen((o) => (o === id ? '' : id))}
+                          className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', chip, cell && 'cursor-pointer hover:ring-1 hover:ring-primary/40')}
+                          title={cell ? 'Show verdict chain' : 'Not screened in this channel'}
+                        >
+                          {label}
+                        </button>
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {openRow && openCell && (
+        <aside className="rounded-xl border border-border bg-card p-3">
+          <p className="mb-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            {openRow.l4 || openRow.l3} · {openRow.indicator} · <span className="text-primary">{openCh}</span>
+          </p>
+          <VerdictChain verdicts={openCell.verdicts} />
+        </aside>
+      )}
+    </div>
+  )
+}
+
 /* ── the view ──────────────────────────────────────────── */
 export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
   const data = asMasterData(inst.body)
@@ -248,6 +408,9 @@ export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
   const [table, setTable] = useState<MasterTable | null>(null)
   const [loading, setLoading] = useState(false)
   const [pickedLayer, setPickedLayer] = useState('')
+  const [tab, setTab] = useState<'data' | 'tree'>('data')
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   const dims = data?.dimensions
   const grains = dims?.grains ?? ['month']
@@ -289,10 +452,31 @@ export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
   const rejected = pickedLayer
     ? data.rejected.filter((r) => r.rejectedAt === pickedLayer)
     : data.rejected
-  // funnel is now {combined, byObject}; the combined rollup is what this
-  // view has always rendered — per-object breakdown is the Phase 1 UI.
   const funnelLayers = data.funnel.combined ?? []
   const pickedLabel = funnelLayers.find((f) => f.layer === pickedLayer)?.label
+
+  async function doExport() {
+    if (!projectId) return
+    setExporting(true)
+    setExportError('')
+    try {
+      const url = api.masterDataExportUrl(projectId, {
+        brand: brand ? [brand] : [], provinceGroup: provinceGroup ? [provinceGroup] : [],
+        channelType: channelType ? [channelType] : [], channel: channel ? [channel] : [], grain,
+      })
+      await exportMasterDataXlsx(url, `master-data-${projectId}.xlsx`)
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : 'Export failed')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const tabClass = (id: 'data' | 'tree') =>
+    cn(
+      'rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
+      tab === id ? 'bg-accent text-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/50',
+    )
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
@@ -308,60 +492,82 @@ export function MasterDataView({ inst }: { inst: ArtifactInstance }) {
         {data.note && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{data.note}</p>}
       </header>
 
-      {data.objects.length > 0 && (
-        <div className="flex gap-2.5 overflow-x-auto pb-1">
-          {data.objects.map((o) => <ObjectCard key={o.object} o={o} />)}
-        </div>
-      )}
+      <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+        <button type="button" onClick={() => setTab('data')} className={tabClass('data')}>Data</button>
+        <button type="button" onClick={() => setTab('tree')} className={tabClass('tree')}>Factor Tree</button>
+      </div>
 
-      <section className="space-y-2">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          Filter funnel
-        </h3>
-        <FunnelBar layers={funnelLayers} picked={pickedLayer} onPick={setPickedLayer} />
-      </section>
-
-      {data.rejected.length > 0 && (
-        <section className="rounded-xl border border-border bg-card">
-          <header className="flex items-baseline justify-between gap-2 border-b border-border px-3 py-2">
-            <h3 className="text-[12px] font-semibold">
-              Rejected indicators{pickedLabel ? ` · ${pickedLabel}` : ''}
-            </h3>
-            <span className="text-[10.5px] text-muted-foreground">
-              {rejected.length} shown — click one for its full verdict chain
-            </span>
-          </header>
-          <ul className="max-h-64 overflow-y-auto">
-            {rejected.map((r) => <RejectedRow key={`${r.l4}|${r.indicator}`} r={r} />)}
-          </ul>
-        </section>
-      )}
-
-      <section className="rounded-xl border border-border bg-card">
-        <header className="flex flex-wrap items-end justify-between gap-3 border-b border-border px-3 py-2.5">
-          <div className="flex flex-wrap items-end gap-2.5">
-            <DimSelect label="Product" options={dims?.brand ?? []} value={brand} onChange={setBrand} />
-            <DimSelect label="Channel type" options={dims?.channelType ?? []} value={channelType} onChange={setChannelType} />
-            <DimSelect label="Channel" options={dims?.channel ?? []} value={channel} onChange={setChannel} />
-            <DimSelect label="Region" options={dims?.provinceGroup ?? []} value={provinceGroup} onChange={setProvinceGroup} />
-            <DimSelect label="Grain" options={grains} value={grain} onChange={setGrainPick} />
-          </div>
-          {table && table.rows.length > 0 && (
-            <span className="pb-1 text-[10.5px] text-muted-foreground">
-              {table.rowCount} periods × {table.colCount} indicators
-            </span>
+      {tab === 'data' ? (
+        <>
+          {data.objects.length > 0 && (
+            <div className="flex gap-2.5 overflow-x-auto pb-1">
+              {data.objects.map((o) => <ObjectCard key={o.object} o={o} />)}
+            </div>
           )}
-        </header>
-        {table?.truncated && (
-          <p className="flex items-start gap-1.5 border-b border-border bg-amber-500/10 px-3 py-1.5 text-[10.5px] text-amber-600">
-            <TriangleAlert className="mt-px size-3 shrink-0" />
-            {table.note}
-          </p>
-        )}
-        <div className="max-h-[26rem]">
-          <WideTable table={table} loading={loading} />
-        </div>
-      </section>
+          <section className="rounded-xl border border-border bg-card">
+            <header className="flex flex-wrap items-end justify-between gap-3 border-b border-border px-3 py-2.5">
+              <div className="flex flex-wrap items-end gap-2.5">
+                <DimSelect label="Product" options={dims?.brand ?? []} value={brand} onChange={setBrand} />
+                <DimSelect label="Channel type" options={dims?.channelType ?? []} value={channelType} onChange={setChannelType} />
+                <DimSelect label="Channel" options={dims?.channel ?? []} value={channel} onChange={setChannel} />
+                <DimSelect label="Region" options={dims?.provinceGroup ?? []} value={provinceGroup} onChange={setProvinceGroup} />
+                <DimSelect label="Grain" options={grains} value={grain} onChange={setGrainPick} />
+              </div>
+              <div className="flex items-center gap-2 pb-0.5">
+                {table && table.rows.length > 0 && (
+                  <span className="text-[10.5px] text-muted-foreground">
+                    {table.rowCount} periods × {table.colCount} indicators
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={doExport}
+                  disabled={exporting}
+                  className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium transition-colors hover:bg-accent disabled:opacity-50"
+                >
+                  {exporting ? <Loader2 className="size-3 animate-spin" /> : <Download className="size-3" />}
+                  Export .xlsx
+                </button>
+              </div>
+            </header>
+            {exportError && (
+              <p className="border-b border-border bg-rose-500/10 px-3 py-1.5 text-[10.5px] text-rose-600">{exportError}</p>
+            )}
+            {table?.truncated && (
+              <p className="flex items-start gap-1.5 border-b border-border bg-amber-500/10 px-3 py-1.5 text-[10.5px] text-amber-600">
+                <TriangleAlert className="mt-px size-3 shrink-0" />
+                {table.note} · Export downloads the full uncapped table.
+              </p>
+            )}
+            <div className="max-h-[30rem]">
+              <WideTable table={table} loading={loading} />
+            </div>
+          </section>
+        </>
+      ) : (
+        <>
+          <FactorTreeTab data={data} />
+          <section className="space-y-2">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Filter funnel</h3>
+            <FunnelBar layers={funnelLayers} picked={pickedLayer} onPick={setPickedLayer} />
+          </section>
+          {data.rejected.length > 0 && (
+            <section className="rounded-xl border border-border bg-card">
+              <header className="flex items-baseline justify-between gap-2 border-b border-border px-3 py-2">
+                <h3 className="text-[12px] font-semibold">
+                  Rejected indicators{pickedLabel ? ` · ${pickedLabel}` : ''}
+                </h3>
+                <span className="text-[10.5px] text-muted-foreground">
+                  {rejected.length} shown — click one for its full verdict chain
+                </span>
+              </header>
+              <ul className="max-h-64 overflow-y-auto">
+                {rejected.map((r) => <RejectedRow key={`${r.l4}|${r.indicator}`} r={r} />)}
+              </ul>
+            </section>
+          )}
+        </>
+      )}
     </div>
   )
 }

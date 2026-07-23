@@ -99,6 +99,13 @@ export async function exportDataRequestZip(url: string): Promise<void> {
   downloadBlob(blob, 'Data_Request.zip')
 }
 
+/** Download the full per-channel Master Data feature matrix (.xlsx) from the backend. */
+export async function exportMasterDataXlsx(url: string, filename = 'master-data.xlsx'): Promise<void> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Master Data export failed: ${res.status}`)
+  downloadBlob(await res.blob(), filename)
+}
+
 /** Export a plain 2D table (used by the Knowledge template editor). */
 export async function exportTable(name: string, columns: string[], rows: string[][]): Promise<void> {
   const XLSX = await loadXLSX()
