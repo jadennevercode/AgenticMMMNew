@@ -39,8 +39,11 @@ import type {
   ToolDetail,
   ToolInvocation,
   ToolSpec,
+  ValidationDataset,
   ValidationSeriesRequest,
   ValidationSeriesResponse,
+  ValidationSpec,
+  ValidationSpecStore,
 } from '../lib/types'
 
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8000'
@@ -264,6 +267,20 @@ export const api = {
     req<ValidationSeriesResponse>(`${p(projectId)}/validation/series`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  getValidationDataset: (projectId: string) =>
+    req<ValidationDataset>(`${p(projectId)}/validation-dataset`),
+  getValidationSpecs: (projectId: string) =>
+    req<ValidationSpecStore | Record<string, never>>(`${p(projectId)}/validation-specs`),
+  putValidationSpecs: (projectId: string, store: ValidationSpecStore) =>
+    req<ValidationSpecStore>(`${p(projectId)}/validation-specs`, {
+      method: 'PUT',
+      body: JSON.stringify(store),
+    }),
+  generateValidationInsight: (projectId: string, spec: ValidationSpec | unknown, rows: unknown[]) =>
+    req<{ insight: string }>(`${p(projectId)}/validation-insight`, {
+      method: 'POST',
+      body: JSON.stringify({ spec, rows }),
     }),
   /** DATA-005 — project time windows (comparable-period definitions). */
   getTimeWindows: (projectId: string) =>

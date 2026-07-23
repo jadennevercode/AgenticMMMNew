@@ -147,6 +147,34 @@ export interface ValidationReviewData {
   groups: ValidationGroup[]
   anomalies: ValidationAnomaly[]
   note?: string
+  specs?: ValidationSpec[]
+}
+
+/** Explorer dataset row for a single L3 (task 2.3 self-serve explorer). */
+export interface ValidationField {
+  fid: string
+  name: string
+  semanticType: 'quantitative' | 'nominal' | 'ordinal' | 'temporal'
+  analyticType: 'dimension' | 'measure'
+}
+export interface ValidationDataset {
+  columns: ValidationField[]
+  rows: Record<string, string | number | null>[]
+  rowCount: number
+  capped: boolean
+  note: string
+}
+export interface ValidationSpec {
+  specId: string
+  l3: string
+  title: string
+  encoding: { x: string; yKpi: string; yOverlay: string[]; overlayKind: 'bar' | 'line' }
+  filter: { l3: string }
+}
+/** A saved Graphic Walker chart list + version (opaque GW chart JSON). */
+export interface ValidationSpecStore {
+  specs: unknown[]
+  version: number
 }
 
 /** Live series payload from `/validation/series` (one L3 chart's data). */
