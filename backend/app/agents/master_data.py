@@ -235,3 +235,89 @@ def master_table(
         "note": (f"Showing the last {MAX_ROWS} periods / first {MAX_COLS} indicators."
                  if truncated else ""),
     }
+
+
+def _kpi_metric(df: pd.DataFrame) -> str:
+    """The primary KPI in a slice — prefer the Volume KPI (matches the OLS default Y)."""
+    kpi_rows = df[_kpi_mask(df)]
+    if kpi_rows.empty:
+        return ""
+    from app.agents.indicator_metadata import classify_indicator
+    names = _distinct(kpi_rows, "metric")
+    volume = [m for m in names if classify_indicator(m).metric_type == "kpi_volume"]
+    if volume:
+        return volume[0]
+    mode = kpi_rows["metric"].mode()
+    return str(mode.iloc[0]) if not mode.empty else ""
+
+
+def _wide_frame(st: ProjectState, df: pd.DataFrame, grain: str):
+    """The full (uncapped) KPI-first wide frame for a slice → (cols, wide indexed by period)."""
+    from app.dataeng.validation_query import _metric_agg, _pandas_agg
+    kpi_metric = _kpi_metric(df)
+    keys = _period_keys(df, grain)
+    frame = pd.DataFrame({
+        "_k": keys,
+        "_m": df["metric"].astype("string").str.strip(),
+        "_v": pd.to_numeric(df["value"], errors="coerce"),
+    }).dropna(subset=["_k", "_m"])
+    if frame.empty:
+        return [], pd.DataFrame()
+    cols_data: dict[str, pd.Series] = {}
+    for m, g in frame.groupby("_m"):
+        cols_data[str(m)] = g.groupby("_k")["_v"].agg(_pandas_agg(_metric_agg(st, str(m))))
+    wide = pd.DataFrame(cols_data).sort_index()
+    cols = [c for c in wide.columns if _lower(c) == _lower(kpi_metric)]
+    cols += sorted(c for c in wide.columns if _lower(c) != _lower(kpi_metric))
+    return cols, wide
+
+
+def build_export(
+    st: ProjectState,
+    *,
+    brand: Optional[list[str]] = None,
+    province_group: Optional[list[str]] = None,
+    channel_type: Optional[list[str]] = None,
+    channel: Optional[list[str]] = None,
+    grain: str = "month",
+) -> bytes:
+    """The full adopted feature matrix as xlsx — one sheet per Channel Type, NOT
+    subject to the master-table display cap. Each channel carries its own adopted
+    indicators (the per-object mask), so different channels export different columns.
+    """
+    from io import BytesIO
+    import openpyxl
+    from app.agents.dataset_cache import model_objects
+
+    try:
+        df = _adopted_df(st)
+    except Exception:  # noqa: BLE001 — no bound data; return an empty workbook
+        df = pd.DataFrame()
+    if not df.empty:
+        df = _apply_dims(df, {"brand": brand, "provinceGroup": province_group, "channel": channel})
+
+    objs = model_objects(st)
+    if channel_type:
+        wanted = {_lower(c) for c in channel_type}
+        objs = [o for o in objs if _lower(o) in wanted]
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for obj in objs:
+        sub = df[df["channel_type"].astype("string").str.strip() == obj] if not df.empty else df
+        if sub.empty:
+            continue
+        g = grain if grain in _available_grains(sub) else ("month" if "month" in _available_grains(sub) else "year")
+        cols, wide = _wide_frame(st, sub, g)
+        if not cols:
+            continue
+        ws = wb.create_sheet(title=str(obj)[:31] or "sheet")
+        ws.append(["Period"] + [str(c) for c in cols])
+        for k in wide.index:
+            ws.append([_period_label(int(k), g)]
+                      + [None if pd.isna(v := wide.at[k, c]) else round(float(v), 2) for c in cols])
+    if not wb.sheetnames:
+        wb.create_sheet(title="empty")
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

@@ -956,6 +956,32 @@ async def post_master_table(project_id: str, body: MasterTableQuery) -> dict:
     )
 
 
+@app.get("/api/projects/{project_id}/master-data/export")
+async def export_master_data(
+    project_id: str,
+    brand: str = "",
+    provinceGroup: str = "",
+    channelType: str = "",
+    channel: str = "",
+    grain: str = "month",
+) -> Response:
+    """Download the full adopted feature matrix as xlsx — one sheet per Channel
+    Type, uncapped (not the master-table display slice)."""
+    from app.agents import master_data
+    st = _require_state(project_id)
+    data = master_data.build_export(
+        st, brand=[brand] if brand else None,
+        province_group=[provinceGroup] if provinceGroup else None,
+        channel_type=[channelType] if channelType else None,
+        channel=[channel] if channel else None, grain=grain,
+    )
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="master-data-{project_id}.xlsx"'},
+    )
+
+
 # ── Indicator lifecycle ledger (S2 · every layer's verdict) ─
 @app.get("/api/projects/{project_id}/indicator-ledger")
 async def get_indicator_ledger(project_id: str) -> dict:
