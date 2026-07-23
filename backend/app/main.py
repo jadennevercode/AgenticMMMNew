@@ -965,6 +965,8 @@ async def get_indicator_ledger(project_id: str) -> dict:
     it can never disagree with the scorecards, the sign-offs or the OLS setup.
     """
     from app.agents import ledger
+    from app.agents.dataset_cache import model_objects
+    from app.agents.ledger import OBJECT_ANY
     st = _require_state(project_id)
     rows = ledger.indicator_ledger(st)
     # interim: dedup by indicator key — one verdict per indicator until the
@@ -979,6 +981,18 @@ async def get_indicator_ledger(project_id: str) -> dict:
             continue
         seen.add(r.key)
         deduped.append(r)
+
+    def _row(r):
+        return {
+            "object": r.object, "l1": r.l1, "l2": r.l2, "l3": r.l3, "l4": r.l4,
+            "indicator": r.indicator, "adopted": r.adopted, "rejectedAt": r.rejected_at,
+            "reason": r.reason,
+            "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
+                          "status": v.status, "note": v.note} for v in r.verdicts],
+        }
+
+    objs = model_objects(st) or [OBJECT_ANY]
+    rows_by_object = {o: [_row(r) for r in rows if r.object in (o, OBJECT_ANY)] for o in objs}
     return {
         "layers": [{"layer": lid, "task": task, "label": label}
                    for lid, task, label in ledger.LAYERS],
@@ -988,6 +1002,7 @@ async def get_indicator_ledger(project_id: str) -> dict:
             "verdicts": [{"layer": v.layer, "task": v.task, "label": v.label,
                           "status": v.status, "note": v.note} for v in r.verdicts],
         } for r in deduped],
+        "rowsByObject": rows_by_object,
         # TODO(Task 7): serialize the per-object funnel; for now the combined
         # rollup keeps this endpoint's response shape unchanged.
         "funnel": ledger.funnel(st)["combined"],
