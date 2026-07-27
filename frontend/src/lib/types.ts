@@ -1914,6 +1914,21 @@ export interface FactorMapRow {
   /** Ranked proposals, best first. Empty for mapped rows and for rows with no
    *  candidate above the suggestion threshold. */
   suggestions: FactorMapSuggestion[]
+  /** Every source supplying this row — a factor may be split across several data
+   *  assets. The flat assetId/assetName/metric/coverage* fields above report the
+   *  primary one (a human pin, else the widest series). */
+  coverages: FactorMapCoverage[]
+}
+
+export interface FactorMapCoverage {
+  coverageId: string
+  assetId: string
+  assetName: string
+  metric: string
+  coverageStart: string
+  coverageEnd: string
+  rows: number
+  boundBy: '' | 'auto' | 'human'
 }
 
 export type MetricRole = 'Y' | 'X' | 'excluded'

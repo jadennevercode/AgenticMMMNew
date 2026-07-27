@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.agents.data_request import _norm
 from app.agents.overrides import (
     default_metric_type,
     metric_type_override,
@@ -20,6 +19,19 @@ from app.agents.overrides import (
 from app.store.state import ProjectState
 
 _ACTIVE_STATUSES = ("baseline", "accepted")
+
+
+@dataclass
+class FactorMapCoverage:
+    """One published (asset × metric) supplying this row."""
+    coverage_id: str
+    asset_id: str
+    asset_name: str
+    metric: str
+    coverage_start: str = ""
+    coverage_end: str = ""
+    rows: int = 0
+    bound_by: str = ""
 
 
 @dataclass
@@ -42,6 +54,10 @@ class FactorMapRow:
     # the name-based classifier default). metric_type ∈ {"Y","X","excluded"}.
     metric_type: str = "X"
     aggregation: str = "sum"
+    # Every source supplying this row. The flat asset_id/asset_name/metric/
+    # coverage_* fields above stay, reporting the primary coverage, so existing
+    # readers (the 2.1 artifact, IndicatorCatalogPanel) are unaffected.
+    coverages: list[FactorMapCoverage] = field(default_factory=list)
 
 
 @dataclass
@@ -70,44 +86,20 @@ class FactorMap:
         return self.total > 0 and self.pending == 0
 
 
-def _cover_indicator(row, index: dict) -> object | None:
-    """The published indicator covering `row`, or None. Precedence: exact
-    tree_row_id → full L1–L4 path → L3 + indicator-name match."""
-    by_row_id, by_path, by_l3_metric = index["row_id"], index["path"], index["l3_metric"]
-    if row.id in by_row_id:
-        return by_row_id[row.id]
-    path = (_norm(row.l1), _norm(row.l2), _norm(row.l3), _norm(row.l4))
-    if path in by_path:
-        return by_path[path]
-    if row.indicator:
-        key = (_norm(row.l3), _norm(row.indicator))
-        if key in by_l3_metric:
-            return by_l3_metric[key]
-    return None
-
-
-def _index_indicators(st: ProjectState) -> dict:
-    """Build lookup indexes over the published indicators for row matching."""
-    by_row_id: dict[str, object] = {}
-    by_path: dict[tuple, object] = {}
-    by_l3_metric: dict[tuple, object] = {}
-    for ind in getattr(st, "indicators", None) or []:
-        if ind.tree_row_id:
-            by_row_id.setdefault(ind.tree_row_id, ind)
-        by_path.setdefault((_norm(ind.l1), _norm(ind.l2), _norm(ind.l3), _norm(ind.l4)), ind)
-        if ind.l3 and ind.metric:
-            by_l3_metric.setdefault((_norm(ind.l3), _norm(ind.metric)), ind)
-    return {"row_id": by_row_id, "path": by_path, "l3_metric": by_l3_metric}
-
-
 def resolve_factor_map(st: ProjectState) -> FactorMap:
-    """Per active factor-tree row: mapped (a published indicator covers it),
-    ignored (user-chosen), or pending (needs a decision)."""
+    """Per active factor-tree row: mapped (≥1 coverage record supplies it),
+    ignored (user-chosen), or pending (needs a decision).
+
+    Coverage is attached at publish (``service.claim_published_metrics``) or by a
+    human binding; matching is not re-guessed here, so this view cannot disagree
+    with what the Data Engine recorded.
+    """
+    from app.dataeng import indicators as ind
+
     ft = getattr(st, "factor_tree", None)
     if ft is None:
         return FactorMap()
     ignores = getattr(st, "factor_map_ignores", None) or {}
-    index = _index_indicators(st)
     out: list[FactorMapRow] = []
     for r in ft.rows:
         if r.status not in _ACTIVE_STATUSES:
@@ -116,7 +108,12 @@ def resolve_factor_map(st: ProjectState) -> FactorMap:
             row_id=r.id, l1=r.l1, l2=r.l2, l3=r.l3, l4=r.l4,
             indicator=r.indicator, status="pending",
         )
-        cover = _cover_indicator(r, index)
+        fm.coverages = [FactorMapCoverage(
+            coverage_id=c.id, asset_id=c.asset_id, asset_name=c.asset_name,
+            metric=c.metric, coverage_start=c.coverage_start,
+            coverage_end=c.coverage_end, rows=c.rows, bound_by=c.bound_by)
+            for c in ind.coverages_for(st, r.id)]
+        cover = ind.primary_coverage(st, r.id)
         if cover is not None:
             fm.status = "mapped"
             fm.asset_id = cover.asset_id

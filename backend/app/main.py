@@ -885,8 +885,10 @@ async def put_target_schema(project_id: str, body: list[TargetColumn]) -> list[d
 
 @app.get("/api/projects/{project_id}/indicators")
 async def get_indicators(project_id: str) -> list[dict]:
+    """The data target list: every confirmed factor row, plus orphan metrics."""
+    from app.dataeng.indicators import derive_indicators
     st = _require_state(project_id)
-    return [i.model_dump(by_alias=True) for i in st.indicators]
+    return [i.model_dump(by_alias=True) for i in derive_indicators(st)]
 
 
 # ── Business Validation live series (task 2.3) ───────────
@@ -1251,6 +1253,12 @@ def _factor_map_payload(st) -> dict:
             "coverageStart": r.coverage_start, "coverageEnd": r.coverage_end,
             "ignoreNote": r.ignore_note,
             "metricType": r.metric_type, "aggregation": r.aggregation,
+            "coverages": [{
+                "coverageId": c.coverage_id, "assetId": c.asset_id,
+                "assetName": c.asset_name, "metric": c.metric,
+                "coverageStart": c.coverage_start, "coverageEnd": c.coverage_end,
+                "rows": c.rows, "boundBy": c.bound_by,
+            } for c in r.coverages],
             "suggestions": [{
                 "indicatorId": s.indicator_id, "metric": s.metric,
                 "assetId": s.asset_id, "assetName": s.asset_name, "unit": s.unit,

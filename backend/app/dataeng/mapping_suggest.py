@@ -126,18 +126,18 @@ def _reason(row, ind, s: float) -> str:
 def suggest_all(st: ProjectState) -> dict[str, list[Suggestion]]:
     """Ranked suggestions per pending factor row id (best first).
 
-    A published indicator already bound to another row is not re-proposed: one
-    indicator covering two factors is a mapping error, not a suggestion.
+    Only orphan coverages are candidates: a metric already supplying another
+    factor cannot also supply this one, so proposing it would be a mapping error
+    dressed as a suggestion.
     """
+    from app.dataeng import indicators as ind
     from app.dataeng.mapping import resolve_factor_map
 
     fmap = resolve_factor_map(st)
     pending = [r for r in fmap.rows if r.status == "pending"]
     if not pending:
         return {}
-    taken = {r.row_id for r in fmap.rows if r.status == "mapped"}
-    cands = [i for i in (getattr(st, "indicators", None) or [])
-             if not i.tree_row_id or i.tree_row_id not in taken]
+    cands = ind.orphan_indicators(st)
     if not cands:
         return {}
 
@@ -208,27 +208,25 @@ async def narrate(st: ProjectState, suggestions: dict[str, list[Suggestion]]) ->
     return out
 
 
-def bind(st: ProjectState, row_id: str, indicator_id: str) -> bool:
-    """Accept a suggestion: bind the published indicator to the factor row.
+def bind(st: ProjectState, row_id: str, coverage_id: str) -> bool:
+    """Pin a published (asset × metric) to a factor row.
 
-    The resolver then reports the row as ``mapped`` through its ordinary
-    exact-match path — no second notion of "mapped" is introduced here.
+    One published metric supplies at most one row, so any incumbent claim on this
+    row is released — otherwise two coverages claim it and which one represents
+    the row is resolution order. Several *deliberate* sources for one factor are
+    still possible; they arrive by publishing, not by re-pinning.
     """
-    indicators = getattr(st, "indicators", None) or []
-    if not any(ind.id == indicator_id for ind in indicators):
+    covs = getattr(st, "indicator_coverage", None) or []
+    if not any(c.id == coverage_id for c in covs):
         return False
-    # A row maps to exactly one indicator. Re-binding must release the incumbent,
-    # or two indicators claim the row and which one wins is resolution order.
-    for ind in indicators:
-        if ind.tree_row_id == row_id and ind.id != indicator_id:
-            ind.tree_row_id = ""
-            ind.tree_grounded = False
-            ind.bound_by = ""
-    for ind in indicators:
-        if ind.id == indicator_id:
-            ind.tree_row_id = row_id
-            ind.tree_grounded = True
-            ind.bound_by = "human"
+    for c in covs:
+        if c.tree_row_id == row_id and c.id != coverage_id:
+            c.tree_row_id = ""
+            c.bound_by = ""
+    for c in covs:
+        if c.id == coverage_id:
+            c.tree_row_id = row_id
+            c.bound_by = "human"
             # A row that was ignored is no longer unresolved-by-choice.
             if getattr(st, "factor_map_ignores", None):
                 st.factor_map_ignores.pop(row_id, None)
@@ -237,12 +235,11 @@ def bind(st: ProjectState, row_id: str, indicator_id: str) -> bool:
 
 
 def unbind(st: ProjectState, row_id: str) -> bool:
-    """Release whatever indicator was bound to this row (remap / undo)."""
+    """Release every coverage supplying this row (remap / undo)."""
     hit = False
-    for ind in getattr(st, "indicators", None) or []:
-        if ind.tree_row_id == row_id:
-            ind.tree_row_id = ""
-            ind.tree_grounded = False
-            ind.bound_by = ""
+    for c in getattr(st, "indicator_coverage", None) or []:
+        if c.tree_row_id == row_id:
+            c.tree_row_id = ""
+            c.bound_by = ""
             hit = True
     return hit

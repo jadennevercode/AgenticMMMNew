@@ -41,8 +41,12 @@ def auto_resolve_factor_map(st: ProjectState, *, bind_threshold: float = BIND_TH
     if not pending:
         return {"bound": 0, "ignored": 0, "pending_before": 0}
 
-    used = {i.tree_row_id for i in (st.indicators or []) if i.tree_row_id}
-    candidates = list(st.indicators or [])
+    # Only orphans can be assigned: a coverage already supplying a factor cannot
+    # stand in for a second one. `used` still stops one metric being handed to two
+    # rows inside a single greedy pass.
+    from app.dataeng import indicators as ind
+    candidates = ind.orphan_indicators(st)
+    used: set[str] = set()
 
     scored: list[tuple[float, str, str]] = []
     for r in pending:
