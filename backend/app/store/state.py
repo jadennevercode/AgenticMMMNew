@@ -254,19 +254,38 @@ def _migrate_indicators_to_coverage(st: ProjectState) -> int:
 
     Indicators used to be stored, built by groupby over each published mart. They
     are now derived from the factor tree, so the stored list is drained here.
-    Automatic bindings are dropped — they are re-derived on the next publish, or
-    re-proposed by ``mapping_auto``. **Human bindings are decisions and would be
-    destroyed if this did not run**, which is the one irreversible failure in the
-    move; they are carried across by id.
+    **A binding destroyed here cannot be recovered**, so the rule is deliberately
+    conservative: carry every binding EXCEPT the ones explicitly marked ``auto``,
+    which are the only ones a re-publish provably reproduces.
+
+    ``bound_by`` postdates some of the data. The real Danone project holds its 2.1
+    gate open with ten bindings carrying ``""`` whose indicator path matches their
+    factor row's by no rule in the code — only the metric name lines up — so
+    ``_reclaim_published_assets`` does not reproduce them either. Treating "not
+    marked human" as "safe to drop" silently re-blocked that gate.
+
+    Carried bindings land as ``human``: they are not re-derivable, so a later
+    re-publish must not quietly discard them.
 
     Returns the number of bindings carried, for logging/verification.
     """
     if not st.indicators:
         return 0
-    known = {c.id for c in st.indicator_coverage}
+    known = {c.id: c for c in st.indicator_coverage}
     carried = 0
     for ind in st.indicators:
-        if ind.bound_by != "human" or not ind.tree_row_id or ind.id in known:
+        if ind.bound_by == "auto" or not ind.tree_row_id:
+            continue
+        existing = known.get(ind.id)
+        if existing is not None:
+            # `_reclaim_published_assets` already rebuilt this coverage from the
+            # parquet and found no factor row for it — that is precisely the
+            # binding this migration exists to preserve, so overlay it rather
+            # than treating the record's presence as "already handled".
+            if not existing.tree_row_id:
+                existing.tree_row_id = ind.tree_row_id
+                existing.bound_by = "human"
+                carried += 1
             continue
         st.indicator_coverage.append(IndicatorCoverage(
             id=ind.id, treeRowId=ind.tree_row_id,
@@ -283,11 +302,49 @@ def _migrate_indicators_to_coverage(st: ProjectState) -> int:
     return carried
 
 
+def _reclaim_published_assets(st: ProjectState) -> int:
+    """Replay the publish-time claim over assets that published before the refactor.
+
+    ``_migrate_indicators_to_coverage`` drops automatic bindings on purpose — they
+    are derived, and a re-publish rebuilds them. But an existing project can have
+    dozens of published assets, and nobody is going to re-publish them by hand to
+    get its 2.1 mapping back. The parquet is still on disk, so the claim is
+    replayed from it, producing exactly what the publish path would have written.
+
+    Runs before ``_migrate_indicators_to_coverage`` so the legacy bindings overlay
+    a complete rebuild rather than competing with one, and only for published
+    assets that have no coverage yet — after a full pass every one of them does,
+    so this is effectively a one-shot. ``heal_state`` itself runs once per project
+    per process (``ProjectStore.get`` caches), so the parquet reads are not on a
+    request path. Returns the number of assets reclaimed.
+    """
+    covered = {c.asset_id for c in st.indicator_coverage}
+    published = [a for a in st.data_assets
+                 if a.status == "published" and a.versions and a.id not in covered]
+    if not published:
+        return 0
+    from app.dataeng import assets as asset_svc
+    from app.dataeng.dbt.service import claim_published_metrics
+
+    done = 0
+    for asset in published:
+        latest = max(asset.versions, key=lambda v: v.version)
+        df = asset_svc.read_version(st.project_id, latest)
+        if df is None or df.empty:
+            continue
+        claim_published_metrics(st, asset, df)
+        done += 1
+    return done
+
+
 def heal_state(st: ProjectState) -> ProjectState:
     """Reconcile a loaded state with the current blueprint: add any missing
     tasks/decisions/assignments/ai-choices, and prune ones the blueprint no
     longer defines (e.g. removed tasks/artifacts), so blueprint changes don't
     leave stale entries on saved projects."""
+    # Order matters: rebuild coverage from the published parquet FIRST, then
+    # overlay the legacy bindings nothing reproduces.
+    _reclaim_published_assets(st)
     _migrate_indicators_to_coverage(st)
     template = initial_state(st.meta or danone_meta())
     pre_existing = set(st.tasks)
