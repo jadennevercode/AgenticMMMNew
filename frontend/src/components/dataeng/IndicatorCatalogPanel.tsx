@@ -212,9 +212,27 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
     await act('bulk', () => api.setFactorMapIgnoreBulk(pid, ids, 'no data source'), setFactorMap)
   }, [pid, factorMap])
 
+  /**
+   * Adopt an orphan into the factor tree, or drop it. Adoption changes the tree,
+   * so the factor map is reloaded too — otherwise the new row is missing from the
+   * mapping table above until the next manual refresh.
+   */
+  const resolveOrphan = useCallback(async (coverageId: string, action: 'adopt' | 'dismiss') => {
+    if (!pid) return
+    await act(coverageId, () => action === 'adopt'
+      ? api.adoptOrphanIndicator(pid, coverageId)
+      : api.dismissOrphanIndicator(pid, coverageId), setIndicators)
+    if (action === 'adopt') refresh()
+  }, [pid, refresh])
+
   const needle = query.trim().toLowerCase()
   const visible = (indicators ?? []).filter((i) => !needle
     || `${i.metric} ${i.l1} ${i.l2} ${i.l3} ${i.l4} ${i.assetName}`.toLowerCase().includes(needle))
+  // treeGrounded splits the catalog: a declared factor (with or without data) vs
+  // a metric the data supplies that nothing asked for.
+  const declared = visible.filter((i) => i.treeGrounded)
+  const orphans = visible.filter((i) => !i.treeGrounded)
+  const supplied = declared.filter((i) => Boolean(i.assetId)).length
 
   return (
     <div className="flex h-full flex-col">
@@ -360,21 +378,27 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
           </Card>
         )}
 
-        {/* ── published indicators (click → asset) ── */}
+        {/* ── the data target list: one row per confirmed factor ── */}
         {indicators && indicators.length === 0 && (
           <Card className="p-6 text-center text-[12px] text-muted-foreground">
-            No published indicators yet — publish a data asset and its metrics appear here.
+            No data targets yet. The factor tree defines what this project collects —
+            confirm it in Business Understanding and every factor appears here.
           </Card>
         )}
-        {indicators && indicators.length > 0 && (
+        {declared.length > 0 && (
           <Card className="overflow-hidden p-0">
-            <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-              <span className="text-[13px] font-semibold">Published indicators</span>
-              <span className="text-[11px] text-muted-foreground">{visible.length} of {indicators.length}</span>
+            <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+              <span className="text-[13px] font-semibold">Data targets</span>
+              <span className="text-[11px] text-muted-foreground">
+                {supplied} of {declared.length} supplied
+              </span>
               <input value={query} onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search metric, factor path or asset…"
                 className="ml-auto w-64 rounded border border-border bg-background px-2 py-1 text-[11px] outline-none focus:border-primary/60" />
             </div>
+            <p className="border-b border-border bg-muted/30 px-4 py-1.5 text-[11px] text-muted-foreground">
+              Every confirmed factor is an indicator this project must collect.
+            </p>
             <table className="w-full border-collapse text-[12px]">
               <thead className="bg-muted/60 text-left text-muted-foreground">
                 <tr>
@@ -387,18 +411,73 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
                 </tr>
               </thead>
               <tbody>
-                {visible.map((ind) => (
-                  <tr key={ind.id}
-                    onClick={() => onOpenAsset(ind.assetId)}
-                    className="cursor-pointer border-t border-border transition-colors hover:bg-accent">
+                {declared.map((ind) => {
+                  const covered = Boolean(ind.assetId)
+                  return (
+                    <tr key={ind.id}
+                      onClick={() => covered && onOpenAsset(ind.assetId)}
+                      className={cn('border-t border-border transition-colors',
+                        covered ? 'cursor-pointer hover:bg-accent' : 'text-muted-foreground')}>
+                      <td className="px-3 py-2 font-medium text-foreground">{ind.metric}</td>
+                      <td className="px-3 py-2">
+                        {ind.metricType && (
+                          <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', ROLE_STYLE[ind.metricType] ?? 'bg-muted text-muted-foreground')}>
+                            {ind.metricType}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
+                        {[ind.l1, ind.l2, ind.l3, ind.l4].filter(Boolean).join(' › ') || '—'}
+                      </td>
+                      <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                        {covered
+                          ? `${fmtPeriod(ind.coverageStart)} → ${fmtPeriod(ind.coverageEnd)}`
+                          : <span className="italic">Not supplied yet</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {covered ? ind.rows.toLocaleString() : '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        {covered ? (
+                          <span className="inline-flex items-center gap-1 font-medium text-primary">
+                            {ind.assetName}<ArrowRight className="size-3" />
+                          </span>
+                        ) : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </Card>
+        )}
+
+        {/* ── supplied metrics no factor asked for ── */}
+        {orphans.length > 0 && (
+          <Card className="overflow-hidden p-0">
+            <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+              <AlertTriangle className="size-3.5 text-amber-600" />
+              <span className="text-[13px] font-semibold">In the data, not in the factor tree</span>
+              <span className="ml-auto text-[11px] text-muted-foreground">{orphans.length}</span>
+            </div>
+            <p className="border-b border-border bg-muted/30 px-4 py-1.5 text-[11px] text-muted-foreground">
+              These metrics were published but no factor asked for them.
+            </p>
+            <table className="w-full border-collapse text-[12px]">
+              <thead className="bg-muted/60 text-left text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Metric</th>
+                  <th className="px-3 py-2 font-medium">Path in the data</th>
+                  <th className="px-3 py-2 font-medium">Coverage</th>
+                  <th className="px-3 py-2 text-right font-medium">Rows</th>
+                  <th className="px-3 py-2 font-medium">Source asset</th>
+                  <th className="px-3 py-2 text-right font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orphans.map((ind) => (
+                  <tr key={ind.id} className="border-t border-border align-top">
                     <td className="px-3 py-2 font-medium">{ind.metric}</td>
-                    <td className="px-3 py-2">
-                      {ind.metricType && (
-                        <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-medium', ROLE_STYLE[ind.metricType] ?? 'bg-muted text-muted-foreground')}>
-                          {ind.metricType}
-                        </span>
-                      )}
-                    </td>
                     <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
                       {[ind.l1, ind.l2, ind.l3, ind.l4].filter(Boolean).join(' › ') || '—'}
                     </td>
@@ -407,9 +486,25 @@ export function IndicatorCatalogPanel({ onOpenAsset }: { onOpenAsset: (assetId: 
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{ind.rows.toLocaleString()}</td>
                     <td className="px-3 py-2">
-                      <span className="inline-flex items-center gap-1 font-medium text-primary">
+                      <button type="button" onClick={() => onOpenAsset(ind.assetId)}
+                        className="inline-flex items-center gap-1 font-medium text-primary hover:underline">
                         {ind.assetName}<ArrowRight className="size-3" />
-                      </span>
+                      </button>
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-2">
+                        <button type="button" disabled={busy === ind.id}
+                          onClick={() => void resolveOrphan(ind.id, 'adopt')}
+                          className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/5 px-2 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-50">
+                          {busy === ind.id ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3" />}
+                          Add to factor tree
+                        </button>
+                        <button type="button" disabled={busy === ind.id}
+                          onClick={() => void resolveOrphan(ind.id, 'dismiss')}
+                          className="text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50">
+                          Dismiss
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
