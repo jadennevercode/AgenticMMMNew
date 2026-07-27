@@ -103,9 +103,12 @@ Everything else — `l1..l4`, metric name, `source`, `dimension` — is read fro
 adding rows, a gate accepting/rejecting, a manual `PUT /factor-tree`) is reflected
 in the indicator catalog immediately, with no second list to keep in sync.
 
-`ProjectState.indicators` is removed as a stored field. `GET
-/api/projects/{id}/indicators` returns the derived list, so the frontend contract
-(`lib/types.ts::Indicator`) does not change.
+`ProjectState.indicators` stops being read or written — but the **field stays
+declared**, drained and emptied by `heal_state`. Pydantic drops unknown keys on
+load, so deleting it outright would destroy a saved project's human bindings
+before the migration could see them. `GET /api/projects/{id}/indicators` returns
+the derived list, so the frontend contract (`lib/types.ts::Indicator`) does not
+change.
 
 #### 3. Publish claims rather than creates
 
