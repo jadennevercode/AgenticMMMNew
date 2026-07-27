@@ -191,32 +191,61 @@ def _decomposition(
 
 def _roi(
     mf: ModelFrame, X: pd.DataFrame, res: OLSResult, price_per_unit: float | None = None
-) -> tuple[dict[str, float], str]:
-    """ROI per paid channel = incremental **revenue** / total spend.
+) -> tuple[dict[str, float], str, dict[str, dict]]:
+    """ROI per driver = incremental **revenue** / the spend that bought it.
 
-    ``incremental = coef · Σ(transformed spend)`` is the counterfactual lift in Y
-    from zeroing that channel. Converting it to revenue depends on what Y is:
+    ``incremental = coef · Σ(transformed x)`` is the counterfactual lift in Y from
+    zeroing that driver. Converting it to revenue depends on what Y is:
 
     * Y is money (RMB / value / GMV)  → incremental is already revenue → true ROI.
     * Y is volume + ``price_per_unit`` → incremental × price → true ROI.
     * Y is volume, no price            → ROI stays volume-per-spend; the caller
       must label the unit and must NOT compare it to money ROI benchmarks.
 
-    Returns ``(roi, unit)`` where unit is "revenue/spend" or "volume/spend".
+    **The denominator** is the driver's own spend when the driver *is* a spend
+    metric, and otherwise its L4's Spending series (``mf.l4_spend``). Every driver
+    the fit gives a contribution to therefore gets an ROI as long as its L4 cost
+    money — which is the point of collecting the per-L4 spend at all: a channel the
+    model represents by an exposure metric (GRP, impressions, 铺货率) was still
+    bought with a real budget. Restricting ROI to spend columns, as this did
+    before, silently dropped every exposure-modelled factor out of the ROI table
+    *and* out of the 2.5r range check.
+
+    Preferring the driver's **own** spend over its L4 total is deliberate: an L4
+    carrying several spend metrics would otherwise divide each of them by the
+    union of all of them and understate every one.
+
+    Returns ``(roi, unit, basis)`` where unit is "revenue/spend" or "volume/spend"
+    and ``basis[col]`` records the denominator actually used, so the UI can say
+    which spend an ROI was divided by rather than leaving it unexplained.
     """
     money = mf.y_is_money
     price = None if money else (price_per_unit if (price_per_unit or 0) > 0 else None)
     unit = "revenue/spend" if (money or price) else "volume/spend"
 
     roi: dict[str, float] = {}
-    for c in mf.spend_cols:
-        spend = float(mf.frame[c].to_numpy(dtype=float).sum())
+    basis: dict[str, dict] = {}
+    for c in mf.x_cols:
+        meta = mf.meta.get(c, {})
+        if c in mf.spend_cols:
+            spend = float(mf.frame[c].to_numpy(dtype=float).sum())
+            source, metrics = "own", [str(meta.get("metric", c))]
+        else:
+            l4n = str(meta.get("l4_norm", ""))
+            series = mf.l4_spend.get(l4n)
+            if series is None:
+                continue  # nothing under this L4 was bought — no ROI to state
+            spend = float(series.to_numpy(dtype=float).sum())
+            source, metrics = "l4", list(mf.l4_spend_meta.get(l4n, []))
+        if spend <= 0:
+            continue
         incremental = float(res.coef[c] * X[c].to_numpy(dtype=float).sum())
         if price:
             incremental *= float(price)
-        if spend > 0:
-            roi[c] = incremental / spend
-    return roi, unit
+        roi[c] = incremental / spend
+        basis[c] = {"spend": round(spend, 4), "source": source,
+                    "l4": str(meta.get("l4", "")), "metrics": metrics}
+    return roi, unit, basis
 
 
 def _response_curves(
@@ -335,8 +364,10 @@ def run_mmm(
     hill_half: float | None = None,
     exclude: frozenset[tuple[str, str]] | None = None,
     y_metric: str | None = None,
-    include: frozenset[str] | None = None,
+    include: frozenset | None = None,
     params: "OlsParams | None" = None,
+    st: object | None = None,
+    vocab=None,
 ) -> MmmModelResult:
     """Full MMM pipeline for one model object.
 
@@ -347,20 +378,25 @@ def run_mmm(
         hill_half: saturation half-point as a fraction of mean adstocked spend
             (e.g. 1.0 = half-saturation at the mean). ``None`` disables Hill.
         exclude: driver ``(norm_l4, norm_metric)`` pairs to drop before fitting.
-        y_metric: explicit response metric (2.5y). ``None`` → auto-pick.
-        include: explicit driver metric names (2.5x). ``None`` → auto-select.
+        y_metric: explicit response metric (2.5). ``None`` → auto-pick.
+        include: the human's driver selection (2.5), as ``(norm_l4, norm_metric)``
+            pairs or legacy bare metric names. ``None`` → auto-select.
         params: :class:`OlsParams` — transforms + trend/seasonality controls.
             When given, its ``adstock``/``saturation``/``hill_half`` override the
             positional args, and its controls enter the design matrix.
+        st: the project state, read only for each indicator's 2.1 aggregation.
+        vocab: the project's resolved vocabulary. ``None`` → the default bank.
     """
     if params is not None:
         adstock = float(getattr(params, "adstock", adstock))
         hill_half = (float(getattr(params, "hill_half", 1.0))
                      if getattr(params, "saturation", "hill") == "hill" else None)
 
+    frame_kw = {"vocab": vocab} if vocab is not None else {}
     mf = build_model_frame(long_df, model_object, exclude=exclude,
                            y_metric=y_metric, include=include,
-                           caps=list(getattr(params, "caps", None) or []))
+                           caps=list(getattr(params, "caps", None) or []),
+                           st=st, **frame_kw)
     X, halves = _transform_drivers(mf, adstock, hill_half)
     y = mf.frame[mf.y_col].to_numpy(dtype=float)
 
@@ -384,7 +420,7 @@ def run_mmm(
     res = fit_ols(X, y)
     baseline_pct, contribution = _decomposition(mf, X, res, control_cols)
     price = getattr(params, "price_per_unit", None) if params is not None else None
-    roi, roi_unit = _roi(mf, X, res, price)
+    roi, roi_unit, roi_basis = _roi(mf, X, res, price)
     curves = _response_curves(mf, res, adstock, halves)
     flags = _red_flags(mf, res, baseline_pct)
     periods = _period_labels(mf)
@@ -417,6 +453,7 @@ def run_mmm(
             "y_metric_type": mf.y_metric_type,
             "y_is_money": mf.y_is_money,
             "roi_unit": roi_unit,
+            "roi_basis": roi_basis,
             "drivers_meta": mf.meta,
             "spend_cols": mf.spend_cols,
             "control_cols": control_cols,

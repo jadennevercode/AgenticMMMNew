@@ -18,7 +18,11 @@ from app.store.state import ProjectState
 
 
 def _state() -> ProjectState:
-    st = ProjectState(project_id="ols-roundtrip")
+    # No project_id on purpose: `dataset_cache._allow_reference` only serves the
+    # Danone reference table to the seeded demo or an explicit opt-in, so a state
+    # carrying an arbitrary id resolves to *no data* and every assertion below
+    # would be vacuously about an empty fit.
+    st = ProjectState()
     st.meta = ProjectMeta(
         id="ols-roundtrip", name="Roundtrip", brand="B",
         industry=IndustryRef(l1="food-bev", l2="beverage", l3="sports-functional"),
@@ -32,7 +36,7 @@ def _proposed() -> ProjectState:
     from app.agents import data
 
     st = _state()
-    asyncio.run(data.propose_ols_setup(build_engine(), st, {"id": "2.5"}))
+    asyncio.run(data.ols_search_and_fit(build_engine(), st, {"id": "2.5"}))
     return st
 
 
@@ -52,13 +56,17 @@ def test_proposal_is_grounded() -> None:
     assert any(c.vif > 1.0 or abs(c.pearson) > 0.0 for c in cfg.x_candidates)
 
 
-def test_propose_leaves_setup_state_unfitted() -> None:
+def test_task_2_5_searches_and_fits_in_one_step() -> None:
+    """Since the v3 revamp 2.5 is a single task: it searches each L4's candidate
+    indicators and fits the winning setup, rather than only proposing one for a
+    separate confirm step (the old 2.5y/2.5x/2.5p chain is gone)."""
     st = _proposed()
     art = st.artifact("a-ols-test")
-    assert art is not None and art.state == "proposed"
-    assert art.body["tree"] == [] and art.body["objects"] == []
+    assert art is not None
     assert art.body["setup"]["configured"] is True
     assert st.ols_config is not None
+    assert art.body["objects"], "2.5 must leave a fitted model behind"
+    assert art.body["tree"], "2.5 must leave a populated factor tree behind"
 
 
 def test_apply_config_refits_and_rerenders() -> None:

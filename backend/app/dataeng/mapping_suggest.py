@@ -214,10 +214,21 @@ def bind(st: ProjectState, row_id: str, indicator_id: str) -> bool:
     The resolver then reports the row as ``mapped`` through its ordinary
     exact-match path — no second notion of "mapped" is introduced here.
     """
-    for ind in getattr(st, "indicators", None) or []:
+    indicators = getattr(st, "indicators", None) or []
+    if not any(ind.id == indicator_id for ind in indicators):
+        return False
+    # A row maps to exactly one indicator. Re-binding must release the incumbent,
+    # or two indicators claim the row and which one wins is resolution order.
+    for ind in indicators:
+        if ind.tree_row_id == row_id and ind.id != indicator_id:
+            ind.tree_row_id = ""
+            ind.tree_grounded = False
+            ind.bound_by = ""
+    for ind in indicators:
         if ind.id == indicator_id:
             ind.tree_row_id = row_id
             ind.tree_grounded = True
+            ind.bound_by = "human"
             # A row that was ignored is no longer unresolved-by-choice.
             if getattr(st, "factor_map_ignores", None):
                 st.factor_map_ignores.pop(row_id, None)
@@ -232,5 +243,6 @@ def unbind(st: ProjectState, row_id: str) -> bool:
         if ind.tree_row_id == row_id:
             ind.tree_row_id = ""
             ind.tree_grounded = False
+            ind.bound_by = ""
             hit = True
     return hit

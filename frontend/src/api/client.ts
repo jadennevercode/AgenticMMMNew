@@ -10,13 +10,20 @@ import type {
   ArtifactInstance,
   DataAsset,
   ClusterResult,
+  ColumnValuesResult,
+  CompiledSql,
+  FieldMapSuggestion,
+  InputColumnsResult,
+  SqlSuggestion,
+  EnumSuggestion,
   DbtPreview,
   DbtWorkspaceInfo,
-  EnumMapEntry,
   FactorMap,
+  MetricRole,
   Indicator,
   IndicatorLedger,
   MasterTable,
+  MasterDataStation,
   MasterTableQuery,
   TargetColumn,
   StepPreview,
@@ -41,6 +48,9 @@ import type {
   ToolSpec,
   ValidationDataset,
   ValidationSeriesRequest,
+  ChatMention,
+  Mentionable,
+  ValidationChartAnalysis,
   ValidationSeriesResponse,
   ValidationSpec,
   ValidationSpecStore,
@@ -133,11 +143,14 @@ export const api = {
     req(`${p(projectId)}/insights/${id}/resolve`, { method: 'POST', body: JSON.stringify({ actioned }) }),
   chooseAiOption: (projectId: string, setId: string, optionId: string) =>
     req(`${p(projectId)}/ai-choices/${setId}`, { method: 'POST', body: JSON.stringify({ optionId }) }),
-  askAssistant: (projectId: string, text: string) =>
+  askAssistant: (projectId: string, text: string, mentions: ChatMention[] = []) =>
     req<{ role: 'assistant'; text: string }>(`${p(projectId)}/assistant`, {
       method: 'POST',
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, mentions }),
     }),
+  /** Everything the chat can `@`-mention: artifacts, chart tables, AI analyses. */
+  mentionables: (projectId: string, q = '') =>
+    req<Mentionable[]>(`${p(projectId)}/mentionables?q=${encodeURIComponent(q)}`),
 
   // ── chat-driven artifact editing (draft → preview → apply) ──
   draftArtifactEdit: (projectId: string, artifactId: string, text: string) =>
@@ -245,14 +258,47 @@ export const api = {
     req<StepPreview>(`${p(projectId)}/data-assets/${assetId}/pipeline/preview`, {
       method: 'POST', body: JSON.stringify({ pipeline, stepId, limit }),
     }),
+  /** Columns available at a step, so the editor can show what there is to map. */
+  inputColumns: (projectId: string, assetId: string, pipeline: TransformPipeline | null, stepId: string) =>
+    req<InputColumnsResult>(`${p(projectId)}/data-assets/${assetId}/pipeline/input-columns`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId }),
+    }),
+  /** AI-match this step's input columns onto the target schema (human rows kept). */
+  suggestFieldMap: (projectId: string, assetId: string, pipeline: TransformPipeline | null, stepId: string) =>
+    req<FieldMapSuggestion>(`${p(projectId)}/data-assets/${assetId}/pipeline/suggest-field-map`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId }),
+    }),
+  /** Draft a custom_sql body from plain English; the backend runs it before returning. */
+  suggestSql: (projectId: string, assetId: string, pipeline: TransformPipeline | null,
+               stepId: string, instruction: string) =>
+    req<SqlSuggestion>(`${p(projectId)}/data-assets/${assetId}/pipeline/suggest-sql`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId, instruction }),
+    }),
+  /** The whole pipeline compiled to one self-contained SQL statement, for export. */
+  pipelineFullSql: (projectId: string, assetId: string, pipeline: TransformPipeline | null) =>
+    req<CompiledSql>(`${p(projectId)}/data-assets/${assetId}/pipeline/full-sql`, {
+      method: 'POST', body: JSON.stringify({ pipeline }),
+    }),
+  /** Every distinct value of a column as it reaches a step — the enum editor's
+   *  ground truth, so a field shows what is actually there before anything is mapped. */
+  columnValues: (projectId: string, assetId: string, pipeline: TransformPipeline | null,
+                 stepId: string, column: string, limit = 500) =>
+    req<ColumnValuesResult>(`${p(projectId)}/data-assets/${assetId}/pipeline/column-values`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId, column, limit }),
+    }),
   /** Group near-duplicate spellings reaching an enum step into one decision each. */
   clusterEnumValues: (projectId: string, assetId: string, pipeline: TransformPipeline | null,
                       stepId: string, field: string) =>
     req<ClusterResult>(`${p(projectId)}/data-assets/${assetId}/pipeline/cluster-enum`, {
       method: 'POST', body: JSON.stringify({ pipeline, stepId, field }),
     }),
-  suggestEnumMap: (projectId: string, assetId: string, field: string, targetColumn: string) =>
-    req<EnumMapEntry[]>(`${p(projectId)}/data-assets/${assetId}/pipeline/suggest-enum`, { method: 'POST', body: JSON.stringify({ field, targetColumn }) }),
+  /** AI-match the values reaching a step onto a target column's standard values.
+   *  Confident matches come back accepted; the rest as proposals awaiting a human. */
+  suggestEnumMap: (projectId: string, assetId: string, pipeline: TransformPipeline | null,
+                   stepId: string, field: string, targetColumn: string) =>
+    req<EnumSuggestion>(`${p(projectId)}/data-assets/${assetId}/pipeline/suggest-enum`, {
+      method: 'POST', body: JSON.stringify({ pipeline, stepId, field, targetColumn }),
+    }),
   rawPreview: (projectId: string, assetId: string, table: string, limit = 50) =>
     req<DbtPreview>(`${p(projectId)}/data-assets/${assetId}/raw-preview?table=${encodeURIComponent(table)}&limit=${limit}`),
 
@@ -267,6 +313,13 @@ export const api = {
     req<ValidationSeriesResponse>(`${p(projectId)}/validation/series`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+  /** The AI's reading of the chart these filters produce (cached server-side;
+   *  `force` regenerates). */
+  validationChartAnalysis: (projectId: string, body: ValidationSeriesRequest, force = false) =>
+    req<ValidationChartAnalysis>(`${p(projectId)}/validation/chart-analysis`, {
+      method: 'POST',
+      body: JSON.stringify({ ...body, force }),
     }),
   getValidationDataset: (projectId: string) =>
     req<ValidationDataset>(`${p(projectId)}/validation-dataset`),
@@ -297,16 +350,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** 2.6 — full URL of the uncapped per-channel xlsx export for a slice. */
-  masterDataExportUrl: (projectId: string, q: MasterTableQuery): string => {
-    const params = new URLSearchParams()
-    if (q.brand?.[0]) params.set('brand', q.brand[0])
-    if (q.provinceGroup?.[0]) params.set('provinceGroup', q.provinceGroup[0])
-    if (q.channelType?.[0]) params.set('channelType', q.channelType[0])
-    if (q.channel?.[0]) params.set('channel', q.channel[0])
-    if (q.grain) params.set('grain', q.grain)
-    return `${BASE}${p(projectId)}/master-data/export?${params.toString()}`
-  },
+  /** 2.6 · 2.32 D.Data Station — adopted indicators' raw long rows. */
+  masterDataStation: (projectId: string, limit = 5000) =>
+    req<MasterDataStation>(`${p(projectId)}/master-data/data-station?limit=${limit}`),
+  /** 2.6 — full URL of the 2.32 two-sheet xlsx export (granularity ref + data station). */
+  masterDataExportUrl: (projectId: string): string =>
+    `${BASE}${p(projectId)}/master-data/export`,
   /** Where every indicator stands, and which S2 layer rejected the dead ones. */
   indicatorLedger: (projectId: string) =>
     req<IndicatorLedger>(`${p(projectId)}/indicator-ledger`),
@@ -325,6 +374,16 @@ export const api = {
   setFactorMapIgnoreBulk: (projectId: string, rowIds: string[], note = '') =>
     req<FactorMap>(`${p(projectId)}/factor-map/ignore-bulk`, {
       method: 'PUT', body: JSON.stringify({ rowIds, note }),
+    }),
+  /** Set an indicator's model role (Y/X/excluded); picking Y demotes the old Y. */
+  setFactorMapMetricType: (projectId: string, l4: string, metric: string, metricType: MetricRole) =>
+    req<FactorMap>(`${p(projectId)}/factor-map/metric-type`, {
+      method: 'PUT', body: JSON.stringify({ l4, metric, metricType }),
+    }),
+  /** Set an indicator's aggregation method (sum/average/weighted_average/…). */
+  setFactorMapAggregation: (projectId: string, l4: string, metric: string, aggregation: string) =>
+    req<FactorMap>(`${p(projectId)}/factor-map/aggregation`, {
+      method: 'PUT', body: JSON.stringify({ l4, metric, aggregation }),
     }),
   collectSchemaValues: (projectId: string, column: string, limit = 50) =>
     req<{ column: string; values: string[] }>(`${p(projectId)}/target-schema/collect?column=${encodeURIComponent(column)}&limit=${limit}`),

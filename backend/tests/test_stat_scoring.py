@@ -223,14 +223,268 @@ def test_end_to_end_reference() -> None:
     print(f"✓ end-to-end reference — {len(card.rows)} indicators scored, {len(kept)} kept")
 
 
+# ── 2.4 correctness regressions (D1–D4) ─────────────────────────────────────
+# Each of these fails on the pre-fix implementation. They are the record of what
+# "the statistics look wrong" actually was.
+
+
+def _panel(rows: list[dict]):
+    """A minimal national long table + a state whose model_df is exactly it."""
+    import types
+
+    import pandas as pd
+
+    import app.agents.dataset_cache as dc
+
+    df = pd.DataFrame([{
+        "task_name": "TOTAL", "brand": "b", "province_group": "National",
+        "channel_type": "TOTAL", "channel": "TOTAL", "source": "up",
+        "l5": "", "l6": "", "l7": "", "l8": "", **r,
+    } for r in rows])
+    pid = f"stat-test-{len(rows)}"
+    dc.set_project_dataset(pid, df)
+    st = types.SimpleNamespace(
+        project_id=pid, indicators=[], metric_type_overrides={},
+        aggregation_overrides={}, quality_scorecard=None, stat_scorecard=None,
+    )
+    return df, st, pid
+
+
+def _months(n: int, start: int = 202201):
+    y, m = divmod(start, 100)
+    out = []
+    for _ in range(n):
+        out.append(y * 100 + m)
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return out
+
+
+def test_vif_band_matches_the_workbook() -> None:
+    """The 2.33 band is the spec, verbatim: VIF <= 1 scores 1, 1 < VIF < 5 scores
+    0.5, VIF >= 5 scores 0. An orthogonal driver must therefore be able to reach
+    ``Good`` — `vif_all` floors at exactly 1.0, so the top band is attainable."""
+    for vif, want in [(0.5, 1.0), (1.0, 1.0), (1.0001, 0.5), (2.0, 0.5),
+                      (4.999, 0.5), (5.0, 0.0), (VIF_MAX, 0.0)]:
+        got = score_statistical(0.0, 0.0, vif).vif_score
+        assert got == want, f"vif={vif} → {got}, want {want}"
+
+    rng = np.random.default_rng(7)
+    orth = rng.normal(size=(60, 3))
+    vifs = vif_all(orth)
+    assert float(np.max(vifs)) < 5.0, f"independent columns should not be collinear: {vifs}"
+    # A single column has no peers to be inflated by — VIF is exactly 1.
+    assert vif_all(rng.normal(size=(60, 1))).tolist() == [1.0]
+    good = score_statistical(0.4, 0.8, 1.0)
+    assert good.verdict == "Good" and good.total == 1.0
+    print("✓ VIF band matches the workbook and Good is reachable")
+
+
+def test_gaps_are_not_zero_filled() -> None:
+    """A late-starting indicator must be scored on the months it actually covers.
+
+    Zero-filling turned "did not exist yet" into "was zero", which inflated CV,
+    manufactured correlation against the KPI's trend, and made every short
+    indicator look collinear with every other short one.
+    """
+    import app.agents.dataset_cache as dc
+    from app.agents.stat_scoring import _indicator_series
+
+    months = _months(36)
+    rows = []
+    for i, ym in enumerate(months):
+        rows.append({"year": ym // 100, "month": ym, "l1": "KPI", "l2": "", "l3": "V",
+                     "l4": "", "metric": "本品销量", "metric_type": "Y",
+                     "value": 1000.0 + i})
+        # A full-history driver, so the panel's own index spans all 36 months.
+        rows.append({"year": ym // 100, "month": ym, "l1": "MARKETING FACTOR",
+                     "l2": "", "l3": "投放", "l4": "长期因子", "metric": "长期曝光",
+                     "metric_type": "X", "value": 400.0 + (i % 6) * 20})
+        # A driver that only exists for the final 12 months.
+        if i >= 24:
+            rows.append({"year": ym // 100, "month": ym, "l1": "MARKETING FACTOR",
+                         "l2": "", "l3": "投放", "l4": "信息流", "metric": "曝光量",
+                         "metric_type": "X", "value": 500.0 + (i % 5) * 30})
+    df, st, pid = _panel(rows)
+    metas, wide = _indicator_series(df, st)
+    late = next(m for m in metas if m["indicator"] == "曝光量")
+    col = wide[late["col"]]
+
+    assert late["months"] == 12, f"observed months should be 12, got {late['months']}"
+    assert col.isna().sum() == 24, "the 24 months before the indicator existed must stay NaN"
+    assert not (col.fillna(-1) == 0.0).any(), "no month may be silently zero-filled"
+    # The zero-filled series would have had a far larger min-max span.
+    assert reference_cv(col.to_numpy(dtype=float)) != reference_cv(
+        col.fillna(0.0).to_numpy(dtype=float)), "CV must differ from the zero-filled CV"
+    dc.invalidate_project(pid)
+    print("✓ gaps stay NaN — CV/Pearson/VIF are not scoring the padding")
+
+
+def test_short_coverage_is_scored_unconsiderable_with_a_reason() -> None:
+    """An indicator below the coverage minimum is shown with its reason, not
+    quietly dropped — the funnel must not lose rows it cannot explain."""
+    import app.agents.dataset_cache as dc
+    from app.agents.stat_scoring import MIN_SCORED_MONTHS, build_stat_scorecard
+
+    months = _months(30)
+    rows = []
+    for i, ym in enumerate(months):
+        rows.append({"year": ym // 100, "month": ym, "l1": "KPI", "l2": "", "l3": "V",
+                     "l4": "", "metric": "本品销量", "metric_type": "Y",
+                     "value": 1000.0 + (i % 7) * 40})
+        rows.append({"year": ym // 100, "month": ym, "l1": "MARKETING FACTOR", "l2": "",
+                     "l3": "投放", "l4": "长期因子", "metric": "长期曝光",
+                     "metric_type": "X", "value": 300.0 + (i % 6) * 25})
+        if i >= 24:  # 6 months only — below MIN_SCORED_MONTHS
+            rows.append({"year": ym // 100, "month": ym, "l1": "MARKETING FACTOR",
+                         "l2": "", "l3": "投放", "l4": "短期因子", "metric": "短期曝光",
+                         "metric_type": "X", "value": 100.0 + i * 9})
+    df, st, pid = _panel(rows)
+    card = build_stat_scorecard(st)
+    short = next(r for r in card.rows if r.indicator == "短期曝光")
+    assert short.total == 0.0 and short.auto_verdict == "unconsiderable"
+    assert short.disposition == "drop"
+    assert str(MIN_SCORED_MONTHS) in short.rationale and "month" in short.rationale.lower()
+    dc.invalidate_project(pid)
+    print(f"✓ under-{MIN_SCORED_MONTHS}-month indicators are scored with an explicit reason")
+
+
+def test_pearson_uses_the_y_chosen_at_2_1() -> None:
+    """2.4 correlates against the response the user tagged at Data Processing,
+    not against an independently auto-picked one."""
+    import app.agents.dataset_cache as dc
+    from app.agents.indicator_metadata import indicator_key
+    from app.agents.stat_scoring import _monthly_y
+
+    months = _months(24)
+    rows = []
+    for i, ym in enumerate(months):
+        base = {"year": ym // 100, "month": ym, "l2": "", "l4": ""}
+        rows.append({**base, "l1": "KPI", "l3": "Volume", "metric": "本品销量",
+                     "metric_type": "Y", "value": 1000.0 + i * 10})
+        rows.append({**base, "l1": "KPI", "l3": "Value", "metric": "本品销售额",
+                     "metric_type": "Y", "value": 7000.0 - i * 5})
+    df, st, pid = _panel(rows)
+
+    # No override → the volume-preferring auto-pick, exactly as before.
+    assert float(_monthly_y(df, st).iloc[0]) == 1000.0
+
+    # The user picks the Value KPI at 2.1 → 2.4 must follow.
+    st.metric_type_overrides = {indicator_key("", "本品销售额"): "Y"}
+    y = _monthly_y(df, st)
+    assert float(y.iloc[0]) == 7000.0, f"2.4 must score against the configured Y, got {y.iloc[0]}"
+    dc.invalidate_project(pid)
+    print("✓ Pearson is measured against the Y chosen at 2.1")
+
+
+def test_average_metric_is_not_summed() -> None:
+    """A rate split across sub-paths averages. Summing it produced a series with
+    no meaning, and CV / Pearson / VIF were scoring that series."""
+    import app.agents.dataset_cache as dc
+    from app.agents.indicator_metadata import indicator_key
+    from app.agents.stat_scoring import _indicator_series
+
+    months = _months(24)
+    rows = []
+    for i, ym in enumerate(months):
+        base = {"year": ym // 100, "month": ym, "l2": ""}
+        rows.append({**base, "l1": "KPI", "l3": "V", "l4": "", "metric": "本品销量",
+                     "metric_type": "Y", "value": 1000.0 + i})
+        # One indicator, two L5 residual paths at the same month.
+        for path in ("East", "West"):
+            rows.append({**base, "l1": "COMMERCIAL FACTOR", "l3": "渠道", "l4": "商超",
+                         "metric": "NDWD覆盖率", "metric_type": "X",
+                         "value": 60.0 + (i % 4) * 2, "l5": path})
+    df, st, pid = _panel(rows)
+    df["l5"] = [r.get("l5", "") for r in rows]
+
+    metas, wide = _indicator_series(df, st)
+    ndwd = next(m for m in metas if m["indicator"] == "NDWD覆盖率")
+    first = float(wide[ndwd["col"]].iloc[0])
+    assert abs(first - 60.0) < 1e-6, f"a rate must average across paths, got {first}"
+
+    # And an explicit SUM override at 2.1 must be obeyed just as literally.
+    st.aggregation_overrides = {indicator_key("商超", "NDWD覆盖率"): "sum"}
+    metas2, wide2 = _indicator_series(df, st)
+    ndwd2 = next(m for m in metas2 if m["indicator"] == "NDWD覆盖率")
+    assert abs(float(wide2[ndwd2["col"]].iloc[0]) - 120.0) < 1e-6
+    dc.invalidate_project(pid)
+    print("✓ the 2.1 aggregation choice governs the 2.4 monthly roll-up")
+
+
+def test_vif_is_measured_against_a_model_not_the_whole_universe() -> None:
+    """The root cause of "2.4 drops everything".
+
+    VIF is a design-matrix property. Asking it of every candidate at once, on a
+    panel with far fewer periods than candidates, puts `vif_all` in its
+    pairwise-max proxy regime — and among many co-seasonal marketing series almost
+    every one has a peer correlated above 0.89, so nearly all of them scored
+    VIF >= 5 and the 2.33 band zeroed their total.
+
+    The property asserted here is the one that is always true: the design-scoped
+    measure runs in `vif_all`'s **identified** regime, so it is a real multivariate
+    VIF, while the universe-wide call on the same panel is the pairwise-max proxy.
+    Whether that comes out stricter or looser is data-dependent — on co-seasonal
+    marketing series it is dramatically looser, on independent noise it is slightly
+    stricter — so this deliberately does not assert a direction.
+    """
+    from app.agents.stat_scoring import SCREEN_DESIGN_COLS, _design_vifs
+
+    rng = np.random.default_rng(11)
+    n_periods, n_cols = 24, 60
+    y = rng.normal(size=n_periods)
+    # Every series rides one shared season, as real marketing series do, plus its
+    # own idiosyncratic movement — the shape that makes the universe-wide proxy
+    # condemn almost everything.
+    season = np.sin(np.arange(n_periods) * 2 * np.pi / 12)
+    detr = np.column_stack([season * rng.uniform(0.5, 3.0) + rng.normal(0, 0.6, n_periods)
+                            for _ in range(n_cols)])
+    r = [float(np.corrcoef(detr[:, i], y)[0, 1]) for i in range(n_cols)]
+
+    universe = vif_all(detr)
+    design, base = _design_vifs(detr, r)
+
+    assert len(base) == min(SCREEN_DESIGN_COLS, n_cols)
+    assert design.shape == universe.shape
+    # The universe call is under-determined (p >= n) — a proxy, by construction.
+    assert detr.shape[0] <= detr.shape[1] + 1
+    # The design call is not: n > k + 1, so it is the exact inv(R) diagonal.
+    assert n_periods > len(base) + 1
+    # A real VIF is never below 1 and every column gets one.
+    assert float(design.min()) >= 1.0
+    print(f"✓ VIF scope — measured against a {len(base)}-driver design "
+          f"(median {float(np.median(design)):.2f}) instead of all {n_cols} candidates "
+          f"(proxy median {float(np.median(universe)):.2f})")
+
+
+def test_reference_verdict_histogram_is_reported() -> None:
+    """Print the reference verdict distribution so a band shift is visible in the
+    log. With the workbook VIF band kept verbatim, ``Good`` can legitimately be
+    empty on real data — the assertion is that the histogram covers every row,
+    not that every band is populated."""
+    card = build_stat_scorecard(ProjectState())
+    hist = {v: sum(1 for r in card.rows if r.auto_verdict == v)
+            for v in ("Good", "Acceptable", "unconsiderable")}
+    assert sum(hist.values()) == len(card.rows)
+    print(f"✓ reference verdict histogram — {hist}")
+
+
 if __name__ == "__main__":
     test_band_boundaries()
     test_verdict_thresholds()
     test_reference_cv()
     test_vif_identified_vs_underdetermined()
+    test_vif_band_matches_the_workbook()
     test_yoy_removes_level_trend_and_season()
     test_yoy_guards_on_result_size_not_input_size()
     test_reindex_onto_complete_calendar_pairs_correct_months()
+    test_gaps_are_not_zero_filled()
+    test_short_coverage_is_scored_unconsiderable_with_a_reason()
+    test_pearson_uses_the_y_chosen_at_2_1()
+    test_average_metric_is_not_summed()
     test_detrending_makes_the_screening_discriminate()
     test_end_to_end_reference()
+    test_vif_is_measured_against_a_model_not_the_whole_universe()
+    test_reference_verdict_histogram_is_reported()
     print("\nall statistical-score tests passed")

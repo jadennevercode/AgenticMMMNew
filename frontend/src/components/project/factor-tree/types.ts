@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+
 /** Visual weight of a row's module status. */
 export type FactorCanvasTone = 'ok' | 'warn' | 'bad' | 'muted'
 
@@ -21,8 +23,10 @@ export interface FactorCanvasRow {
   tone: FactorCanvasTone
   /** Short status word shown on the row, e.g. "Mapped", "Denied", "Good". */
   statusLabel: string
-  /** Compact extra cells, aligned to the canvas's `columns` prop. */
-  cells?: string[]
+  /** Compact extra cells, aligned to the canvas's `columns` prop. A cell may be
+   *  a rendered control (2.1 puts its Role / Aggregation selects here) so a
+   *  per-row decision lives in its own column instead of a catch-all Action one. */
+  cells?: ReactNode[]
   /** Set when an EARLIER S2 layer already rejected this indicator — the row
    *  renders greyed and non-interactive. Value is the layer's label. */
   blockedBy?: string

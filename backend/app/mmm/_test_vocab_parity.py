@@ -55,9 +55,15 @@ def test_money_parity() -> None:
 
 
 def test_spend_parity() -> None:
+    # ("rmb", "y") was frozen as True by the vocab refactor and is now False — a
+    # deliberate correction, not refactor drift: a currency unit is not evidence of
+    # outlay, and on the reference data the rows it uniquely caught were Value,
+    # GMV, sales value, RSP, Smartpath sales and Average Price. Every real spend
+    # row still matches on its name ("Spending" / 花费 / 投放 / 费用).
     got = [_is_spend(mt, m) for mt, m in
-           [("spending", "x"), ("rmb", "y"), ("x", "广告投放"), ("x", "费用z"), ("x", "other"), ("other", "other")]]
-    assert got == [True, True, True, True, False, False], got
+           [("spending", "x"), ("rmb", "y"), ("rmb", "广告花费"),
+            ("x", "广告投放"), ("x", "费用z"), ("x", "other"), ("other", "other")]]
+    assert got == [True, False, True, True, True, False, False], got
     print("  _is_spend parity")
 
 

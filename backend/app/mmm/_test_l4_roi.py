@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from app.mmm.engine import run_mmm
 from app.mmm.pivot import build_model_frame
 
 
@@ -71,8 +72,55 @@ def test_l4_spend_excluded_from_design() -> bool:
     return _check("l4_spend does not enter x_cols", ok, f"x_cols={mf.x_cols}")
 
 
+def test_exposure_driver_gets_l4_roi() -> bool:
+    """An L4 represented in the model only by its exposure metric still has an
+    ROI: the numerator is the exposure column's incremental, the denominator its
+    L4's Spending — the series that never enters the design matrix."""
+    df = make_long()
+    res = run_mmm(df, "MT", include=frozenset({("tv", "tv曝光量"), ("price", "平均售价")}))
+    ok = "TV曝光量" in res.roi
+    ok &= res.meta["roi_basis"]["TV曝光量"]["source"] == "l4"
+    if ok:
+        want = float(df[df["metric"] == "TV花费"]["value"].sum())
+        ok &= np.isclose(res.meta["roi_basis"]["TV曝光量"]["spend"], round(want, 4))
+    # 平均售价's L4 (Price) has no spend at all → no denominator → no ROI.
+    ok &= "平均售价" not in res.roi
+    return _check("exposure-only driver gets its L4's ROI", ok,
+                  f"roi={sorted(res.roi)}")
+
+
+def test_spend_driver_divides_by_its_own_spend() -> bool:
+    """A driver that IS a spend metric keeps its own column as the denominator,
+    so wiring the L4 fallback in cannot re-baseline an ROI already signed off."""
+    df = make_long()
+    res = run_mmm(df, "MT", include=frozenset({("tv", "tv花费"), ("price", "平均售价")}))
+    basis = res.meta["roi_basis"].get("TV花费", {})
+    ok = basis.get("source") == "own"
+    want = float(df[df["metric"] == "TV花费"]["value"].sum())
+    ok &= np.isclose(basis.get("spend", 0.0), round(want, 4))
+    return _check("spend driver divides by its own spend", ok, f"basis={basis}")
+
+
+def test_money_y_excluded_from_denominator() -> bool:
+    """A money-typed response satisfies the spend predicate (metric_type RMB) but
+    is revenue — it must never land in its L4's Spending denominator."""
+    df = make_long()
+    ymoney = df[df["metric"] == "本品销量"].copy()
+    ymoney["metric"] = "本品销售额"
+    ymoney["metric_type"] = "RMB"
+    ymoney["l4"] = "TV"          # sitting under a spend L4 is the trap
+    mf = build_model_frame(pd.concat([df, ymoney], ignore_index=True), "MT")
+    got = float(mf.l4_spend["tv"].sum())
+    want = float(df[df["metric"] == "TV花费"]["value"].sum())
+    return _check("money Y stays out of the L4 spend denominator",
+                  np.isclose(got, want), f"got={got:.1f} want={want:.1f}")
+
+
 def main() -> int:
-    results = [test_l4_spend_collected(), test_l4_spend_excluded_from_design()]
+    results = [test_l4_spend_collected(), test_l4_spend_excluded_from_design(),
+               test_exposure_driver_gets_l4_roi(),
+               test_spend_driver_divides_by_its_own_spend(),
+               test_money_y_excluded_from_denominator()]
     print(f"\n{sum(results)}/{len(results)} passed")
     return 0 if all(results) else 1
 

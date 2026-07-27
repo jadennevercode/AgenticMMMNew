@@ -7,6 +7,7 @@ dbt itself — that is ``executor.py``.
 """
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,11 +128,25 @@ class ModelFile:
 
 
 class Workspace:
-    """Filesystem handle to a project's dbt project (does not run dbt)."""
+    """Filesystem handle to one asset's dbt project (does not run dbt).
 
-    def __init__(self, project_id: str) -> None:
+    Scoped per asset, not per project: the workspace holds a single ``raw`` schema,
+    model set and ``sources.yml``, all of which a build rewrites wholesale. Sharing
+    one across an project's assets meant building one asset wiped every other
+    asset's sources and models. Everything here is derived state — the models come
+    from the compiled pipeline and the raw schema from the uploads — so a workspace
+    can be thrown away and rebuilt at any time.
+    """
+
+    def __init__(self, project_id: str, asset_id: str = "") -> None:
         self.project_id = project_id
-        self.dir = get_settings().data_path / "projects" / project_id / "dbt"
+        self.asset_id = asset_id
+        root = get_settings().data_path / "projects" / project_id / "dbt"
+        self.dir = (root / sanitize_ident(asset_id)) if asset_id else root
+
+    def destroy(self) -> None:
+        """Remove the workspace from disk (the asset it belonged to is gone)."""
+        shutil.rmtree(self.dir, ignore_errors=True)
 
     # ── paths ────────────────────────────────────────────
     @property

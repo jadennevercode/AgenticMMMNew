@@ -23,6 +23,8 @@ export interface CanvasProps {
   onSelect: (id: string | null) => void
   onConnect: (sourceId: string, targetStepId: string) => void
   onDisconnect: (sourceId: string, targetStepId: string) => void
+  /** Delete a step from the pipeline (pressing Delete on its node). */
+  onDeleteStep: (stepId: string) => void
 }
 
 interface PipeNodeData extends Record<string, unknown> {
@@ -95,7 +97,7 @@ function PipeNode({ data }: NodeProps) {
 const NODE_TYPES = { pipe: PipeNode }
 
 export function PipelineCanvas({
-  pipeline, sources, statusByStep, selected, onSelect, onConnect, onDisconnect,
+  pipeline, sources, statusByStep, selected, onSelect, onConnect, onDisconnect, onDeleteStep,
 }: CanvasProps) {
   const positions = useMemo(() => layout(pipeline, sources), [pipeline, sources])
   const [nodes, setNodes] = useState<Node[]>([])
@@ -149,12 +151,22 @@ export function PipelineCanvas({
       }))),
     [pipeline])
 
+  // A raw source is not ours to delete — it exists because a file was uploaded.
+  // Dropping its `remove` change here keeps the canvas from flashing the node out
+  // and back when the derived node set is recomputed.
   const handleNodesChange = useCallback(
-    (changes: NodeChange[]) => setNodes((ns) => applyNodeChanges(changes, ns)),
+    (changes: NodeChange[]) => setNodes((ns) => applyNodeChanges(
+      changes.filter((c) => !(c.type === 'remove' && c.id.startsWith(SOURCE_PREFIX))), ns)),
     [])
   const handleConnect = useCallback((c: Connection) => {
     if (c.source && c.target && !c.target.startsWith(SOURCE_PREFIX)) onConnect(c.source, c.target)
   }, [onConnect])
+  // Deleting a node must delete the *step*, not just its rendering: without this the
+  // node vanished from the canvas while the step lived on in the pipeline, and only
+  // its edges were really removed.
+  const handleNodesDelete = useCallback((removed: Node[]) => {
+    for (const n of removed) if (!n.id.startsWith(SOURCE_PREFIX)) onDeleteStep(n.id)
+  }, [onDeleteStep])
   const handleEdgesDelete = useCallback((removed: Edge[]) => {
     for (const e of removed) onDisconnect(e.source, e.target)
   }, [onDisconnect])
@@ -184,7 +196,7 @@ export function PipelineCanvas({
   const flowKey = `${sources.length}:${pipeline.steps.map((s) => s.id).join(',')}`
 
   return (
-    <div className="h-72 rounded-md border border-border bg-background">
+    <div className="h-full min-h-0 bg-background">
       <ReactFlow
         key={flowKey}
         nodeTypes={NODE_TYPES}
@@ -192,6 +204,7 @@ export function PipelineCanvas({
         edges={edges}
         onNodesChange={handleNodesChange}
         onConnect={handleConnect}
+        onNodesDelete={handleNodesDelete}
         onEdgesDelete={handleEdgesDelete}
         isValidConnection={isValidConnection}
         onNodeClick={(_, node) => onSelect(node.id)}

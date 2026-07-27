@@ -6,6 +6,7 @@ publishes the mart to parquet through the same versioning the legacy path uses.
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -15,13 +16,12 @@ from app.dataeng import assets as asset_svc
 from app.dataeng.dbt import compiler, executor, target_schema
 from app.dataeng.dbt.workspace import Workspace
 from app.dataeng.duck import sanitize_ident
-from app.dataeng.sources import asset_tables
 from app.agents.indicator_metadata import (
     INDICATOR_META_RULE_VERSION, classify_indicator,
 )
 from app.domain.models import (
-    DataAsset, DataAssetVersion, DbtNode, DbtSummary, EnumViolation, Indicator,
-    SchemaConformance,
+    DataAsset, DataAssetVersion, DbtNode, DbtSummary, EnumMapEntry, EnumViolation,
+    Indicator, SchemaConformance,
 )
 
 
@@ -37,18 +37,41 @@ def _mart_name(asset: DataAsset) -> str:
     return f"asset_{sanitize_ident(asset.name or asset.id)}"
 
 
-def _source_labels(asset: DataAsset) -> dict[str, str]:
-    """Raw table name → a human source label (the uploaded file's name) for
-    stamping per-row provenance during compilation."""
-    return {t.name: (t.filename or t.name) for t in asset.raw_tables}
+def _source_labels(project_id: str, asset: DataAsset) -> dict[str, str]:
+    """Raw table name → the origin label stamped onto its rows during compilation.
+
+    Derived from the live source read, not from ``asset.raw_tables``: that field is
+    only written by Run Review, so before a review the labels degraded to bare table
+    names — and provenance that depends on having clicked a different button is not
+    provenance.
+    """
+    from app.dataeng.sources import source_labels
+    return source_labels(source_read(project_id, asset))
+
+
+def source_read(project_id: str, asset: DataAsset):
+    """The asset's parsed uploads (memoised) — the one reading of the files."""
+    from app.dataeng import preview
+    return preview.cached_sources(project_id, asset)
 
 
 def sync_raw(project_id: str, asset: DataAsset) -> Workspace:
-    """Materialise the asset's uploaded sources into the workspace ``raw`` schema."""
-    ws = Workspace(project_id).ensure()
-    tables = asset_tables(project_id, asset)
+    """Materialise the asset's uploaded sources into the workspace ``raw`` schema.
+
+    Also re-points any pipeline input stranded by the pre-stable table naming, so
+    a pipeline saved under the old scheme compiles instead of failing on a source
+    that no longer exists.
+    """
+    from app.dataeng.sources import heal_pipeline_inputs
+    ws = Workspace(project_id, asset.id).ensure()
+    read = source_read(project_id, asset)
+    tables = read.tables
     if not tables:
-        raise DbtServiceError("This asset has no usable raw sources yet — upload files first.")
+        detail = "; ".join(f"{i.filename or i.file_id}: {i.reason}" for i in read.issues[:3])
+        raise DbtServiceError(
+            f"None of this asset's files could be read as a table — {detail}" if detail
+            else "This asset has no usable raw sources yet — upload files first.")
+    heal_pipeline_inputs(asset.pipeline, tables)
     ws.load_raw(tables)
     return ws
 
@@ -101,7 +124,7 @@ def build(st, project_id: str, asset: DataAsset) -> DbtSummary:
         try:
             proj = compiler.compile_pipeline(
                 asset.pipeline, _mart_name(asset), target_schema.schema_for(st),
-                raw_columns=ws.raw_tables_info(), source_labels=_source_labels(asset))
+                raw_columns=ws.raw_tables_info(), source_labels=_source_labels(project_id, asset))
         except compiler.CompileError as e:
             asset.dbt = DbtSummary(ok=False, ranAt=_now_iso(), error=f"Pipeline invalid: {e}")
             _touch(asset)
@@ -185,7 +208,7 @@ async def ai_pipeline(st, project_id: str, asset: DataAsset,
         mart_name=_mart_name(asset),
         instruction=instruction,
         current=asset.pipeline if (asset.pipeline and asset.pipeline.steps) else None,
-        source_labels=_source_labels(asset),
+        source_labels=_source_labels(project_id, asset),
     )
     res = await pipeline_ai.draft(ws, ctx, schema)
     if res.pipeline is not None:
@@ -197,7 +220,7 @@ async def ai_pipeline(st, project_id: str, asset: DataAsset,
             try:
                 compiled = compiler.compile_pipeline(
                     res.pipeline, _mart_name(asset), schema,
-                    raw_columns=ws.raw_tables_info(), source_labels=_source_labels(asset))
+                    raw_columns=ws.raw_tables_info(), source_labels=_source_labels(project_id, asset))
                 step_models = compiled.step_models
                 mart = _mart_name(asset)
             except compiler.CompileError:
@@ -217,20 +240,168 @@ async def ai_pipeline(st, project_id: str, asset: DataAsset,
     return asset.dbt
 
 
-async def suggest_enum_map(st, project_id: str, asset: DataAsset, field: str,
-                           target_column: str) -> list:
-    """Suggest raw→canonical mappings for a field: raw distinct values from the
-    asset's sources vs the target column's maintained standard values."""
+# Above this the model's match is taken as settled; below it a human confirms.
+AI_AUTO_ACCEPT = 0.85
+_SUGGEST_VALUE_CAP = 200
+
+
+async def suggest_enum_map(st, project_id: str, asset: DataAsset, pipe, upstream: str,
+                           field: str, target_column: str,
+                           existing: list[EnumMapEntry] | None = None) -> tuple[list, str]:
+    """Suggest raw→canonical mappings for a field, grounded on what reaches the step.
+
+    Reads the values from the **pipeline stream** rather than the raw workbooks: an
+    enum step usually sits downstream of a field map, so the column it standardises
+    no longer exists under that name in any source file — the old raw-file scan just
+    returned nothing there, and the editor read that empty list as "clear the map".
+
+    Human decisions are never overwritten; the model only fills what is undecided.
+    Returns ``(entries, error)``.
+    """
+    from app.dataeng import preview
     from app.dataeng.dbt import pipeline_ai
     schema = target_schema.schema_for(st)
     std = next((c.standard_values for c in schema if c.name == target_column), [])
-    raw_values: list[str] = []
-    for _, df in asset_tables(project_id, asset).items():
-        if field in df.columns:
-            vals = df[field].dropna().astype(str).unique().tolist()
-            raw_values.extend(v for v in vals if v not in raw_values)
-    raw_values = raw_values[:200]
-    return await pipeline_ai.suggest_enum_map(field, raw_values, std)
+    values, error = preview.column_values(st, project_id, asset, pipe, upstream, field)
+    if error:
+        return [], error
+    if not values:
+        return [], f"No values found in {field!r} at this point in the pipeline."
+
+    decided = {e.raw: e for e in (existing or [])}
+    settled = {raw for raw, e in decided.items()
+               if e.by == "human" and e.canonical.strip() and e.status == "accepted"}
+    to_map = [v for v, _ in values if v not in settled][:_SUGGEST_VALUE_CAP]
+    suggested = {e.raw: e for e in await pipeline_ai.suggest_enum_map(field, to_map, std)}
+
+    out: list[EnumMapEntry] = []
+    for raw, _n in values:
+        if raw in settled:
+            out.append(decided[raw])
+            continue
+        s = suggested.get(raw)
+        if s is None:
+            out.append(decided.get(raw) or EnumMapEntry(raw=raw, canonical="", confidence=0.0,
+                                                        by="ai", status="proposed"))
+            continue
+        confident = bool(s.canonical.strip()) and s.confidence >= AI_AUTO_ACCEPT
+        out.append(EnumMapEntry(raw=raw, canonical=s.canonical, confidence=s.confidence,
+                                by="ai", status="accepted" if confident else "proposed"))
+    # Rows for values that no longer flow through this step are the user's own data —
+    # keep them rather than deleting decisions behind their back.
+    seen = {e.raw for e in out}
+    out.extend(e for raw, e in decided.items() if raw not in seen)
+    return out, ""
+
+
+def full_sql(st, project_id: str, asset: DataAsset,
+             pipe=None) -> tuple[str, str]:
+    """The whole pipeline as one self-contained ``WITH`` query. Returns ``(sql, error)``.
+
+    This is the same compilation the sandbox preview runs, taken to the output step —
+    so what is exported is what the pipeline actually does, not a re-description of
+    it. A header maps each bare table name back to the file and sheet it reads, so
+    the SQL still says where its inputs came from once it leaves this product.
+    """
+    from app.dataeng.sources import source_labels
+    pipeline = pipe if pipe is not None else asset.pipeline
+    if pipeline is None or not pipeline.steps:
+        return "", "This asset has no transform steps yet."
+    read = source_read(project_id, asset)
+    tables = read.tables
+    if not tables:
+        return "", "This asset has no readable raw sources."
+    labels = source_labels(read)
+    try:
+        body = compiler.compile_preview_sql(
+            pipeline, pipeline.output_step or pipeline.steps[-1].id,
+            target_schema=target_schema.schema_for(st),
+            raw_columns={n: [str(c) for c in df.columns] for n, df in tables.items()},
+            source_labels=labels)
+    except compiler.CompileError as e:
+        return "", str(e)
+
+    header = [f"-- {asset.name} — compiled transform pipeline",
+              f"-- generated {_now_iso()}", "-- inputs:"]
+    for meta, _ in read.pairs:
+        origin = f"{meta.filename}" + (f" · sheet {meta.sheet}" if meta.sheet else "")
+        header.append(f"--   {meta.name}: {origin} ({meta.row_count} rows) "
+                      f"→ source = '{labels.get(meta.name, '')}'")
+    return "\n".join(header) + "\n\n" + body + "\n", ""
+
+
+_SAMPLE_ROWS = 5
+
+
+async def suggest_field_map(st, project_id: str, asset: DataAsset, pipe, upstream: str,
+                            existing: list[FieldMapEntry] | None = None
+                            ) -> tuple[list[FieldMapEntry], str]:
+    """Match the upstream's columns onto the target schema. Returns ``(entries, error)``.
+
+    Rows a human already wrote are kept exactly as they are and their targets are
+    taken off the table, so a suggestion can add to the work but never overwrite it.
+    """
+    from app.dataeng import preview
+    from app.dataeng.dbt import pipeline_ai
+    columns, error = preview.input_columns(st, project_id, asset, pipe, upstream)
+    if error:
+        return [], error
+    if not columns:
+        return [], "This step's input has no columns yet."
+
+    kept = [e for e in (existing or []) if e.by == "human" and (e.source or e.expr)]
+    claimed = {e.target for e in kept if e.target}
+    mapped_src = {e.source for e in kept if e.source}
+    targets, docs = target_schema.columns_and_docs(st)
+
+    res = preview.preview_step(st, project_id, asset, pipe, upstream, limit=_SAMPLE_ROWS)
+    samples: dict[str, list[str]] = {}
+    if res.ok:
+        for i, name in enumerate(res.columns):
+            samples[name] = [str(r[i]) for r in res.rows[:_SAMPLE_ROWS] if i < len(r)]
+
+    fresh = await pipeline_ai.suggest_field_map(
+        [c for c in columns if c not in mapped_src],
+        [t for t in targets if t not in claimed], docs, samples)
+    return kept + [e for e in fresh if e.target not in claimed], ""
+
+
+async def suggest_sql(st, project_id: str, asset: DataAsset, pipe, step_id: str,
+                      instruction: str) -> tuple[str, str]:
+    """Draft a ``custom_sql`` step body from plain English. Returns ``(sql, error)``.
+
+    The generated statement is compiled and run in the sandbox before it is handed
+    back — the safety layer that rejects anything but a read-only SELECT is the same
+    one every preview goes through, so free-form model output cannot reach the data
+    on a path the rest of the editor does not already trust.
+    """
+    from app.dataeng import preview
+    from app.dataeng.dbt import pipeline_ai
+    step = next((s for s in (pipe.steps if pipe else []) if s.id == step_id), None)
+    if step is None:
+        return "", f"step {step_id!r} is not in this pipeline"
+
+    inputs: dict[str, list[str]] = {}
+    for i, inp in enumerate(step.inputs, start=1):
+        cols, err = preview.input_columns(st, project_id, asset, pipe, inp)
+        if err:
+            return "", err
+        inputs[f"input_{i}"] = cols
+    if not inputs:
+        return "", "Connect an input to this step first."
+
+    targets, docs = target_schema.columns_and_docs(st)
+    sql, error = await pipeline_ai.suggest_sql(instruction, inputs, targets, docs)
+    if error:
+        return "", error
+
+    trial = step.model_copy(update={"sql": sql})
+    trial_pipe = pipe.model_copy(update={
+        "steps": [trial if s.id == step_id else s for s in pipe.steps]})
+    res = preview.preview_step(st, project_id, asset, trial_pipe, step_id, limit=1)
+    if not res.ok:
+        return "", f"The generated SQL does not run: {res.error}"
+    return sql, ""
 
 
 def _extract_desc(sql: str) -> str:
@@ -247,14 +418,34 @@ def _extract_desc(sql: str) -> str:
 
 
 def list_models(project_id: str, asset: DataAsset) -> dict:
-    ws = Workspace(project_id)
+    """The editor's view of the asset: available raw sources + workspace files.
+
+    Sources are derived from the **uploaded files**, not from the dbt warehouse.
+    The warehouse's ``raw`` schema is only written by a build, so reading the source
+    list from it meant a freshly uploaded workbook stayed invisible in the editor
+    until the user happened to run a build — with nothing saying why.
+    """
+    from app.dataeng.sources import source_labels
+    ws = Workspace(project_id, asset.id)
     seeds = ws.list_seeds()
+    read = source_read(project_id, asset)
+    labels = source_labels(read)
     return {
         "models": [
             {"layer": m.layer, "name": m.name, "sql": m.sql, "description": _extract_desc(m.sql)}
             for m in ws.list_models()
         ],
-        "sources": list(ws.raw_tables_info().keys()),
+        "sources": [meta.name for meta, _ in read.pairs],
+        "sourceTables": [
+            {"name": meta.name, "filename": meta.filename, "fileId": meta.file_id,
+             "sheet": meta.sheet, "sourceLabel": labels.get(meta.name, meta.filename),
+             "rowCount": meta.row_count, "columns": list(meta.columns)}
+            for meta, _ in read.pairs
+        ],
+        "sourceIssues": [
+            {"fileId": i.file_id, "filename": i.filename, "reason": i.reason}
+            for i in read.issues
+        ],
         "seeds": [{"name": n, "columns": cols, "csv": ws.read_seed(n) or ""}
                   for n, cols in seeds.items()],
     }
@@ -262,17 +453,18 @@ def list_models(project_id: str, asset: DataAsset) -> dict:
 
 def write_model(project_id: str, asset: DataAsset, layer: str, name: str, sql: str) -> None:
     from app.dataeng.dbt.workspace import ModelFile
-    Workspace(project_id).ensure().write_model(ModelFile(layer=layer, name=name, sql=sql))
+    Workspace(project_id, asset.id).ensure().write_model(
+        ModelFile(layer=layer, name=name, sql=sql))
     _touch(asset)
 
 
 def write_seed(project_id: str, asset: DataAsset, name: str, csv: str) -> None:
-    Workspace(project_id).ensure().write_seed(name, csv)
+    Workspace(project_id, asset.id).ensure().write_seed(name, csv)
     _touch(asset)
 
 
 def preview(project_id: str, asset: DataAsset, model: str, limit: int = 50) -> dict:
-    ws = Workspace(project_id)
+    ws = Workspace(project_id, asset.id)
     if not ws.warehouse_path.exists():
         raise DbtServiceError("No build output yet — run a build first.")
     try:
@@ -301,7 +493,7 @@ def publish(project_id: str, st, asset: DataAsset) -> DataAssetVersion:
         raise DbtServiceError(
             "Output does not strictly map to the target schema — " + "; ".join(parts)
             + ". Map these in the Transform step before publishing.")
-    ws = Workspace(project_id)
+    ws = Workspace(project_id, asset.id)
     df = ws.read_relation(summary.mart)
     if df.empty:
         raise DbtServiceError("The mart is empty — nothing to publish.")
@@ -330,11 +522,27 @@ def _norm_path(*parts: str) -> str:
     return "|".join("".join(str(p).lower().split()) for p in parts)
 
 
+def _indicator_id(asset_id: str, vals: dict) -> str:
+    """A stable id for one (asset × metric × factor path).
+
+    Derived from identity, not from position in the group-by. A positional id
+    (``ind-<asset>-<n>``) was reshuffled by every re-publish, so a stored
+    ``indicatorId`` could silently come to mean a different metric.
+    """
+    key = "|".join(str(vals.get(k, "")) for k in
+                   ("metric", "metric_type", "l1", "l2", "l3", "l4"))
+    return f"ind-{asset_id}-{hashlib.sha1(key.encode('utf-8')).hexdigest()[:10]}"
+
+
 def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicator]:
     """Register one indicator per (metric × factor path) in the published mart, so
     Data Intake can reference indicators instead of raw files. Each indicator is
     grounded against the Business-Understanding factor tree when a row matches
-    (unmatched ones are flagged for review). Replaces this asset's prior indicators."""
+    (unmatched ones are flagged for review). Replaces this asset's prior indicators —
+    but a human's row binding is a decision, not derived state, so it is carried
+    across by id rather than discarded on every publish."""
+    human_bindings = {ind.id: ind.tree_row_id for ind in st.indicators
+                      if ind.asset_id == asset.id and ind.bound_by == "human" and ind.tree_row_id}
     st.indicators = [ind for ind in st.indicators if ind.asset_id != asset.id]
     if "metric" not in df.columns:
         return []
@@ -364,8 +572,10 @@ def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicato
         # format) from its metric name once, at publish, so downstream reads metadata
         # rather than re-guessing. The OLS role (`metricType`) is left as-is.
         meta = classify_indicator(str(vals.get("metric", "")))
+        ind_id = _indicator_id(asset.id, vals)
+        pinned = human_bindings.get(ind_id, "")
         ind = Indicator(
-            id=f"ind-{asset.id}-{len(new)}",
+            id=ind_id,
             metric=str(vals.get("metric", "")),
             metricType=str(vals.get("metric_type", "")),
             l1=str(vals.get("l1", "")), l2=str(vals.get("l2", "")),
@@ -375,7 +585,9 @@ def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicato
             ruleVersion=INDICATOR_META_RULE_VERSION,
             assetId=asset.id, assetName=asset.name,
             coverageStart=cov_start, coverageEnd=cov_end, rows=int(len(grp)),
-            treeGrounded=row is not None, treeRowId=(row.id if row is not None else ""),
+            treeGrounded=bool(pinned) or row is not None,
+            treeRowId=pinned or (row.id if row is not None else ""),
+            boundBy="human" if pinned else ("auto" if row is not None else ""),
         )
         new.append(ind)
     st.indicators.extend(new)

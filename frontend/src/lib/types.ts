@@ -192,7 +192,9 @@ export interface ValidationSeriesRequest {
   channelType?: string[]
   provinceGroup?: string[]
   timeWindowId?: string  // DATA-005: scope + compare against a saved time window
-  kpiMetric?: string     // DATA-009: which KPI (Volume/Value) is the backdrop
+  kpiMetric?: string     // explorer-only override; the 2.3 chart never sends one
+  /** 1–12 → the yearly table compares that calendar month across years; 0 = full year. */
+  yoyMonth?: number
 }
 /** DATA-008: display metadata attached to a series/row so the UI formats it right. */
 export interface IndicatorDisplayMeta {
@@ -249,15 +251,19 @@ export interface ValidationSeriesResponse {
   /** DATA-009: the KPI metric currently used as the backdrop. */
   kpiMetric?: string
   series: ValidationOverlay[]
-  yearly: { years: number[]; rows: ValidationYearlyRow[] }
+  yearly: {
+    years: number[]
+    rows: ValidationYearlyRow[]
+    /** Echo of the requested month (0 = full year) and its label. */
+    yoyMonth?: number
+    monthLabel?: string
+  }
   /** DATA-005: current vs comparison window totals (present when a window is applied). */
   comparison?: ValidationComparison | null
   /** DATA-004: resolved L3 → L4…L8 drill path, shared by chart/table/export. */
   breadcrumb?: ValidationBreadcrumbStep[]
   options: {
     grains: string[]
-    /** DATA-009: KPI backdrop choices (Volume / Value) for the switcher. */
-    kpiMetrics: { metric: string; semanticType: string }[]
     l4: string[]
     /** DATA-004: cascade options; empty list = level Not Available (hide it). */
     l5: string[]
@@ -272,8 +278,35 @@ export interface ValidationSeriesResponse {
   }
 }
 
+/** One thing the chart analysis noticed, anchored to a period. */
+export interface ChartObservation {
+  period: string
+  metric: string
+  note: string
+}
+/**
+ * The AI's reading of exactly the series a factor chart is showing. Cached per
+ * filter state; `seriesDigest` is a fingerprint of the plotted numbers, so a
+ * reading of data that has since moved can be told apart from a current one.
+ */
+export interface ValidationChartAnalysis {
+  key: string
+  l3: string
+  filterLabel: string
+  headline: string
+  trends: string[]
+  anomalies: ChartObservation[]
+  inflections: ChartObservation[]
+  caveats: string[]
+  seriesDigest: string
+  generatedAt: string
+  /** True when no language model was configured and the computed facts were
+   *  rendered as prose instead. */
+  fallback: boolean
+}
+
 /** ── OLS Regression Test (2.5, format 'olsTree') ── */
-export type OlsRowStatus = 'inRange' | 'review' | 'noBenchmark' | 'notInModel' | 'dropped'
+export type OlsRowStatus = 'inRange' | 'review' | 'noBenchmark' | 'notInModel' | 'dropped' | 'notMapped'
 export type OlsRangeStatus = 'in' | 'out' | 'none'
 export interface OlsObjectSummary {
   object: string
@@ -310,7 +343,7 @@ export interface OlsTreeRow {
   indicator: string
   mapped: boolean
   inModel: boolean
-  droppedBy: '' | 'quality' | 'statistical'
+  droppedBy: '' | 'mapping' | 'quality' | 'signoff' | 'statistical' | 'range'
   objects: string[]
   coef: number | null
   tValue: number | null
@@ -318,6 +351,9 @@ export interface OlsTreeRow {
   significant: boolean | null
   roi: number | null
   contribution: number | null
+  /** Set only when the ROI borrowed its L4's spend as the denominator (the
+   *  indicator itself is not a spend metric) — e.g. `÷ 站内投流 spend (Spending)`. */
+  roiBasis?: string
   roiRange: string
   contributionRange: string
   rangeSource: 'knowledge' | 'reference' | ''
@@ -326,6 +362,54 @@ export interface OlsTreeRow {
   status: OlsRowStatus
   flagReason: string
   results: OlsRowResult[]
+  /** The AI's judgement of this factor against its Knowledge band. Rides alongside
+   *  `roiStatus` / `contributionStatus` — it never replaces the computed check. */
+  aiVerdict?: '' | 'consistent' | 'questionable' | 'implausible' | 'noBenchmark'
+  aiRationale?: string
+}
+/** One trial regression the 2.5 indicator search ran. */
+export interface OlsSearchTrial {
+  trial: number
+  seed: boolean
+  triedFor: string
+  alternate: string
+  l4: string
+  indicator: string
+  r2: number
+  coef: number | null
+  tValue: number | null
+  pValue: number | null
+  significant: boolean | null
+  signExpected: boolean
+  signCorrect: boolean
+  roi: number | null
+  contribution: number | null
+  roiStatus: OlsRangeStatus
+  contributionStatus: OlsRangeStatus
+  roiRange: string
+  contributionRange: string
+  objectiveInRange: number
+  objectiveSigned: number
+}
+export interface OlsSearchFactor {
+  l4: string
+  chosen: string
+  candidates: string[]
+  status: OlsRangeStatus
+}
+/** What the per-L4 indicator search tried, and what won. */
+export interface OlsSearchTrace {
+  fits: number
+  l4Searched: number
+  candidates: number
+  swaps: number
+  inRange: number
+  signedOk?: number
+  r2: number
+  factorsSkipped?: number
+  trials: OlsSearchTrial[]
+  perFactor: OlsSearchFactor[]
+  note: string
 }
 export interface OlsTreeSummary {
   total: number
@@ -335,6 +419,7 @@ export interface OlsTreeSummary {
   noBenchmark: number
   notInModel: number
   dropped: number
+  notMapped: number
 }
 export interface OlsSetupSummary {
   dataSource: string
@@ -351,6 +436,8 @@ export interface OlsTreeData {
   summary: OlsTreeSummary
   setup?: OlsSetupSummary
   note?: string
+  /** Present once 2.5 has run its per-L4 indicator search. */
+  search?: OlsSearchTrace | null
 }
 
 /**
@@ -476,6 +563,9 @@ export interface MasterDataObjectAdopted extends MasterDataAdopted {
 }
 export interface MasterData {
   objects: MasterDataObject[]
+  /** 2.32 sheet 1: per-indicator model granularity (渠道 scope × 区域 granularity;
+   *  blank scopes = not selected into the model). */
+  granularityRef?: MasterGranularityRow[]
   /** {combined, byObject} — combined is the pre-per-object rollup every
    *  reader used to get directly; byObject is each channel's own funnel. */
   funnel: { combined: FunnelLayer[]; byObject: Record<string, FunnelLayer[]> }
@@ -486,6 +576,26 @@ export interface MasterData {
    *  chain (spec §3.5) — Tab 2's per-channel breakdown. */
   byObject?: Record<string, { adopted: MasterDataObjectAdopted[]; rejected: MasterDataRejected[] }>
   note?: string
+}
+/** 2.32 模型颗粒度参考表 row: a factor's model granularity. */
+export interface MasterGranularityRow {
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  adopted: boolean
+  /** 渠道 scope (全渠道 or a channel-type list); blank when not adopted. */
+  channelScope: string
+  /** 区域 granularity (National or a province-group list); blank when not adopted. */
+  regionScope: string
+}
+/** GET /master-data/data-station — the 2.32 D.Data Station sheet. */
+export interface MasterDataStation {
+  columns: string[]
+  rows: (string | number | null)[][]
+  rowCount: number
+  truncated: boolean
 }
 /** One live slice of the master feature table (POST /master-data/table). */
 export interface MasterTable {
@@ -930,10 +1040,31 @@ export interface ToolInvocation {
 
 /* ── Assistant ─────────────────────────────────────────── */
 
+/**
+ * An object the user pinned as the subject of a question.
+ *
+ * `payload` carries the `ValidationSeriesRequest` that produced a chart, so the
+ * backend re-resolves the rows itself instead of trusting numbers from the client.
+ */
+export interface ChatMention {
+  kind: 'chartTable' | 'chartAnalysis' | 'artifact'
+  refId: string
+  label: string
+  payload?: Record<string, unknown>
+}
+/** One `@`-mentionable object, from `GET /mentionables`. */
+export interface Mentionable {
+  kind: ChatMention['kind']
+  refId: string
+  label: string
+  group: string
+}
 export interface AssistantTurn {
   role: 'user' | 'assistant'
   text: string
   evidence?: EvidenceRef[]
+  /** What the user pinned on this turn — re-rendered as chips on reload. */
+  mentions?: { kind: ChatMention['kind']; refId: string; label: string }[]
 }
 
 /** A drafted-but-unapplied chat edit to an artifact (preview-then-confirm). */
@@ -1287,7 +1418,7 @@ export interface LedgerEntry {
 
 /* ── Data Engine (raw → review → clean → publish data asset) ── */
 
-export type DataAssetStatus = 'raw' | 'reviewed' | 'spec' | 'cleaned' | 'published'
+export type DataAssetStatus = 'raw' | 'reviewed' | 'published'
 
 /** One discovered raw table (a sheet or CSV) inside a registered source file. */
 export interface RawTable {
@@ -1469,12 +1600,42 @@ export interface DbtSeed {
   csv: string
 }
 
+/** One readable raw table an asset's uploads produced. */
+export interface RawSourceTable {
+  name: string
+  filename: string
+  fileId: string
+  sheet: string
+  /** Origin label stamped onto every row this table produces (the `source` column). */
+  sourceLabel: string
+  rowCount: number
+  columns: string[]
+}
+
+/** A registered file that produced no table, and why — so an upload that never
+ *  appeared in the editor can explain itself instead of being silently absent. */
+export interface RawSourceIssue {
+  fileId: string
+  filename: string
+  reason: string
+}
+
 export interface DbtWorkspaceInfo {
   available: boolean
   message: string
   models: DbtModelFile[]
+  /** Raw table names, derived from the uploaded files (not from a dbt build). */
   sources: string[]
+  sourceTables: RawSourceTable[]
+  sourceIssues: RawSourceIssue[]
   seeds: DbtSeed[]
+}
+
+/** Distinct values of one column as they reach a step, most frequent first. */
+export interface ColumnValuesResult {
+  ok: boolean
+  error: string
+  values: [string, number][]
 }
 
 export interface DbtPreview {
@@ -1531,6 +1692,43 @@ export interface FieldMapEntry {
   target: string
   cast: string // '' | integer | double | date | text
   expr: string
+  /** Who decided this row — AI rows apply directly but are marked for review. */
+  by: 'ai' | 'human'
+}
+
+/** Columns available at a step (field-map / custom-SQL grounding). */
+export interface InputColumnsResult {
+  ok: boolean
+  error: string
+  columns: string[]
+}
+
+/** AI-matched source→target column mappings, merged over human rows. */
+export interface FieldMapSuggestion {
+  ok: boolean
+  error: string
+  entries: FieldMapEntry[]
+}
+
+/** A custom_sql body drafted from plain English (already sandbox-validated). */
+export interface SqlSuggestion {
+  ok: boolean
+  error: string
+  sql: string
+}
+
+/** The transform pipeline compiled to one statement (Publish → export). */
+export interface CompiledSql {
+  ok: boolean
+  error: string
+  sql: string
+}
+
+/** Result of an AI enum-mapping pass — entries merged over the step's own decisions. */
+export interface EnumSuggestion {
+  ok: boolean
+  error: string
+  entries: EnumMapEntry[]
 }
 
 export interface EnumMapEntry {
@@ -1538,6 +1736,8 @@ export interface EnumMapEntry {
   canonical: string
   confidence: number
   by: 'ai' | 'human'
+  /** Only 'accepted' rows are compiled; 'proposed' awaits human confirmation. */
+  status: 'accepted' | 'proposed'
 }
 
 export interface JoinConfig {
@@ -1566,6 +1766,8 @@ export interface TransformStep {
   inputs: string[] // 'source:<table>' or step ids
   fieldMap: FieldMapEntry[]
   enumField: string
+  /** Target-schema column supplying the standard values this field maps onto. */
+  enumTarget: string
   enumMap: EnumMapEntry[]
   join?: JoinConfig | null
   groupBy: string[]
@@ -1590,6 +1792,8 @@ export interface TargetColumn {
   kind: TargetColumnKind
   required: boolean
   standardValues: string[]
+  /** Engine-owned (e.g. `source`): written automatically, cannot be renamed or removed. */
+  system?: boolean
 }
 
 /** FND-001 · semantic type of an indicator (what kind of number it is). */
@@ -1667,10 +1871,16 @@ export interface FactorMapRow {
   coverageStart: string
   coverageEnd: string
   ignoreNote: string
+  /** Model role the user maintains in 2.1: 'Y' response / 'X' driver / 'excluded'. */
+  metricType: MetricRole
+  /** How the indicator rolls up over time/dimensions. */
+  aggregation: string
   /** Ranked proposals, best first. Empty for mapped rows and for rows with no
    *  candidate above the suggestion threshold. */
   suggestions: FactorMapSuggestion[]
 }
+
+export type MetricRole = 'Y' | 'X' | 'excluded'
 
 /**
  * The 2.1 gate verdict, decided by the backend (`app/agents/intake_status.py`).

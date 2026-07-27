@@ -28,6 +28,11 @@ export function TargetSchemaPanel() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [collecting, setCollecting] = useState<string | null>(null)
+  const [message, setMessage] = useState('')
+  // Values observed in the project's data that this column does not yet list. Held
+  // as *suggestions* rather than merged in: a standard set the user did not choose
+  // is not a standard, and dumping every raw spelling into it defeats the check.
+  const [seen, setSeen] = useState<Record<string, string[]>>({})
 
   useEffect(() => {
     if (!pid) return
@@ -45,26 +50,40 @@ export function TargetSchemaPanel() {
     mutate(next)
   }
 
+  const named = (cols ?? []).map((c) => c.name.trim()).filter(Boolean)
+  const duplicates = named.filter((n, i) => named.indexOf(n) !== i)
+  const blanks = (cols ?? []).filter((c) => !c.name.trim()).length
+
   async function save() {
     if (!pid || !cols) return
     setSaving(true)
+    setMessage('')
     try {
       const cleaned = cols.filter((c) => c.name.trim())
       await api.putTargetSchema(pid, cleaned)
       setCols(cleaned)
       setDirty(false)
+      setMessage(blanks > 0 ? `Saved — ${blanks} unnamed column(s) were dropped.` : '')
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Could not save the schema.')
     } finally { setSaving(false) }
   }
 
   async function collect(i: number) {
     if (!pid || !cols) return
-    const name = cols[i].name
+    const name = cols[i].name.trim()
+    if (!name) return
     setCollecting(name)
+    setMessage('')
     try {
       const got = await api.collectSchemaValues(pid, name)
-      const merged = [...cols[i].standardValues]
-      for (const v of got.values) if (!merged.includes(v)) merged.push(v)
-      patch(i, { standardValues: merged })
+      const missing = got.values.filter((v) => !cols[i].standardValues.includes(v))
+      setSeen((m) => ({ ...m, [name]: missing }))
+      if (missing.length === 0) {
+        setMessage(`Every value found in the data for ${name} is already a standard value.`)
+      }
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : `Could not read values for ${name}.`)
     } finally { setCollecting(null) }
   }
 
@@ -86,6 +105,18 @@ export function TargetSchemaPanel() {
           </Button>
         </div>
       </div>
+
+      {(message || duplicates.length > 0) && (
+        <div className="shrink-0 border-b border-border px-5 py-2 text-[11px]">
+          {duplicates.length > 0 && (
+            <p className="text-amber-700">
+              Duplicate column name{duplicates.length > 1 ? 's' : ''}:{' '}
+              <span className="font-mono">{[...new Set(duplicates)].join(', ')}</span> — the last one wins on save.
+            </p>
+          )}
+          {message && <p className="text-muted-foreground">{message}</p>}
+        </div>
+      )}
 
       <div className="min-h-0 flex-1 overflow-auto p-5">
         {!cols ? (
@@ -118,7 +149,10 @@ export function TargetSchemaPanel() {
                         value={c.name}
                         onChange={(e) => patch(i, { name: e.target.value })}
                         placeholder="column_name"
-                        className="w-full rounded border border-transparent bg-transparent px-1.5 py-0.5 font-mono font-medium outline-none hover:border-border focus:border-primary/60"
+                        readOnly={c.system}
+                        title={c.system ? 'Written by the engine — the pipeline depends on this name' : undefined}
+                        className={cn('w-full rounded border border-transparent bg-transparent px-1.5 py-0.5 font-mono font-medium outline-none hover:border-border focus:border-primary/60',
+                          c.system && 'cursor-not-allowed text-muted-foreground hover:border-transparent')}
                       />
                       <input
                         value={c.label}
@@ -146,9 +180,16 @@ export function TargetSchemaPanel() {
                     <td className="px-2 py-2">
                       <ValueChips
                         values={c.standardValues}
-                        onChange={(vals) => patch(i, { standardValues: vals })}
+                        suggestions={seen[c.name.trim()] ?? []}
+                        onChange={(vals) => {
+                          patch(i, { standardValues: vals })
+                          setSeen((m) => ({
+                            ...m,
+                            [c.name.trim()]: (m[c.name.trim()] ?? []).filter((v) => !vals.includes(v)),
+                          }))
+                        }}
                         onCollect={() => void collect(i)}
-                        collecting={collecting === c.name}
+                        collecting={collecting === c.name.trim()}
                         canCollect={!!c.name.trim()}
                       />
                     </td>
@@ -156,9 +197,16 @@ export function TargetSchemaPanel() {
                       <input type="checkbox" checked={c.required} onChange={(e) => patch(i, { required: e.target.checked })} />
                     </td>
                     <td className="px-2 py-2">
-                      <button type="button" onClick={() => mutate(cols.filter((_, idx) => idx !== i))} className="text-muted-foreground hover:text-rose-600" aria-label="Delete column">
-                        <Trash2 className="size-3.5" />
-                      </button>
+                      {c.system ? (
+                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground"
+                          title="Filled in automatically for every row (which file / sheet it came from)">
+                          auto
+                        </span>
+                      ) : (
+                        <button type="button" onClick={() => mutate(cols.filter((_, idx) => idx !== i))} className="text-muted-foreground hover:text-rose-600" aria-label="Delete column">
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -171,8 +219,10 @@ export function TargetSchemaPanel() {
   )
 }
 
-function ValueChips({ values, onChange, onCollect, collecting, canCollect }: {
+function ValueChips({ values, suggestions, onChange, onCollect, collecting, canCollect }: {
   values: string[]
+  /** Observed in the data but not yet a standard value — one click to adopt. */
+  suggestions: string[]
   onChange: (v: string[]) => void
   onCollect: () => void
   collecting: boolean
@@ -192,6 +242,21 @@ function ValueChips({ values, onChange, onCollect, collecting, canCollect }: {
           <button type="button" onClick={() => onChange(values.filter((x) => x !== v))} className="text-muted-foreground hover:text-rose-600"><X className="size-2.5" /></button>
         </span>
       ))}
+      {suggestions.length > 0 && (
+        <>
+          {suggestions.map((v) => (
+            <button key={v} type="button" onClick={() => onChange([...values, v])}
+              title="Seen in the data — add as a standard value"
+              className="inline-flex items-center gap-0.5 rounded-full border border-dashed border-primary/40 px-1.5 py-0.5 font-mono text-[10px] text-primary/80 transition-colors hover:bg-primary/10">
+              <Plus className="size-2.5" />{v}
+            </button>
+          ))}
+          <button type="button" onClick={() => onChange([...values, ...suggestions])}
+            className="rounded-full px-1 text-[10px] font-medium text-primary hover:underline">
+            add all {suggestions.length}
+          </button>
+        </>
+      )}
       <input
         value={draft}
         onChange={(e) => setDraft(e.target.value)}

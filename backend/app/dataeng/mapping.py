@@ -12,6 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.agents.data_request import _norm
+from app.agents.overrides import (
+    default_metric_type,
+    metric_type_override,
+    resolve_aggregation,
+)
 from app.store.state import ProjectState
 
 _ACTIVE_STATUSES = ("baseline", "accepted")
@@ -33,6 +38,10 @@ class FactorMapRow:
     coverage_start: str = ""
     coverage_end: str = ""
     ignore_note: str = ""
+    # 2.1 model-role + aggregation the user maintains here (resolved: override else
+    # the name-based classifier default). metric_type ∈ {"Y","X","excluded"}.
+    metric_type: str = "X"
+    aggregation: str = "sum"
 
 
 @dataclass
@@ -118,6 +127,17 @@ def resolve_factor_map(st: ProjectState) -> FactorMap:
         elif r.id in ignores:
             fm.status = "ignored"
             fm.ignore_note = str(ignores[r.id] or "")
+        # Resolve the model role + aggregation the user maintains at 2.1: their
+        # override if set, else the name-based classifier default. Keyed by the
+        # covering metric label when mapped, else the factor's own indicator name.
+        metric_label = fm.metric or fm.indicator
+        ov_role = metric_type_override(st, r.l4, metric_label)
+        fm.metric_type = ov_role or default_metric_type(metric_label)
+        # `default_metric_type` returns the engine tag ("Y"/"spending"/"X"); the UI
+        # concept is Y/X/excluded, so fold "spending" into "X" for display.
+        if fm.metric_type == "spending":
+            fm.metric_type = "X"
+        fm.aggregation = resolve_aggregation(st, r.l4, metric_label)
         out.append(fm)
     return FactorMap(rows=out)
 

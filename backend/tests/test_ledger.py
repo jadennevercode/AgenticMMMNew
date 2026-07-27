@@ -161,8 +161,10 @@ def test_selection_layer_rejects_unticked_variables() -> None:
 
     sel = model_selection(st)
     assert sel.include_for(keep.object) is not None
-    assert keep.metric.strip().lower() in (sel.include_for(keep.object) or frozenset())
-    assert drop.metric.strip().lower() not in (sel.include_for(drop.object) or frozenset())
+    # `include` is keyed (norm_l4, norm_metric) — the same key space as `exclude`
+    # and the ledger, so a tick names one indicator, not every L4 sharing a label.
+    assert keep.key in (sel.include_for(keep.object) or frozenset())
+    assert drop.key not in (sel.include_for(drop.object) or frozenset())
     assert sel.y_for("MT") == "Y"
 
 

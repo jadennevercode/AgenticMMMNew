@@ -24,6 +24,9 @@ from app.config import get_settings
 
 # Per-project resolutions (cached; None entry = not resolved yet).
 _PROJECT_CACHE: dict[str, "DatasetResolution"] = {}
+# Per-project national (TOTAL) model frames, derived from the raw table + the 2.1
+# overrides. Dropped alongside the raw resolution on `invalidate_project`.
+_NATIONAL_CACHE: dict[str, pd.DataFrame] = {}
 
 # The seeded Danone case is the one project the reference dataset legitimately
 # *is* the project's own data. Everything else must bring its own.
@@ -116,17 +119,43 @@ def _resolve(pid: str, st: object) -> DatasetResolution:
     return DatasetResolution(None, "none", " ".join(reasons) or "No project data available.")
 
 
-def model_df(st: object | None = None) -> pd.DataFrame:
-    """The project's modeling table, or an **empty** frame when it has none.
-
-    Callers that must not run on an empty universe should check
-    `resolve_dataset(st).usable` (or go through `dataset_blocker`) first; the
-    empty frame keeps read-only paths (previews, renderers) total.
-    """
+def raw_long_df(st: object | None = None) -> pd.DataFrame:
+    """The per-channel long table with the 2.1 model-role overrides applied, but
+    **before** the national roll-up. Consumers that need channel/region lineage
+    (master data's channel-coverage facts, the Data Station view) read this; the
+    modeling path reads :func:`model_df`. A no-op over the raw frame when no
+    overrides are set — the reference/legacy table is returned unchanged."""
     res = resolve_dataset(st)
-    if res.usable:
-        return res.df
-    return _empty_long_table()
+    if not res.usable:
+        return _empty_long_table()
+    from app.agents.overrides import apply_metric_type_overrides
+    return apply_metric_type_overrides(res.df, st)
+
+
+def model_df(st: object | None = None) -> pd.DataFrame:
+    """The project's **national** modeling table (one total model object), or an
+    empty frame when it has none.
+
+    The per-channel raw table is rolled up to a single ``TOTAL`` object (decision
+    2026-07-23): every S2 screening/OLS/master-data consumer draws from here and
+    sees one national model, with channel-specific factors surviving as their own
+    indicator columns. Cached per project; dropped on `invalidate_project` (which
+    the 2.1 override endpoints call, so a metric-type/aggregation change recomputes
+    the national frame). Callers needing channel lineage use :func:`raw_long_df`.
+    """
+    pid = getattr(st, "project_id", None) if st is not None else None
+    raw = raw_long_df(st)
+    if raw.empty:
+        return raw
+    if not pid:
+        # No project context (tests / reference tooling) — national aggregation
+        # needs per-indicator overrides that only a project carries, so serve the
+        # raw table unchanged.
+        return raw
+    if pid not in _NATIONAL_CACHE:
+        from app.agents.national import build_national
+        _NATIONAL_CACHE[pid] = build_national(raw, st)
+    return _NATIONAL_CACHE[pid]
 
 
 @lru_cache(maxsize=1)
@@ -154,16 +183,22 @@ def model_objects(st: object | None = None) -> list[str]:
 
 
 def diagnose_taxonomy(st: object | None = None) -> TaxonomyDiagnosis:
-    """Check the resolved table carries a Y, some X drivers, and model objects."""
-    df = model_df(st)
+    """Check the **uploaded** table carries a Y, some X drivers, and a channel_type.
+
+    Runs on the raw (pre-national) frame: this is a data-adequacy check on what the
+    project uploaded, so it reports real channel coverage and still requires each
+    row to declare its channel_type (data hygiene) even though the model itself is
+    aggregated to a single national object downstream."""
+    df = raw_long_df(st)
     if df.empty:
         return TaxonomyDiagnosis(problems=["The modeling table is empty."])
 
     from app.mmm.pivot import _is_y_row, is_driver_row
 
-    objects = model_objects(st)
     ct = df["channel_type"] if "channel_type" in df.columns else pd.Series(dtype="object")
-    coverage = float(ct.astype(str).str.strip().ne("").mean()) if len(ct) else 0.0
+    ctn = ct.astype("string").str.strip()
+    objects = sorted({v for v in ctn[ctn.ne("") & ctn.ne("nan")].tolist()})
+    coverage = float(ctn.ne("").mean()) if len(ctn) else 0.0
 
     y_mask = _is_y_row(df)
     y_rows = int(y_mask.sum())
@@ -205,8 +240,16 @@ def set_project_dataset(project_id: str, df: pd.DataFrame, source: str = "publis
 
 
 def invalidate_project(project_id: str) -> None:
-    """Drop a project's cached long table (call after a data upload/delete)."""
+    """Drop a project's cached long table (call after a data upload/delete or a 2.1
+    override change)."""
     _PROJECT_CACHE.pop(project_id, None)
+    _NATIONAL_CACHE.pop(project_id, None)
     # The indicator universe is derived from that table, so it goes too.
     from app.agents.ledger import invalidate_universe
     invalidate_universe(project_id)
+    # Every cached 2.3 chart analysis is a reading of numbers that just changed —
+    # a stale reading is worse than no reading, so they go with the table.
+    from app.store.state import get_store
+    st = get_store().get(project_id)
+    if st is not None and getattr(st, "validation_chart_analyses", None):
+        st.validation_chart_analyses = {}

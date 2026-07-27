@@ -25,7 +25,9 @@ import pandas as pd
 
 from app.dataeng import duck
 from app.dataeng.dbt import compiler, target_schema
-from app.dataeng.sources import asset_tables
+from app.dataeng.sources import (
+    SourceRead, heal_pipeline_inputs, read_asset_sources, source_labels,
+)
 from app.domain.models import DataAsset, TransformPipeline
 
 SOURCE_PREFIX = "source:"
@@ -33,27 +35,45 @@ DEFAULT_LIMIT = 200
 MAX_LIMIT = 1_000
 _CACHE_SIZE = 4
 
-_frames: "OrderedDict[tuple[str, str, tuple[str, ...]], dict[str, pd.DataFrame]]" = OrderedDict()
+_frames: "OrderedDict[tuple[str, str, tuple[str, ...]], SourceRead]" = OrderedDict()
 
 
-def _cached_tables(project_id: str, asset: DataAsset) -> dict[str, pd.DataFrame]:
+def cached_sources(project_id: str, asset: DataAsset) -> SourceRead:
+    """The asset's parsed sources, memoised per (project, asset, source set).
+
+    Reading the workbooks dominates every editor round trip, so the same parse
+    serves the preview, the source list and the enum value lookups.
+    """
     key = (project_id, asset.id, tuple(sorted(asset.source_file_ids)))
     hit = _frames.get(key)
     if hit is not None:
         _frames.move_to_end(key)
         return hit
-    tables = asset_tables(project_id, asset)
-    _frames[key] = tables
+    read = read_asset_sources(project_id, asset)
+    _frames[key] = read
     _frames.move_to_end(key)
     while len(_frames) > _CACHE_SIZE:
         _frames.popitem(last=False)
-    return tables
+    return read
+
+
+def _cached_tables(project_id: str, asset: DataAsset) -> dict[str, pd.DataFrame]:
+    return cached_sources(project_id, asset).tables
 
 
 def invalidate(project_id: str, asset_id: str = "") -> None:
     """Drop memoised frames after an upload or asset change."""
     for key in [k for k in _frames if k[0] == project_id and (not asset_id or k[1] == asset_id)]:
         _frames.pop(key, None)
+
+
+def _no_sources_error(read: SourceRead) -> str:
+    """Say why there is nothing to read — an upload that parsed to nothing looks
+    identical to no upload at all unless the reason is carried through."""
+    if not read.issues:
+        return "This asset has no readable raw sources yet — upload files first."
+    detail = "; ".join(f"{i.filename or i.file_id}: {i.reason}" for i in read.issues[:3])
+    return f"None of the uploaded files could be read as a table — {detail}"
 
 
 def preview_step(st, project_id: str, asset: DataAsset, pipe: TransformPipeline | None,
@@ -64,10 +84,11 @@ def preview_step(st, project_id: str, asset: DataAsset, pipe: TransformPipeline 
     previews the pipeline's output step.
     """
     limit = max(1, min(int(limit), MAX_LIMIT))
-    tables = _cached_tables(project_id, asset)
+    read = cached_sources(project_id, asset)
+    tables = read.tables
     if not tables:
-        return duck.PreviewResult(
-            ok=False, error="This asset has no readable raw sources yet — upload files first.")
+        return duck.PreviewResult(ok=False, error=_no_sources_error(read))
+    heal_pipeline_inputs(pipe, tables)
 
     if step_id.startswith(SOURCE_PREFIX):
         table = duck.sanitize_ident(step_id[len(SOURCE_PREFIX):])
@@ -82,11 +103,51 @@ def preview_step(st, project_id: str, asset: DataAsset, pipe: TransformPipeline 
             pipe, step_id,
             target_schema=target_schema.schema_for(st),
             raw_columns={name: [str(c) for c in df.columns] for name, df in tables.items()},
-            source_labels={t.name: (t.filename or t.name) for t in asset.raw_tables},
+            source_labels=source_labels(read),
         )
     except compiler.CompileError as e:
         return duck.PreviewResult(ok=False, error=str(e))
-    return duck.run_preview(sql, tables, limit=limit)
+    res = duck.run_preview(sql, tables, limit=limit)
+    return res if res.ok else duck.PreviewResult(
+        ok=False, error=_explain(res.error), columns=res.columns)
+
+
+# The compiler derives `period_date` from `month` on the output step, so a bad month
+# value fails inside SQL the user never wrote — with a message naming neither the
+# column nor the offending row.
+_MONTH_FORMAT = "%Y%m%d"
+
+
+def _explain(error: str) -> str:
+    """Attach the missing context to engine errors that name none of the user's work."""
+    if _MONTH_FORMAT in error:
+        return (f"{error}\n\nThe `month` column must be a yyyymm integer (e.g. 202301). "
+                "Fix the value above at its source, or map/derive `month` so every row "
+                "is a real year and month.")
+    return error
+
+
+def input_columns(st, project_id: str, asset: DataAsset, pipe: TransformPipeline | None,
+                  step_id: str) -> tuple[list[str], str]:
+    """The columns available at ``step_id`` — a raw table's, or a step's output.
+
+    Feeds the field-map editor, which cannot ask a person to name source columns it
+    has never shown them. Raw tables answer from the parsed frame directly; a step
+    is compiled and probed for one row, which is enough for the column list.
+    Returns ``(columns, error)``.
+    """
+    read = cached_sources(project_id, asset)
+    tables = read.tables
+    if not tables:
+        return [], _no_sources_error(read)
+    heal_pipeline_inputs(pipe, tables)
+    if step_id.startswith(SOURCE_PREFIX):
+        table = duck.sanitize_ident(step_id[len(SOURCE_PREFIX):])
+        if table not in tables:
+            return [], f"unknown source table {table!r}"
+        return [str(c) for c in tables[table].columns], ""
+    res = preview_step(st, project_id, asset, pipe, step_id, limit=1)
+    return (list(res.columns), "") if res.ok else ([], res.error)
 
 
 def column_values(st, project_id: str, asset: DataAsset, pipe: TransformPipeline | None,
@@ -98,9 +159,11 @@ def column_values(st, project_id: str, asset: DataAsset, pipe: TransformPipeline
     reaches the step, not whatever is already listed in its mapping table.
     Returns ``(values, error)`` — an empty list with a message on failure.
     """
-    tables = _cached_tables(project_id, asset)
+    read = cached_sources(project_id, asset)
+    tables = read.tables
     if not tables:
-        return [], "This asset has no readable raw sources yet — upload files first."
+        return [], _no_sources_error(read)
+    heal_pipeline_inputs(pipe, tables)
 
     if step_id.startswith(SOURCE_PREFIX):
         table = duck.sanitize_ident(step_id[len(SOURCE_PREFIX):])
@@ -115,7 +178,7 @@ def column_values(st, project_id: str, asset: DataAsset, pipe: TransformPipeline
                 pipe, step_id,
                 target_schema=target_schema.schema_for(st),
                 raw_columns={n: [str(c) for c in df.columns] for n, df in tables.items()},
-                source_labels={t.name: (t.filename or t.name) for t in asset.raw_tables},
+                source_labels=source_labels(read),
             )
         except compiler.CompileError as e:
             return [], str(e)

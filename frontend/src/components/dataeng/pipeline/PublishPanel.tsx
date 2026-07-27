@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { BookMarked, CheckCircle2, CircleSlash, Loader2, Rocket, XCircle } from 'lucide-react'
-import type { DataAsset, Indicator } from '../../../lib/types'
+import {
+  BookMarked, Check, CheckCircle2, CircleSlash, Copy, Download, FileCode, Loader2,
+  Rocket, XCircle,
+} from 'lucide-react'
+import type { CompiledSql, DataAsset, Indicator } from '../../../lib/types'
 import { api } from '../../../api/client'
 import { useSimStore } from '../../../store/useSimStore'
 import { Card } from '../../ui/card'
@@ -110,6 +113,8 @@ export function PublishPanel({ asset }: { asset: DataAsset }) {
         </div>
       </Card>
 
+      <CompiledSqlCard asset={asset} />
+
       {/* ── indicators registered by this asset ── */}
       <Card className="p-0">
         <div className="flex items-center gap-2 border-b border-border px-4 py-2">
@@ -176,5 +181,95 @@ export function PublishPanel({ asset }: { asset: DataAsset }) {
         </Card>
       )}
     </div>
+  )
+}
+
+/**
+ * The whole transform, as one SQL statement.
+ *
+ * The pipeline is a stack of typed steps because that is what a person can review
+ * and change — but "what does this asset actually do to the data?" is a question
+ * best answered in one place, in the language the answer is really written in. It
+ * compiles from the same templates the build runs, so it cannot describe something
+ * the pipeline does not do, and it exports for review outside this product.
+ */
+function CompiledSqlCard({ asset }: { asset: DataAsset }) {
+  const pid = useSimStore((s) => s.activeProjectId)
+  const [sql, setSql] = useState<CompiledSql | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const load = useCallback(async () => {
+    if (!pid) return
+    setLoading(true)
+    try { setSql(await api.pipelineFullSql(pid, asset.id, null)) }
+    catch (e) {
+      setSql({ ok: false, sql: '', error: e instanceof Error ? e.message : 'Could not compile the pipeline.' })
+    } finally { setLoading(false) }
+  }, [pid, asset.id])
+  useEffect(() => { void load() }, [load, asset.updatedAt])
+
+  function download() {
+    if (!sql?.sql) return
+    const url = URL.createObjectURL(new Blob([sql.sql], { type: 'text/plain;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${asset.name.replace(/[^0-9a-zA-Z_-]+/g, '_').toLowerCase() || 'asset'}.sql`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function copy() {
+    if (!sql?.sql) return
+    await navigator.clipboard.writeText(sql.sql)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
+
+  const lines = sql?.sql ? sql.sql.split('\n').length : 0
+
+  return (
+    <Card className="overflow-hidden p-0">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+        <FileCode className="size-4 text-primary" />
+        <h4 className="text-[13px] font-semibold">Compiled SQL</h4>
+        <span className="text-[11px] text-muted-foreground">
+          {loading ? 'compiling…'
+            : sql?.ok ? `${asset.pipeline?.steps.length ?? 0} steps → 1 statement · ${lines} lines`
+              : 'not available'}
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          {sql?.ok && (
+            <>
+              <Button size="sm" variant="ghost" onClick={() => void copy()}>
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                {copied ? 'Copied' : 'Copy'}
+              </Button>
+              <Button size="sm" variant="outline" onClick={download}>
+                <Download className="size-3.5" />Export .sql
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setOpen((v) => !v)}>
+                {open ? 'Hide' : 'Show'}
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+      {sql && !sql.ok && (
+        <p className="px-4 py-3 text-[11px] text-rose-700">{sql.error}</p>
+      )}
+      {sql?.ok && !open && (
+        <p className="px-4 py-3 text-[11px] text-muted-foreground">
+          Every step of the transform, compiled into one self-contained statement — the same
+          compilation the build runs. The header records which file and sheet each input reads.
+        </p>
+      )}
+      {sql?.ok && open && (
+        <pre className="max-h-96 overflow-auto bg-muted/40 px-4 py-3 font-mono text-[11px] leading-relaxed">
+          {sql.sql}
+        </pre>
+      )}
+    </Card>
   )
 }

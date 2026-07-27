@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 
 from app.agents import data_rules
 from app.agents.dataset_cache import model_df, model_objects, uses_project_data
@@ -56,6 +57,13 @@ SIGNIFICANT_T = 2.0
 MIN_ABS_PEARSON = 0.1   # below this the variable carries no signal vs Y
 MAX_VIF = 10.0          # above this it is collinear with the rest
 DEFAULT_MAX_SELECTED = 8  # keep df healthy on a ~34-month series
+
+# Short monthly series cannot support a linear trend plus a full Fourier season
+# without the controls over-absorbing actual sales into the baseline (baseline
+# share > 100%, wrong-sign paid drivers). Scale the proposed controls to the
+# usable observation count so the first fit is identified and interpretable.
+MIN_OBS_FOR_SEASONALITY = 24   # below this: drop the seasonal controls entirely
+MIN_OBS_FOR_FULL_FOURIER = 36  # below this: cap Fourier at K=1
 
 
 def _norm(s: object) -> str:
@@ -136,6 +144,35 @@ def _x_rationale(row: object | None, cand: dict, recommended: bool) -> str:
         elif row.vif >= MAX_VIF:
             head = "Collinear with other variables. "
     return head + " · ".join(bits)
+
+
+def _usable_months(df) -> int:
+    """Distinct monthly observations available to the model frame — the ceiling
+    on how many trend/seasonality controls a fit can afford."""
+    try:
+        if "month" in getattr(df, "columns", []):
+            return int(df["month"].nunique())
+    except Exception:  # noqa: BLE001 — a bad month column just means "unknown"
+        pass
+    return 0
+
+
+def _propose_params(df) -> OlsParams:
+    """Default transform/control settings scaled to series length.
+
+    Seasonality is proposed **off** at every length (2026-07-26). The length-scaled
+    ladder below still decides how much seasonality a series *could* afford, but on
+    the real cases even one Fourier harmonic over-absorbed: with ~34 months and ~12
+    drivers, the controls took the baseline past 100% and pushed contributions
+    outside every Knowledge band, which made the whole range check meaningless. The
+    trend stays on — one column, and a growing market needs it. The human turns
+    Fourier back on in the OLS settings when the series is long enough to pay for
+    it, and the artifact's misspecification finding says when it is not.
+    """
+    n = _usable_months(df)
+    if n and n < MIN_OBS_FOR_FULL_FOURIER:
+        return OlsParams(trend="linear", seasonality="none", fourier_k=1)
+    return OlsParams()
 
 
 def build_ols_proposal(st: ProjectState) -> OlsConfig:
@@ -240,22 +277,243 @@ def build_ols_proposal(st: ProjectState) -> OlsConfig:
     return OlsConfig(
         dataSource="project" if uses_project_data(st) else "reference",
         yCandidates=y_cands, y=y_choice, xCandidates=x_cands,
-        params=OlsParams(), proposedAt="",
+        params=_propose_params(df), proposedAt="",
     )
 
 
-def selected_x_metrics(cfg: OlsConfig | None) -> dict[str, frozenset[str]] | None:
-    """Per-object metric names the human kept — ``None`` = auto-select (legacy).
+# ── 2.5 indicator search (寻优) ──────────────────────────────────────────────
+# The design (02-data-agent §2.34) is a per-L4 search, not a manual variable
+# tick: "pick which indicator per L4 makes each factor's Contribution / ROI land
+# in its business-expected range". We do exactly that — a coordinate-descent over
+# each L4's candidate indicators, keeping the choice that lands the L4 in its
+# Knowledge range, maximising the in-range L4 count (tie-break R²) under a fit
+# budget. The single Y comes from the 2.1 Metrics-Type; params scale to length.
+SEARCH_MAX_DRIVERS = 12   # p<n on a ~34-month national series
+SEARCH_MAX_FITS = 96      # hard budget on trial regressions (see the wall clock below)
+SEARCH_MAX_SECONDS = 90.0  # the real guard — the fit count is only a backstop
+
+
+@dataclass
+class SearchScore:
+    """What one trial fit tells us about a candidate assignment."""
+    in_range: int          # L4s landing inside their Knowledge band
+    signed_ok: int         # paid drivers carrying the expected (positive) sign
+    r2: float
+    per_l4: dict[str, str]  # l4norm -> 'in' | 'out' | 'none'
+    trials: list[dict]      # one record per (l4, indicator) in this fit
+
+    @property
+    def objective(self) -> tuple[int, int, float]:
+        """Lexicographic: land factors in range, then get the signs right, then fit.
+
+        The sign term is what makes the search useful on a project with few or no
+        Knowledge benchmarks. Without it every unbenchmarked factor scored the same
+        no matter which indicator it used, so the search had nothing to prefer and
+        never tried an alternate — which is why it used to run four fits in total.
+        """
+        return (self.in_range, self.signed_ok, self.r2)
+
+
+def _search_score(st: ProjectState, cfg: OlsConfig) -> SearchScore:
+    """Fit ``cfg`` and score it, **without persisting it**.
+
+    ``per_l4``: ``in`` = the L4's driver lands inside its Knowledge ROI/Contribution
+    band; ``out`` = a benchmark exists and it is outside; ``none`` = no benchmark.
+
+    The trial config is passed to ``model_selection`` explicitly rather than being
+    written to ``st.ols_config`` first. Writing it meant every trial mutated the
+    project — a crash mid-search left a trial configuration persisted as if a human
+    had chosen it.
+    """
+    sel = model_selection(st, cfg=cfg)
+    objects, _prefit, records = _collect_records(st, sel, cfg)
+    industry = getattr(getattr(st, "meta", None), "industry", None)
+    idx = build_range_index(getattr(industry, "l1", None), getattr(industry, "l2", None))
+    r2 = 0.0
+    for o in objects:
+        if o.get("r2") is not None:
+            r2 = max(r2, float(o["r2"]))
+    in_range = 0
+    signed_ok = 0
+    per_l4: dict[str, str] = {}
+    trials: list[dict] = []
+    for (_obj_key, l4n, _metricn), rec in records.items():
+        bench = idx.match(rec["l4"], rec["metric"])
+        row = _row_from_record(rec, bench)
+        coef = row.get("coef")
+        # A paid driver is expected to move sales up; an exposure / count / rate
+        # driver has no universal expected sign, so only spend is judged on it.
+        # ROI exists only for spend columns, which is how spend is recognised here.
+        sign_expected = bool(rec.get("rois"))
+        sign_correct = bool(sign_expected and coef is not None and float(coef) > 0)
+        if sign_correct:
+            signed_ok += 1
+        trials.append({
+            "l4": rec.get("l4", ""), "indicator": rec.get("metric", ""),
+            "r2": round(r2, 4), "coef": coef,
+            "tValue": row.get("tValue"), "pValue": row.get("pValue"),
+            "significant": row.get("significant"),
+            "signExpected": sign_expected, "signCorrect": sign_correct,
+            "roi": row.get("roi"), "contribution": row.get("contribution"),
+            "roiStatus": row.get("roiStatus"), "contributionStatus": row.get("contributionStatus"),
+            "roiRange": row.get("roiRange", ""), "contributionRange": row.get("contributionRange", ""),
+        })
+        if not _has_benchmark(bench):
+            per_l4.setdefault(l4n, "none")
+            continue
+        ok = row["roiStatus"] != "out" and row["contributionStatus"] != "out"
+        # An L4 counts in-range if any of its (rare, when duplicated) records is in.
+        if ok:
+            per_l4[l4n] = "in"
+            in_range += 1
+        else:
+            per_l4.setdefault(l4n, "out")
+    return SearchScore(in_range, signed_ok, round(r2, 4), per_l4, trials)
+
+
+def build_ols_search(st: ProjectState, *, max_fits: int = SEARCH_MAX_FITS,
+                     max_seconds: float = SEARCH_MAX_SECONDS,
+                     on_pass=None) -> tuple[OlsConfig, dict]:
+    """Search each L4's candidate indicators for the model that reads best.
+
+    Returns ``(config, trace)``. ``config`` is a ready-to-fit :class:`OlsConfig`
+    with one chosen indicator ticked per active L4 (the rest present-but-unticked),
+    the single 2.1 Y, and length-scaled params.
+
+    **Every L4 with more than one candidate is searched**, not only the ones already
+    out of range. The old rule skipped any factor whose status was ``none`` — and
+    with the reference range library most factors have no benchmark at all, so the
+    "search" tried four fits for the whole model and the Build Process had nothing
+    to show. The objective is lexicographic (in-range count → correct paid-driver
+    signs → R²), so an unbenchmarked factor is still decided on something real.
+
+    ``trace`` carries the per-trial record the artifact renders: what was tried for
+    each factor, what it scored, and why the winner won. ``on_pass(info)`` is called
+    after each coordinate-descent pass so the caller can emit progress.
+    """
+    import time
+
+    started = time.monotonic()
+    proposal = build_ols_proposal(st)
+
+    # Candidates that survived every earlier layer, grouped by L4, best |r| first.
+    by_l4: dict[str, list[OlsXCandidate]] = defaultdict(list)
+    for c in proposal.x_candidates:
+        if c.locked:
+            continue
+        by_l4[c.l4].append(c)
+    for l4 in by_l4:
+        by_l4[l4].sort(key=lambda c: -abs(c.pearson))
+    if not by_l4:
+        # Nothing to search — hand back the proposal's own pre-tick.
+        return proposal, {"fits": 0, "l4Searched": 0, "candidates": 0, "swaps": 0,
+                          "inRange": 0, "r2": 0.0, "trials": [], "perFactor": [],
+                          "note": "no searchable candidates"}
+
+    # Seed: the strongest L4s (by their best candidate) fill the driver budget,
+    # each starting on its top-correlated indicator.
+    l4_order = sorted(by_l4, key=lambda l4: -abs(by_l4[l4][0].pearson))
+    active = l4_order[:SEARCH_MAX_DRIVERS]
+    chosen: dict[str, int] = {l4: 0 for l4 in active}
+    n_candidates = sum(len(by_l4[l4]) for l4 in active)
+
+    def cfg_for(sel_idx: dict[str, int]) -> OlsConfig:
+        picked = {by_l4[l4][idx].key for l4, idx in sel_idx.items()}
+        new_x = [c.model_copy(update={"selected": (c.key in picked and not c.locked)})
+                 for c in proposal.x_candidates]
+        # `model_copy(update=...)` keys on FIELD names, not aliases. Passing
+        # "xCandidates" here silently set an unrelated attribute and left
+        # `x_candidates` untouched — so every trial scored the proposal's own
+        # pre-tick and the search could never change anything it measured.
+        return proposal.model_copy(update={"x_candidates": new_x})
+
+    # Every trial is recorded, winner or not — "why this indicator and not that
+    # one" is the question the d-2.5 reviewer actually has, and the old search
+    # computed the answer on every fit and then discarded it.
+    log: list[dict] = []
+
+    def run(sel_idx: dict[str, int], *, l4: str, alternate: str, seed: bool) -> SearchScore:
+        score = _search_score(st, cfg_for(sel_idx))
+        for t in score.trials:
+            if seed or _norm(t.get("l4")) == _norm(l4):
+                log.append({**t, "trial": len(log) + 1, "seed": seed,
+                            "triedFor": l4, "alternate": alternate,
+                            "objectiveInRange": score.in_range,
+                            "objectiveSigned": score.signed_ok})
+        return score
+
+    best_idx = dict(chosen)
+    best = run(best_idx, l4="", alternate="", seed=True)
+    fits = 1
+    swaps = 0
+
+    def out_of_budget() -> bool:
+        return fits >= max_fits or (time.monotonic() - started) > max_seconds
+
+    # Coordinate descent over every searchable factor: try each alternate and keep
+    # any swap that improves the objective. Converges in two passes in practice; the
+    # wall clock, not the fit count, is the guard that actually binds.
+    for _pass in range(2):
+        improved = False
+        for l4 in active:
+            if out_of_budget():
+                break
+            for alt in range(len(by_l4[l4])):
+                if alt == best_idx[l4] or out_of_budget():
+                    continue
+                trial = dict(best_idx)
+                trial[l4] = alt
+                score = run(trial, l4=l4, alternate=by_l4[l4][alt].metric, seed=False)
+                fits += 1
+                if score.objective > best.objective:
+                    best, best_idx, improved = score, trial, True
+                    swaps += 1
+        if on_pass is not None:
+            on_pass({"pass": _pass + 1, "fits": fits, "swaps": swaps,
+                     "inRange": best.in_range, "signed": best.signed_ok, "r2": best.r2})
+        if not improved or out_of_budget():
+            break
+
+    per_factor = [{
+        "l4": l4,
+        "chosen": by_l4[l4][best_idx[l4]].metric,
+        "candidates": [c.metric for c in by_l4[l4]],
+        "status": best.per_l4.get(_norm(l4), "none"),
+    } for l4 in active]
+
+    truncated = len(l4_order) > len(active)
+    note = (f"Searched {len(active)} factor(s) over {n_candidates} candidate indicator(s) "
+            f"in {fits} trial fit(s); {swaps} swap(s) improved the model; "
+            f"{best.in_range} factor(s) landed in their Knowledge ROI/Contribution range.")
+    if truncated:
+        note += (f" {len(l4_order) - len(active)} weaker factor(s) were left out of the "
+                 f"search to keep the model identified (max {SEARCH_MAX_DRIVERS} drivers).")
+    if out_of_budget():
+        note += " The search stopped on its budget rather than on convergence."
+
+    final = cfg_for(best_idx)
+    trace = {"fits": fits, "l4Searched": len(active), "candidates": n_candidates,
+             "swaps": swaps, "inRange": best.in_range, "signedOk": best.signed_ok,
+             "r2": best.r2, "trials": log, "perFactor": per_factor,
+             "factorsSkipped": len(l4_order) - len(active), "note": note}
+    return final, trace
+
+
+def selected_x_metrics(cfg: OlsConfig | None) -> dict[str, frozenset[tuple[str, str]]] | None:
+    """Per-object indicators the human kept — ``None`` = auto-select (legacy).
 
     Keyed by model object (``OBJECT_ANY`` for candidates predating the object
-    field). Each channel fits on its own ticked set, never another channel's.
+    field); each entry is a set of ``(norm_l4, norm_metric)`` pairs, the key space
+    every S2 layer shares. Ticking a bare metric name used to keep it under every
+    L4 that happened to use the same label.
     """
     if cfg is None or not cfg.x_candidates:
         return None
-    out: dict[str, set[str]] = {}
+    out: dict[str, set[tuple[str, str]]] = {}
     for c in cfg.x_candidates:
         if c.selected:
-            out.setdefault(_obj(c.object) or OBJECT_ANY, set()).add(_norm(c.metric))
+            out.setdefault(_obj(c.object) or OBJECT_ANY, set()).add(
+                (_norm(getattr(c, "l4", "")), _norm(c.metric)))
     return {k: frozenset(v) for k, v in out.items()} or None
 
 
@@ -310,7 +568,7 @@ def _collect_records(
                 f"{obj} · Y={y_metric or 'auto'} · {len(inc) if inc else 'auto'} X",
                 get_tool("model.ols").run, df, obj,
                 adstock=0.5, hill_half=1.0, exclude=sel.exclude_for(obj),
-                y_metric=y_metric, include=inc, params=params,
+                y_metric=y_metric, include=inc, params=params, st=st,
                 summarize=lambda r: f"R²={r.r2:.3f} · {int(r.n_obs)} obs · {len(r.drivers)} drivers",
             )
         except Exception as e:  # noqa: BLE001
@@ -348,6 +606,10 @@ def _collect_records(
                        "l3": meta.get("l3", ""), "metric": metric,
                        "contribs": [], "rois": [], "coefs": [],
                        "best_t": None, "objects": [], "results": [],
+                       # Which spend this indicator's ROI was divided by — an
+                       # exposure metric borrows its L4's, and a reader who is
+                       # not told that will misread it as a cost-per-unit.
+                       "roi_basis": None,
                        # ROI is only comparable to the Knowledge money bands when
                        # this object's own fit produced a revenue ROI.
                        "roi_money": True}
@@ -356,13 +618,18 @@ def _collect_records(
                 rec["roi_money"] = False
             coef = res.coefficients.get(d)
             contrib = res.contribution.get(d)
-            roi = res.roi.get(d)  # only spend cols → else absent
+            # Every driver whose L4 carries Spending has an ROI (spend columns
+            # divide by their own spend, the rest by their L4's) — absent only
+            # when nothing under that L4 was bought.
+            roi = res.roi.get(d)
             tval = tvals.get(d)
             pval = pvals.get(d)
             if contrib is not None:
                 rec["contribs"].append(contrib)
             if roi is not None:
                 rec["rois"].append(roi)
+                if rec["roi_basis"] is None:
+                    rec["roi_basis"] = (res.meta.get("roi_basis") or {}).get(d)
             if coef is not None:
                 rec["coefs"].append(coef)
             if tval is not None and not math.isnan(float(tval)):
@@ -401,10 +668,19 @@ def _row_from_record(rec: dict, bench: RangeBenchmark | None) -> dict:
     roi_money = bool(rec.get("roi_money", False))
     roi_status = _range_status(roi, bench.roi if bench else None) if roi_money else "none"
     con_status = _range_status(contrib, bench.contribution if bench else None)
+
+    # Only the borrowed denominator needs saying: an indicator that is itself a
+    # spend metric divides by its own spend, which the ROI already implies.
+    basis = rec.get("roi_basis") or {}
+    roi_basis = ""
+    if basis.get("source") == "l4":
+        spent = ", ".join(str(m) for m in (basis.get("metrics") or []))
+        roi_basis = f"÷ {basis.get('l4') or 'L4'} spend" + (f" ({spent})" if spent else "")
     return {
         "coef": _num(coef), "tValue": _num(tval), "pValue": _num(pval, 4),
         "significant": significant,
         "roi": _num(roi), "contribution": _num(contrib, 2),
+        "roiBasis": roi_basis,
         "roiRange": (bench.roi_text if bench else "") if roi_money else "",
         "contributionRange": bench.contribution_text if bench else "",
         "rangeSource": bench.source if bench else "",
@@ -428,8 +704,17 @@ def _has_benchmark(bench: RangeBenchmark | None) -> bool:
 
 
 def _classify(row: dict, dropped_by: str, in_model: bool, bench: RangeBenchmark | None) -> tuple[str, str]:
-    """Return (status, flagReason). Precedence: dropped → notInModel → noBenchmark
-    → review (ROI or Contribution out) → inRange."""
+    """Return (status, flagReason). Precedence: notMapped → dropped → notInModel →
+    noBenchmark → review (ROI or Contribution out) → inRange.
+
+    ``notMapped`` (rejected at the 2.1 mapping layer — no published indicator ever
+    covered this factor) is split out from ``dropped`` (a real screening decision
+    at quality/sign-off/statistical/range). The two read very differently: the
+    first is upstream data coverage, the second is a verdict on data that exists.
+    The tree hides ``notMapped`` by default so a sparse dataset doesn't look like
+    the model threw everything away."""
+    if dropped_by == "mapping":
+        return "notMapped", ""
     if dropped_by:
         return "dropped", ""
     if not in_model:
@@ -444,7 +729,8 @@ def _classify(row: dict, dropped_by: str, in_model: bool, bench: RangeBenchmark 
 def _empty_row_fields() -> dict:
     return {
         "coef": None, "tValue": None, "pValue": None, "significant": None,
-        "roi": None, "contribution": None, "roiRange": "", "contributionRange": "",
+        "roi": None, "contribution": None, "roiBasis": "",
+        "roiRange": "", "contributionRange": "",
         "rangeSource": "", "roiStatus": "none", "contributionStatus": "none",
         "objects": [], "results": [],
     }
@@ -482,7 +768,7 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
         body = {
             "objects": [], "tree": [],
             "summary": {"total": 0, "inModel": 0, "inRange": 0, "flagged": 0,
-                        "noBenchmark": 0, "notInModel": 0, "dropped": 0},
+                        "noBenchmark": 0, "notInModel": 0, "dropped": 0, "notMapped": 0},
             "setup": _setup_section(cfg, []),
             "note": ("Setup proposed. Confirm the response (Y), review the model variables (X) "
                      "and the model settings in the steps above — the regression runs once "
@@ -576,6 +862,7 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
         "noBenchmark": sum(1 for r in tree if r["status"] == "noBenchmark"),
         "notInModel": sum(1 for r in tree if r["status"] == "notInModel"),
         "dropped": sum(1 for r in tree if r["status"] == "dropped"),
+        "notMapped": sum(1 for r in tree if r["status"] == "notMapped"),
     }
     note = ("OLS fit per model object on the confirmed setup — the response, the model "
             "variables and the transform/control settings you approved in the steps above. "
@@ -586,7 +873,12 @@ def build_ols_review(st: ProjectState, *, fit: bool = True, eng=None,
             "pack (reference rule library as fallback); ROI is only range-checked when it "
             "is a revenue/spend ratio.")
     body = {"objects": objects, "tree": tree, "summary": summary,
-            "setup": _setup_section(cfg, objects), "note": note}
+            "setup": _setup_section(cfg, objects), "note": note,
+            # Populated by the 2.5 handler after the search runs — the per-factor
+            # trial record and the AI's benchmark reading both live on the artifact
+            # rather than only in `st.analysis`, so what the reviewer sees at the
+            # d-2.5 gate is the same object that was produced.
+            "search": None}
     # `object` rides along so the d-2.5 gate can freeze the drop per channel
     # (`ledger.freeze_range_drops`) — the same indicator can be out of range in
     # one channel and fine in another (Task 5's per-object screening).

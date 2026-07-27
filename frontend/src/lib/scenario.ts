@@ -283,7 +283,7 @@ export const TASKS: TaskBlueprint[] = [
   {
     id: '2.3', name: 'Business Validation', agent: 'data', stage: 's2', class: 'C',
     summary: 'Visualized business review of the accepted data — each factor charted against sell-out, with its own reading.',
-    how: 'AI charts every factor (L3) against the sell-out backdrop and writes its reading; you filter by source, sub-factor, indicator, time grain and model dimension to interrogate it.',
+    how: 'Three steps, traced in the Build process: (1) chart every factor (L3) against the response the 2.1 Metrics Type chose; (2) the AI reads each chart from the plotted series itself — naming the periods, magnitudes, anomalies and inflections it actually sees — so the deck opens with its analyses already written; (3) localise the year-over-year anomalies for the 2.3a review. You then filter by source, sub-factor (L4–L8), indicator, time grain and model dimension to interrogate any of it, and the analysis regenerates for whatever you filtered to.',
     basisNote: '质量验收后的数据 + 因子树 + 行业基准。',
     workNote: 'Business-validation deck built.',
     dependsOn: ['2.2d'], duration: 3, produces: ['a-business-validation'],
@@ -352,85 +352,21 @@ export const TASKS: TaskBlueprint[] = [
       ],
     },
   },
-  /* ── 2.5 OLS Regression Test — a five-step Process on one deliverable:
-        propose → confirm Y → review X → confirm settings → fit & review.
-        2.5y/2.5x/2.5p are human gates whose `panel` renders the structured
-        input inside the Process step (see components/project/ols/). ── */
+  /* ── 2.5 OLS indicator search — a single automated multi-fit search (寻优)
+        that replaces the former five-step manual config. The AI searches each
+        L4's candidate indicators over repeated fits, keeping the one that lands
+        the factor in its Knowledge range; the human reviews at the d-2.5 gate.
+        The single Y comes from 2.1 Metrics Type; params scale to length. ── */
   {
-    id: '2.5', name: 'Propose model setup', agent: 'data', stage: 's2', class: 'A',
-    summary: 'Propose the OLS setup from real data: a response candidate per model object, model variables scored on their 2.4 statistics, and default transform / control settings.',
-    how: 'AI proposes the response (Y) for each model object, ranks the candidate model variables (X) on their 2.4 CV / Pearson / VIF, and pre-fills the transform and trend/seasonality settings — all for you to confirm in the next steps.',
-    basisNote: '2.4 统计得分 + 数据可用性（覆盖月数、单位）。',
-    workNote: 'Model setup proposed for review.',
-    dependsOn: ['2.4d'], duration: 1, produces: ['a-ols-test'],
-  },
-  {
-    id: '2.5y', name: 'Confirm response variable', agent: 'data', stage: 's2', class: 'H',
-    panel: 'ols-y',
-    summary: 'Pick the response (Y) each model object is fitted against — the KPI volume metric is recommended.',
-    how: 'You pick the response for each model object. The KPI volume metric is recommended; choosing a money metric (or setting a unit price later) makes ROI a true incremental-revenue / spend ratio.',
-    basisNote: '各模型对象的 KPI 候选（单位 + 覆盖月数）。',
-    workNote: 'Awaiting the response-variable confirmation.',
-    dependsOn: ['2.5'], duration: 1, produces: [],
-    decision: {
-      id: 'd-2.5y', kind: 'approval', title: 'Confirm the response variable',
-      question: 'The KPI volume metric is proposed as the response for each model object. Confirm it, or pick a different response above.',
-      evidence: [{ artifactId: 'a-ols-test', note: 'Response candidates per model object' }],
-      recommendation: 'The KPI volume response keeps coefficients in sales units — confirm to continue.',
-      options: [
-        { id: 'confirm', label: 'Confirm response', detail: 'Fit against the selected response', consequence: 'Model variables are reviewed next', recommended: true },
-      ],
-    },
-  },
-  {
-    id: '2.5x', name: 'Review model variables', agent: 'data', stage: 's2', class: 'H',
-    panel: 'ols-x',
-    summary: 'Review the AI-proposed model variables (X) — each with its correlation, collinearity and 2.4 verdict — and tick the ones that enter the regression.',
-    how: 'You tick the variables that enter the regression. Each carries its Pearson r vs the KPI, its VIF, its CV and its 2.4 verdict, plus the remaining degrees of freedom — this is where you drive the screening.',
-    basisNote: '2.4 统计得分 + 共线性/自由度约束。',
-    workNote: 'Awaiting the model-variable selection.',
-    dependsOn: ['2.5y'], duration: 1, produces: [],
-    decision: {
-      id: 'd-2.5x', kind: 'approval', title: 'Confirm the model variables',
-      question: 'These variables will enter the regression. Confirm the selection, or tick / untick above.',
-      evidence: [
-        { artifactId: 'a-ols-test', note: 'Candidate variables with their 2.4 statistics' },
-        { artifactId: 'a-stat-tests', note: 'Statistical score' },
-      ],
-      recommendation: 'The pre-ticked variables clear the correlation and collinearity gates — confirm to continue.',
-      options: [
-        { id: 'confirm', label: 'Confirm variables', detail: 'These variables enter the regression', consequence: 'Model settings are confirmed next', recommended: true },
-      ],
-    },
-  },
-  {
-    id: '2.5p', name: 'Confirm model settings', agent: 'data', stage: 's2', class: 'H',
-    panel: 'ols-params',
-    summary: 'Confirm the carryover / saturation transforms and the trend + seasonality controls that keep the paid coefficients honest.',
-    how: 'You set the adstock carryover, the saturation curve, and the trend / seasonality controls. The controls absorb the trend and seasonal swing so the paid variables do not — this is what keeps the baseline positive and the coefficients correctly signed.',
-    basisNote: '变换与控制项设置（默认：adstock 0.5 · Hill · 线性趋势 · Fourier 季节性）。',
-    workNote: 'Awaiting the model settings.',
-    dependsOn: ['2.5x'], duration: 1, produces: [],
-    decision: {
-      id: 'd-2.5p', kind: 'approval', title: 'Confirm the model settings',
-      question: 'These transforms and controls will be used for the fit. Confirm them, or adjust above.',
-      evidence: [{ artifactId: 'a-ols-test', note: 'Transform + control settings' }],
-      recommendation: 'A linear trend plus Fourier seasonality is the cheapest control that keeps the paid coefficients honest — confirm to fit.',
-      options: [
-        { id: 'confirm', label: 'Confirm settings', detail: 'Fit with these transforms and controls', consequence: 'The regression runs', recommended: true },
-      ],
-    },
-  },
-  {
-    id: '2.5r', name: 'Run OLS & review fit', agent: 'data', stage: 's2', class: 'M',
-    summary: "Fit the OLS on the confirmed setup and check each variable's ROI and contribution against the knowledge-base industry ranges — far-out variables are flagged for review.",
-    how: "The regression runs on the setup you confirmed. Each variable's coefficient, t / p, ROI and contribution land on the factor tree; results outside the knowledge-base industry ranges are flagged for you to drop.",
-    basisNote: '行业经验 ROI / 贡献区间（知识库维护）+ 业务校验假设。',
-    workNote: 'OLS fitted; ranges checked.',
-    dependsOn: ['2.5p'], duration: 2, produces: ['a-ols-test'],
+    id: '2.5', name: 'OLS indicator search', agent: 'data', stage: 's2', class: 'M',
+    summary: 'Search each L4 factor’s candidate indicators over repeated OLS fits for the model that lands the most factors inside their industry ROI / Contribution ranges — an automated selection, not a manual variable pick.',
+    how: 'Six steps, each traced in the Build process: (1) aggregate the long table to one national total model; (2) enumerate every candidate indicator that survived mapping, quality, sign-off and statistical screening, grouped by factor; (3) search — for each factor try its candidates across repeated regressions, keeping the assignment that lands the most factors inside their Knowledge ROI / Contribution range, then the most paid drivers carrying the right sign, then the best R²; (4) refit the winning setup and record every trial’s coefficient, significance, ROI and contribution; (5) the AI reads each fitted factor against its Knowledge band and says whether the result is credible, not just whether it is inside; (6) summarise what was adopted and what is flagged. The single response (Y) is the one you tagged at 2.1 Metrics Type; transforms and controls scale to the series length. You review the chosen selection at the gate — switch any factor’s indicator and re-fit if you disagree.',
+    basisNote: '行业经验 ROI / 贡献区间（知识库）+ 2.4 统计得分 + 数据可用性。',
+    workNote: 'OLS search complete; per-factor indicators chosen and fitted.',
+    dependsOn: ['2.4d'], duration: 3, produces: ['a-ols-test'],
     decision: {
       id: 'd-2.5', kind: 'choice', title: 'Confirm indicator selection',
-      question: "The OLS test checked each factor's ROI / contribution against its knowledge-base range. Confirm the selection, drop the flagged indicators, or revisit the business hypotheses?",
+      question: "The OLS search checked each factor's ROI / contribution against its knowledge-base range. Confirm the selection, drop the flagged indicators, or revisit the business hypotheses?",
       evidence: [
         { artifactId: 'a-ols-test', note: 'Per-factor ROI / contribution vs knowledge ranges' },
         { artifactId: 'a-business-validation', note: 'Business hypotheses' },
@@ -447,10 +383,10 @@ export const TASKS: TaskBlueprint[] = [
   {
     id: '2.6', name: 'Assemble master data', agent: 'data', stage: 's2', class: 'M',
     summary: 'Assemble the indicators that survived every filter layer into the master feature wide table modeling consumes — sliceable by product × channel × region.',
-    how: 'The pipeline pivots the adopted indicators — the response you confirmed at 2.5y, the variables you ticked at 2.5x — into one feature wide table per model object. Every rejected indicator keeps the chain of verdicts that removed it, so the funnel is auditable end to end.',
+    how: 'The pipeline pivots the adopted indicators — the response tagged at 2.1 and the per-factor indicators the 2.5 search chose — into one feature wide table per model object. Every rejected indicator keeps the chain of verdicts that removed it, so the funnel is auditable end to end.',
     basisNote: '指标生命周期账本：映射/质量/业务签核/统计/选择/区间六层裁决。',
     workNote: 'Master feature table assembled from the adopted indicators.',
-    dependsOn: ['2.5r'], duration: 2, produces: ['a-master-data'],
+    dependsOn: ['2.5'], duration: 2, produces: ['a-master-data'],
   },
   {
     id: '2.6d', name: 'Lock master data', agent: 'data', stage: 's2', class: 'H',

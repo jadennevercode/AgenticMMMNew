@@ -219,14 +219,20 @@ def vif_all(matrix: "np.ndarray") -> "np.ndarray":
       screening every FactorTree indicator before modeling.
 
     Values are floored at 1.0 and capped at ``VIF_MAX``.
+
+    Gaps are handled **pairwise-complete**: each pair of columns is correlated on
+    the months both actually cover. ``np.corrcoef`` propagates a single NaN across
+    the whole matrix, which — once the NaNs were zeroed — read as "nothing is
+    collinear with anything" and handed every indicator a perfect VIF of 1.0.
     """
     import numpy as np
+    import pandas as pd
 
     n, p = matrix.shape
     if p < 2:
         return np.ones(p)
-    corr = np.corrcoef(matrix, rowvar=False)
-    corr = np.nan_to_num(corr, nan=0.0)  # constant columns → treat as uncorrelated
+    corr = pd.DataFrame(matrix).corr(min_periods=3).to_numpy(dtype=float)
+    corr = np.nan_to_num(corr, nan=0.0)  # constant / non-overlapping → uncorrelated
     np.fill_diagonal(corr, 1.0)
 
     if n > p + 1:

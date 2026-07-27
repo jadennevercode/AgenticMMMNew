@@ -31,8 +31,12 @@ LAYERS: tuple[tuple[str, str, str], ...] = (
     ("quality", "2.2d", "Data Quality"),
     ("signoff", "2.3", "Business Validation"),
     ("statistical", "2.4d", "Statistical Score"),
-    ("selection", "2.5x", "Model Variables"),
-    ("range", "2.5r", "OLS Range Check"),
+    # 2.5 is one task since the v3 revamp — the former 2.5y/2.5x/2.5p/2.5r chain
+    # is gone, so both late layers rule from it. Naming a deleted task here put
+    # "Denied @ Model Variables (2.5x)" badges in front of the user pointing at
+    # something the blueprint no longer contains.
+    ("selection", "2.5", "Model Variables"),
+    ("range", "2.5", "OLS Range Check"),
 )
 LAYER_LABEL = {lid: label for lid, _task, label in LAYERS}
 LAYER_TASK = {lid: task for lid, task, _label in LAYERS}
@@ -128,7 +132,7 @@ class ModelSelection:
     cannot accidentally honour some layers and skip others.
     """
     exclude: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
-    include: dict[str, Optional[frozenset[str]]] = field(default_factory=dict)
+    include: dict[str, Optional[frozenset[tuple[str, str]]]] = field(default_factory=dict)
     y: dict[str, str] = field(default_factory=dict)
     params: Optional[OlsParams] = None
 
@@ -137,7 +141,7 @@ class ModelSelection:
         for everyone (``OBJECT_ANY``)."""
         return frozenset(self.exclude.get(obj, frozenset()) | self.exclude.get(OBJECT_ANY, frozenset()))
 
-    def include_for(self, obj: str) -> Optional[frozenset[str]]:
+    def include_for(self, obj: str) -> Optional[frozenset[tuple[str, str]]]:
         """This object's own ticked set, falling back to a global one;
         ``None`` means the legacy auto-select path (no setup confirmed yet)."""
         v = self.include.get(obj)
@@ -790,7 +794,7 @@ def rejected_pairs(st: ProjectState, object: str | None = None) -> frozenset[tup
                      if not r.adopted and (object is None or r.object in (object, OBJECT_ANY)))
 
 
-def model_selection(st: ProjectState) -> ModelSelection:
+def model_selection(st: ProjectState, *, cfg: OlsConfig | None = None) -> ModelSelection:
     """The one resolved selection every downstream fit must use.
 
     ``exclude``/``include`` are resolved per model object: a per-object layer
@@ -800,11 +804,27 @@ def model_selection(st: ProjectState) -> ModelSelection:
     ``None`` until 2.5 has proposed a setup — that is the legacy auto-select
     path, which keeps reference/demo projects (and any project that has not
     reached 2.5) fitting exactly as before.
+
+    ``cfg`` scores a **hypothetical** configuration without persisting it — the
+    2.5 indicator search needs to price dozens of candidate assignments, and it
+    used to do that by writing each one to ``st.ols_config`` and leaving it there.
+    The trial config is swapped in for the duration of the derivation (the ledger's
+    selection layer reads it too, so the two must agree) and always swapped back,
+    including on an exception. Omit it — the only call shape every downstream
+    consumer uses — and the project's own saved config is read, exactly as before.
     """
+    if cfg is not None:
+        saved = getattr(st, "ols_config", None)
+        try:
+            st.ols_config = cfg
+            return model_selection(st)
+        finally:
+            st.ols_config = saved
+
     from app.agents.dataset_cache import model_objects
 
     ledger = indicator_ledger(st)
-    cfg: OlsConfig | None = getattr(st, "ols_config", None)
+    cfg = getattr(st, "ols_config", None)
 
     exclude: dict[str, frozenset[tuple[str, str]]] = {}
     include: dict[str, Optional[frozenset[str]]] = {}
@@ -829,8 +849,11 @@ def model_selection(st: ProjectState) -> ModelSelection:
             # object — a stale config must never resurrect what a later
             # review rejected, and one channel's tick must never leak into
             # another's fit.
+            # Keyed by (norm_l4, norm_metric) — the same key space as `exclude`,
+            # the scorecards and the ledger. Ticking a metric name alone used to
+            # keep every L4 that shared the label.
             include[obj] = frozenset(
-                _norm(c.metric) for c in cfg.x_candidates
+                _norm_pair(c.l4, c.metric) for c in cfg.x_candidates
                 if c.selected
                 and (_obj(getattr(c, "object", "")) or OBJECT_ANY) in (OBJECT_ANY, obj)
                 and _norm_pair(c.l4, c.metric) in adopted

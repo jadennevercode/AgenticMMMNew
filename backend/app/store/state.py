@@ -110,11 +110,30 @@ class ProjectState(BaseModel):
     # Validation explorer, as {"specs": [...], "version": int}. Empty {} → the
     # frontend falls back to the generated default tabs. NO alias (see ols_config).
     validation_specs: dict = Field(default_factory=dict)
+    # S2 · 2.3: per-chart AI analyses, keyed by the filter state that produced the
+    # chart (`validation_analysis.analysis_key`). Cleared wholesale when the dataset
+    # or a 2.1 role/aggregation override changes — every analysis is a reading of
+    # numbers that just moved. NO alias (see ols_config).
+    validation_chart_analyses: dict = Field(default_factory=dict)
     # 2.1 Data Processing: factor rows the user explicitly ignores in the
     # FactorTree↔DataAssets mapping (rowId → note). A row is resolved when it is
     # either mapped by a published indicator or listed here; the 2.1 gate blocks
     # while any active row is still unresolved. Not blueprint-derived → persists.
     factor_map_ignores: dict[str, str] = Field(default_factory=dict, alias="factorMapIgnores")
+    # 2.1 Data Processing: per-indicator human overrides keyed by
+    # `indicator_metadata.indicator_key(l4, metric)`.
+    #  · metric_type_overrides: the model role the user assigned — "Y" (response) /
+    #    "X" (driver) / "excluded" (not in model). Applied at the `model_df` seam so
+    #    every downstream reader is consistent and there is exactly one Y. Absent key
+    #    → fall back to the name-based `classify_indicator` role.
+    #  · aggregation_overrides: how the indicator rolls up over time/dimensions
+    #    ("sum"/"average"/"weighted_average"/"min"/"max"), consumed by the national
+    #    aggregation layer, the 2.3 chart series and master data. Absent → the
+    #    classifier default (spend/volume/count→sum, rate/price/index→average).
+    # No alias (internally consumed; surfaced to the UI via FactorMapRow) — see the
+    # note on `ols_config`.
+    metric_type_overrides: dict[str, str] = Field(default_factory=dict)
+    aggregation_overrides: dict[str, str] = Field(default_factory=dict)
     # Data Engine: project-scoped data assets + master-data maps (not blueprint-derived,
     # so they persist across heal_state like artifacts).
     data_assets: list[DataAsset] = Field(default_factory=list, alias="dataAssets")
@@ -203,6 +222,26 @@ def initial_state(meta: ProjectMeta) -> ProjectState:
     return st
 
 
+def _seed_reference_data(st: ProjectState) -> None:
+    """Register the reference case's real data as per-source Data-Engine assets.
+
+    Only for reference-backed projects (the Danone demo): their "uploaded data" is
+    the real 23.8k-row client reference table. Registering it by source through the
+    real ``register_indicators`` path gives every indicator a real asset + coverage,
+    so 2.1 mapping resolves against genuine published indicators — never the
+    fabricated ``st.indicators`` splat the v2 demo used. A no-op (best-effort) for
+    projects that bring their own data or when the reference files are absent.
+    """
+    try:
+        from app.agents.dataset_cache import _allow_reference
+        if not _allow_reference(st.project_id):
+            return
+        from app.dataeng.seed_reference_assets import seed_reference_assets
+        seed_reference_assets(st.project_id, st)
+    except Exception:  # noqa: BLE001 — seeding data must never block project reset
+        pass
+
+
 def heal_state(st: ProjectState) -> ProjectState:
     """Reconcile a loaded state with the current blueprint: add any missing
     tasks/decisions/assignments/ai-choices, and prune ones the blueprint no
@@ -252,6 +291,16 @@ def heal_state(st: ProjectState) -> ProjectState:
     # Back-fill for projects saved before validation_specs existed.
     if not hasattr(st, "validation_specs") or st.validation_specs is None:
         st.validation_specs = {}
+    if not hasattr(st, "validation_chart_analyses") or st.validation_chart_analyses is None:
+        st.validation_chart_analyses = {}
+    # 2.1 now offers only SUM / AVG. Legacy overrides are mapped onto the closest
+    # of the two rather than left as values the canvas cannot display: an averaging
+    # variant becomes `average`, everything else `sum`.
+    legacy_agg = getattr(st, "aggregation_overrides", None)
+    if isinstance(legacy_agg, dict):
+        for k, v in list(legacy_agg.items()):
+            if v not in ("sum", "average"):
+                legacy_agg[k] = "average" if v == "weighted_average" else "sum"
     # Per-channel-type screening migration: legacy scorecard rows / OLS candidates
     # carry object="" (pre-migration global verdicts). The ledger resolvers treat an
     # empty object as OBJECT_ANY (applies to every channel), so a saved global verdict
@@ -458,6 +507,7 @@ class ProjectStore:
             if meta is None:
                 return None
             st = initial_state(meta)
+            _seed_reference_data(st)
             self._states[project_id] = st
             self._write_state(st)
             return st

@@ -21,7 +21,7 @@ from app.agents.ledger import (
     upstream_drop_pairs,
 )
 from app.agents.master_data import dimensions
-from app.agents.ols_review import build_ols_proposal, build_ols_review
+from app.agents.ols_review import build_ols_review, build_ols_search
 from app.agents.stat_scoring import (
     DETREND_PERIOD,
     MIN_DETRENDED_POINTS,
@@ -673,6 +673,83 @@ def refresh_signoff_in_artifact(st: ProjectState) -> None:
         g["signoff"] = _signoff_for(st, pairs)
 
 
+#: How many charts are read concurrently, and how long one read may take. A
+#: reasoning model runs ~60-80s on a 36-month chart with six series, so 16 factors
+#: serialised is twenty minutes; they go in parallel, but bounded — each one is a
+#: full LLM call. The timeout is set well above the observed per-chart time: at 90s
+#: two of sixteen charts timed out on the real case and fell through to on-demand
+#: generation for no good reason.
+_BV_ANALYSIS_CONCURRENCY = 4
+_BV_ANALYSIS_TIMEOUT_S = 180.0
+
+
+async def _bv_analyse_charts(eng: Engine, st: ProjectState, task_id: str,
+                             groups: list[dict]) -> None:
+    """Read every factor chart up front, so 2.3 opens with its analyses already there.
+
+    Each chart is analysed on its *default* filter state — the one the card shows
+    when it first renders — and cached under the same key the on-demand endpoint
+    uses, so opening the tab is a cache hit and changing a filter still offers a
+    refresh. Nothing here blocks the gate: a chart whose read fails keeps no entry
+    and the UI's "Generate analysis" button covers it.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from app.agents import validation_analysis as va
+    from app.dataeng import validation_query as vq
+
+    if not groups:
+        return
+    sem = asyncio.Semaphore(_BV_ANALYSIS_CONCURRENCY)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    store = getattr(st, "validation_chart_analyses", None)
+    if store is None:
+        store = {}
+
+    async def one(g: dict) -> tuple[str, dict] | None:
+        l3 = str(g.get("l3") or "")
+        if not l3:
+            return None
+        # Normalised through the same helper the endpoint uses, so a pre-generated
+        # analysis lands under exactly the key the card will ask for.
+        query = va.normalize_query({
+            "l3": l3, "grain": "month",
+            "indicators": list(g.get("defaultIndicators") or []),
+        })
+        async with sem:
+            try:
+                res = await asyncio.to_thread(
+                    vq.validation_series, st, l3=l3, grain="month",
+                    indicators=query["indicators"] or None)
+                analysis = await asyncio.wait_for(
+                    va.analyze_chart(res, query, now=now), timeout=_BV_ANALYSIS_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — one unreadable chart must not sink the rest
+                return None
+        return va.analysis_key(query), analysis.model_dump(by_alias=True)
+
+    done = await asyncio.gather(*(one(g) for g in groups))
+    ok = [d for d in done if d]
+    for key, payload in ok:
+        store[key] = payload
+    st.validation_chart_analyses = store
+
+    fallback = sum(1 for _k, p in ok if p.get("fallback"))
+    failed = len(groups) - len(ok)
+    msg = (f"AI read {len(ok)} of {len(groups)} factor chart(s) — naming trends, "
+           f"anomalies and inflections from the plotted series.")
+    if fallback:
+        msg += f" {fallback} fell back to a computed readout (no language model)."
+    if failed:
+        msg += f" {failed} could not be read and are left for on-demand generation."
+    eng.emit(st, "data", "info", msg, task_id)
+    if failed:
+        eng.add_findings(st, task_id, [TaskFinding(
+            text=(f"{failed} factor chart(s) could not be analysed automatically — open "
+                  "the chart and use Generate analysis."),
+            tone="flag", evidence=[EvidenceRef(artifactId="a-business-validation")])])
+
+
 async def _bv_narrate(groups: list[dict]) -> None:
     """Best-effort: refine each factor's interpretation in one grounded LLM call.
     Silently keeps the deterministic text when no LLM is configured."""
@@ -713,10 +790,15 @@ async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None
     anomalies = _anomalies(df)
     eng.set_analysis(st, "anomalies", anomalies)
 
+    tid = task["id"]
     kpi_df = df[vq._kpi_mask(df)]
     kpi_metric = str(kpi_df["metric"].mode().iloc[0]) if not kpi_df.empty else ""
     groups = _bv_groups(st, df)
+    eng.emit(st, "data", "info",
+             f"Charted {len(groups)} factor(s) against {kpi_metric or 'the response'} "
+             f"({df['month'].nunique() if 'month' in df.columns else 0} months).", tid)
     await _bv_narrate(groups)
+    await _bv_analyse_charts(eng, st, tid, groups)
     body = {
         "kpiMetric": kpi_metric,
         "groups": groups,
@@ -978,70 +1060,134 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     eng.add_findings(st, task["id"], findings)
 
 
-async def propose_ols_setup(eng: Engine, st: ProjectState, task: dict) -> None:
-    """2.5 — propose the OLS setup for the human to review.
+async def ols_search_and_fit(eng: Engine, st: ProjectState, task: dict) -> None:
+    """2.5 — search each L4 factor's candidate indicators and fit the winner.
 
-    Computes, from real data: the response (Y) candidates per model object with
-    their unit and coverage, the model-variable (X) candidates scored on 2.4's
-    CV / Pearson / VIF, and the default transform + trend/seasonality settings.
-    The human confirms or overrides each part in 2.5y / 2.5x / 2.5p; 2.5r fits.
-    Nothing here is invented — every number is computed or reused from 2.4."""
-    cfg = build_ols_proposal(st)
+    The design (02-data-agent §2.34) is a per-L4 indicator search, not a manual
+    variable pick: for each factor the AI tries its candidate indicators across
+    repeated OLS fits and keeps the choice that lands the factor in its Knowledge
+    ROI / Contribution range (maximising the in-range factor count, tie-broken on
+    R²), under a fit budget. The single response (Y) comes from the 2.1 Metrics
+    Type; transforms/controls scale to the series length. The chosen selection is
+    written to ``st.ols_config`` (so the ledger, 2.6 and 3.2 all read the same
+    resolved selection), then fitted and rendered as the ``olsTree`` for the d-2.5
+    review. Nothing is invented — every number is computed or reused from 2.4.
+
+    The step emits its own stages as activity events so the Build Process shows the
+    work — aggregate, enumerate, search, refit, AI benchmark review, summary —
+    rather than a single opaque "2.5 ran" line."""
+    from app.agents import ols_benchmark
+    from app.agents.dataset_cache import model_df, model_objects
+
+    tid = task["id"]
+
+    # 1 · the data the model is fitted on.
+    df = model_df(st)
+    months = int(df["month"].nunique()) if not df.empty and "month" in df.columns else 0
+    metrics = int(df["metric"].nunique()) if not df.empty and "metric" in df.columns else 0
+    objs = model_objects(st)
+    eng.emit(st, "data", "info",
+             f"Aggregated the long table to {len(objs) or 0} national total model "
+             f"({len(df)} rows · {months} months · {metrics} indicators).", tid)
+
+    # 2 · what survived the earlier layers and is therefore searchable.
+    def on_pass(info: dict) -> None:
+        eng.emit(st, "data", "info",
+                 f"Search pass {info['pass']}: {info['fits']} trial regression(s), "
+                 f"{info['swaps']} indicator swap(s) improved the model "
+                 f"(in-range {info['inRange']} · correct paid-driver signs {info['signed']} "
+                 f"· R²={info['r2']:.3f}).", tid)
+
+    cfg, trace = build_ols_search(st, on_pass=on_pass)
+    eng.emit(st, "data", "info",
+             f"Enumerated {trace.get('candidates', 0)} candidate indicator(s) across "
+             f"{trace.get('l4Searched', 0)} factor(s) that survived mapping, quality, "
+             f"sign-off and statistical screening.", tid)
+
+    # 3 · the winning setup, refitted and rendered.
     st.ols_config = cfg
-    body, _, _ = build_ols_review(st, fit=False)  # setup state — 2.5r runs the fit
-    eng.produce(st, "a-ols-test", body=body, state="proposed", agent="data")
+    body, prefit, flagged = build_ols_review(st, eng=eng, task_id=tid)
+    fit = next((o for o in body.get("objects", []) if not o.get("error")), {})
+    eng.emit(st, "data", "info",
+             "Best model refit: "
+             + (f"R²={fit.get('r2'):.3f} · adj R²={fit.get('adjR2'):.3f} · "
+                f"{fit.get('nObs')} obs · {fit.get('drivers')} drivers · "
+                f"baseline {fit.get('baselinePct')}%."
+                if fit.get("r2") is not None else "the fit produced no usable model object."),
+             tid)
 
-    n_sel = sum(1 for c in cfg.x_candidates if c.selected)
-    objs = len({y.object for y in cfg.y})
-    findings = [TaskFinding(
-        text=f"Proposed the OLS setup: a response for each of {objs} model object(s) "
-        f"(recommending the KPI volume metric), {n_sel} of {len(cfg.x_candidates)} model "
-        f"variable(s) pre-selected on their 2.4 statistics, and default transforms with a "
-        f"linear trend + Fourier seasonality control. Review Y, X and the settings in the "
-        f"next steps.",
-        evidence=[EvidenceRef(artifactId="a-ols-test")])]
-    if cfg.data_source == "reference":
-        findings.append(TaskFinding(
-            text="No published project data — the setup is proposed against the reference "
-            "dataset. Publish the project's own assets in the Data Engine for a real fit.",
-            tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
-    if cfg.x_candidates and not any(c.recommended for c in cfg.x_candidates):
-        findings.append(TaskFinding(
-            text="No model variable cleared the correlation / collinearity gate — the "
-            "pre-selected set is only a starting point. Review it before trusting the fit.",
-            tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
-    eng.add_findings(st, task["id"], findings)
+    # 4 · the AI reads each fitted factor against its Knowledge band.
+    in_model = [r for r in body.get("tree", []) if r.get("inModel")]
+    verdicts = await ols_benchmark.review_rows([{
+        "key": r["key"], "l1": r.get("l1", ""), "l3": r.get("l3", ""), "l4": r.get("l4", ""),
+        "indicator": r.get("indicator", ""), "coef": r.get("coef"), "tValue": r.get("tValue"),
+        "pValue": r.get("pValue"), "roi": r.get("roi"), "contribution": r.get("contribution"),
+        "roiRange": r.get("roiRange", ""), "contributionRange": r.get("contributionRange", ""),
+        "rangeSource": r.get("rangeSource", ""), "roiStatus": r.get("roiStatus"),
+        "contributionStatus": r.get("contributionStatus"),
+    } for r in in_model])
+    for r in body.get("tree", []):
+        v = verdicts.get(r.get("key", ""))
+        r["aiVerdict"] = v["verdict"] if v else ""
+        r["aiRationale"] = v["rationale"] if v else ""
+    ai_written = sum(1 for v in verdicts.values() if v.get("ai"))
+    consistent = sum(1 for v in verdicts.values() if v["verdict"] == "consistent")
+    doubted = sum(1 for v in verdicts.values() if v["verdict"] in ("questionable", "implausible"))
+    eng.emit(st, "data", "info",
+             f"Benchmark review of {len(in_model)} fitted factor(s) against the Knowledge "
+             f"ROI / Contribution ranges: {consistent} judged consistent, {doubted} flagged"
+             + ("" if ai_written else " (computed readout — no language model configured)")
+             + ".", tid)
 
-
-async def ols_regression_test(eng: Engine, st: ProjectState, task: dict) -> None:
-    """2.5r — fit the OLS on the confirmed setup and review the result.
-
-    Uses the human-approved Y / X / parameters (``st.ols_config``), fits per model
-    object, computes each variable's coef / t / p / ROI / Contribution, compares
-    them against the industry Knowledge ranges and surfaces the whole factor tree
-    with per-variable verdicts — flagging out-of-range variables for review.
-    ROI is only range-checked when it is a revenue/spend ratio. See
-    ``app.agents.ols_review.build_ols_review`` and the ``olsTree`` format."""
-    body, prefit, flagged = build_ols_review(st, eng=eng, task_id=task["id"])
+    body["search"] = trace
     eng.produce(st, "a-ols-test", body=body, state="confirmed", agent="data")
     eng.set_analysis(st, "prefit", prefit)
     eng.set_analysis(st, "ols_flagged", flagged)
+    eng.set_analysis(st, "ols_search", trace)
     # Human-readable warning strings reused by the 2.6 funnel.
     warnings = [f"{f['l4']} · {f['indicator']}" for f in flagged]
     eng.set_analysis(st, "selection_warnings", warnings[:20])
 
     summary = body.get("summary", {})
     no_metric = summary.get("notInModel", 0)
+    n_sel = sum(1 for c in cfg.x_candidates if c.selected)
+    eng.emit(st, "data", "info",
+             f"Summary: {n_sel} indicator(s) adopted into the national model, "
+             f"{summary.get('inRange', 0)} inside their Knowledge band, "
+             f"{len(flagged)} flagged for the sign-off gate.", tid)
     findings = [TaskFinding(
-        text=f"Fast OLS pre-fit complete: {summary.get('inModel', 0)} indicator(s) entered "
-        f"the model across {len(body.get('objects', []))} object(s); "
+        text=f"OLS indicator search: {trace.get('note', '')} "
+        f"{n_sel} indicator(s) chosen; {summary.get('inModel', 0)} entered the fit, "
         f"{summary.get('inRange', 0)} within their industry ROI / Contribution band, "
         f"{len(flagged)} flagged for review, {summary.get('noBenchmark', 0)} without a benchmark.",
         tone="flag" if flagged else "info", evidence=[EvidenceRef(artifactId="a-ols-test")])]
+    if cfg.data_source == "reference":
+        findings.append(TaskFinding(
+            text="No published project data — the search ran against the reference dataset. "
+            "Publish the project's own assets in the Data Engine for a real fit.",
+            tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
     red_flagged = [o for o, v in prefit.items() if v.get("red_flags")]
     if red_flagged:
-        findings.append(TaskFinding(text=f"OLS test red flags on: {', '.join(red_flagged)}.",
+        findings.append(TaskFinding(text=f"OLS red flags on: {', '.join(red_flagged)}.",
                                     tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
+    # Misspecification guard — a baseline over 100% (trend/seasonality controls
+    # absorbing more than all of actual sales) or a wrong-sign paid driver means
+    # the fit, not the data, is producing the wild contributions that then fall
+    # outside every Knowledge band. Recommend reducing the controls (fewer Fourier
+    # terms / drop the trend in 2.5p) instead of dropping the flagged indicators.
+    misspecified = [
+        o.get("object", "") for o in body.get("objects", [])
+        if (o.get("baselinePct") is not None and o["baselinePct"] > 100)
+        or any("Wrong-sign" in f or "wrong-sign" in f for f in (o.get("redFlags") or []))
+    ]
+    if misspecified:
+        findings.append(TaskFinding(
+            text=(f"Fit likely mis-specified on {', '.join(misspecified)}: baseline exceeds 100% "
+                  "or a paid driver has the wrong sign — the trend/seasonality controls are "
+                  "over-absorbing sales, which pushes contributions outside every band. Reduce "
+                  "the controls (fewer Fourier terms or drop the trend) in the OLS settings "
+                  "before dropping flagged indicators."),
+            tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
     eng.add_findings(st, task["id"], findings)
     # 2.5 gate — make the selection-confirmation question reflect real flags.
     dec = task.get("decision")
@@ -1075,7 +1221,8 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
     for obj in model_objects(st):
         try:
             mf = build_model_frame(df, obj, vocab=_vocab, exclude=sel.exclude_for(obj),
-                                   y_metric=sel.y_for(obj), include=sel.include_for(obj))
+                                   y_metric=sel.y_for(obj), include=sel.include_for(obj),
+                                   st=st)
         except Exception as e:  # noqa: BLE001 — one unfittable object must not
             # sink the others; the object reports its own error on the card.
             obj_rows.append({"object": obj, "months": 0, "features": 0,
@@ -1104,8 +1251,13 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
             seen_rejected.add(r.key)
             rejected_rows.append(r)
     rejected = rejected_rows
+    from app.agents.master_data import granularity_reference
     body = {
         "objects": obj_rows,
+        # 2.32 reference deliverable · sheet 1: per-indicator model granularity
+        # (渠道 scope × 区域 granularity; blank = not selected into the model). The
+        # Data Station (sheet 2) is queried live via POST /master-data/data-station.
+        "granularityRef": granularity_reference(st),
         # {"combined": [...], "byObject": {object: [...]}} — combined stays the
         # pre-per-object rollup any un-migrated reader still expects; byObject
         # is each channel's own funnel (the same indicator can die at a

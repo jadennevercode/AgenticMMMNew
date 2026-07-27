@@ -65,12 +65,19 @@ def tool_run(eng, st, task_id: str, tool_id: str, args_summary: str = "") -> Ite
 
 
 def traced(eng, st, task_id: Optional[str], tool_id: str, args_summary: str,
-           fn: Callable[..., Any], *args, summarize: Optional[Callable[[Any], str]] = None,
+           fn: Callable[..., Any], /, *args,
+           summarize: Optional[Callable[[Any], str]] = None,
            **kwargs) -> Any:
     """Run one tool call, traced when an engine/state/task is supplied.
 
     `fn` is passed explicitly (rather than looked up) so the call site reads as
     the computation it is; pass ``get(tool_id).run`` to go through the registry.
+
+    The tracing parameters are **positional-only** so they cannot collide with
+    the tool's own keyword arguments: ``run_mmm`` takes an ``st=`` of its own
+    (the project, for per-indicator aggregation), and without the ``/`` that
+    silently bound to this function's ``st`` instead — every traced OLS fit then
+    failed with "multiple values for argument 'st'".
     """
     if eng is None or st is None or not task_id:
         return fn(*args, **kwargs)

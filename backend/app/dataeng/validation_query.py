@@ -24,11 +24,14 @@ from typing import Optional
 
 import pandas as pd
 
-from app.agents.dataset_cache import model_df
+from app.agents.dataset_cache import model_df, raw_long_df
 
 # metric_type tags (lower-cased). The OLS engine tags the response as "Y" and
 # spend drivers as "spending"; older reference data uses metric-name patterns.
-_KPI_TYPES = {"y"}
+# Aligned with pivot._is_y_row's `y_tags` so the two Y classifiers agree on tag
+# semantics — a user's 2.1 "Y" override (applied at the model_df seam) is caught
+# here as the single KPI, exactly as the OLS path sees it.
+_KPI_TYPES = {"y", "kpi"}
 _SPEND_TYPES = {"spending", "spend"}
 _SALES_PATTERN = r"销量|销售|销额|offtake|sales|volume|gmv|sell.?out|箱|出货"
 _SPEND_PATTERN = r"花费|费用|spend|投放|金额|cost|budget"
@@ -136,8 +139,28 @@ def _metric_meta(st, metric: str) -> dict:
             "aggregation": meta.aggregation, "semanticType": meta.metric_type}
 
 
+def _resolved_y(st, df: pd.DataFrame) -> str:
+    """The 2.1-configured response metric, or '' when it cannot be resolved here."""
+    from app.agents.overrides import resolved_y_metric
+
+    try:
+        return resolved_y_metric(st, df) or ""
+    except Exception:  # noqa: BLE001 — an unresolvable Y falls back to the old default
+        return ""
+
+
 def _metric_agg(st, metric: str) -> str:
-    return _metric_meta(st, metric)["aggregation"]
+    """The aggregation to roll this indicator up with.
+
+    The 2.1 Data Processing choice wins over the registered Indicator and over
+    the name classifier — it is the user telling us, per indicator, that this
+    series sums or averages, and every surface has to obey it or the same metric
+    reads differently on the chart than it does in the model.
+    """
+    from app.agents.overrides import aggregation_override_for_metric
+
+    return (aggregation_override_for_metric(st, metric)
+            or _metric_meta(st, metric)["aggregation"])
 
 
 def _sum_by_period(sub: pd.DataFrame, grain: str, aggregation: str = "sum") -> dict[int, float]:
@@ -273,17 +296,37 @@ def _yoy(values: list[Optional[float]]) -> list[Optional[float]]:
     return out
 
 
-def _yearly_table(years: list[int], named_masks: list[tuple[str, pd.DataFrame, dict]]) -> dict:
-    """Per-year values per indicator. Each entry is (name, rows, meta); the metric's
-    aggregation rolls a rate up as a yearly average not a sum (DATA-007), and its
-    unit/format ride along so the table formats each row correctly (DATA-008)."""
+_MONTH_LABELS = ["January", "February", "March", "April", "May", "June",
+                 "July", "August", "September", "October", "November", "December"]
+
+
+def _yearly_table(years: list[int], named_masks: list[tuple[str, pd.DataFrame, dict]],
+                  yoy_month: int = 0) -> dict:
+    """Per-year values per indicator, with a same-period year-over-year change.
+
+    Each entry is (name, rows, meta); the metric's aggregation rolls a rate up as a
+    yearly average not a sum (DATA-007), and its unit/format ride along so the table
+    formats each row correctly (DATA-008).
+
+    ``yoy_month`` (1–12) restricts every cell to that calendar month, so the YoY
+    column compares March against March rather than a full year against a full year.
+    A full-year comparison hides exactly the thing a seasonal business needs to see —
+    and it silently penalises the current year while it is still partial. ``0`` keeps
+    the full-year roll-up.
+    """
+    m = yoy_month if 1 <= yoy_month <= 12 else 0
     rows = []
     for name, sub, meta in named_masks:
+        if m:
+            months = pd.to_numeric(sub["month"], errors="coerce")
+            sub = sub[months % 100 == m]
         by_year = _sum_by_period(sub, "year", meta["aggregation"])
         values = [by_year.get(y) for y in years]
         rows.append({"metric": name, "values": values, "yoy": _yoy(values),
-                     "unit": meta["unit"], "numberFormat": meta["numberFormat"]})
-    return {"years": years, "rows": rows}
+                     "unit": meta["unit"], "numberFormat": meta["numberFormat"],
+                     "aggregation": meta["aggregation"]})
+    return {"years": years, "rows": rows, "yoyMonth": m,
+            "monthLabel": _MONTH_LABELS[m - 1] if m else "Full year"}
 
 
 # DATA-004: the drilldown levels below L3, in cascade order.
@@ -307,6 +350,7 @@ def validation_series(
     province_group: Optional[list[str]] = None,
     window=None,
     kpi_metric_req: Optional[str] = None,
+    yoy_month: int = 0,
 ) -> dict:
     """Compute the KPI area + overlay series + yearly/YoY table for one L3, drilled
     to an L4–L8 path (DATA-004). Each level's options cascade from the levels above
@@ -314,8 +358,15 @@ def validation_series(
 
     DATA-005: when ``window`` (a TimeWindow) is given, the whole view is scoped to its
     current span and a current-vs-comparison block (equal-length, same-season) is
-    returned alongside the standard yearly table."""
-    df = model_df(st)
+    returned alongside the standard yearly table.
+
+    ``yoy_month`` (1–12) makes the yearly table a same-month year-over-year view;
+    ``0`` keeps the full-year roll-up."""
+    # Business Validation reads the per-channel raw lineage frame, not the national
+    # roll-up: the Brand / Channel / Region filters below only mean something on the
+    # frame that still carries those dimensions (the national frame collapses them
+    # to TOTAL). The modeling path uses `model_df`; this exploratory view uses the raw.
+    df = raw_long_df(st)
     dims = {"brand": brand, "channelType": channel_type, "provinceGroup": province_group}
     scoped_full = _apply_dims(df, dims)
 
@@ -363,21 +414,29 @@ def validation_series(
     metrics = indicators or _default_indicators(filter_base)
 
     # KPI area — full sell-out backdrop (dims-scoped, never source-filtered).
-    # DATA-009: a project may publish both a Volume KPI and a Value KPI; expose both
-    # as options and let the caller pick which is the backdrop (default: prefer Volume,
-    # so switching the chart never changes the OLS default Y).
+    # The response is decided ONCE, at 2.1 Data Processing, and every surface reads
+    # it from `overrides.resolved_y_metric`. The chart deliberately has no Y picker:
+    # plotting one response while the model fits another is how 2.3 and 2.5 came to
+    # tell different stories about the same data. `kpi_metric_req` survives only for
+    # the Graphic Walker explorer, which is not the validation chart.
     kpi_all = scoped[_kpi_mask(scoped)]
     kpi_metric_options = _distinct(kpi_all, "metric")
     kpi_metric = ""
     if kpi_metric_req and any(_norm(kpi_metric_req).casefold() == m.casefold() for m in kpi_metric_options):
         kpi_metric = next(m for m in kpi_metric_options if m.casefold() == _norm(kpi_metric_req).casefold())
+    if not kpi_metric:
+        resolved = _resolved_y(st, scoped)
+        if resolved and any(resolved.casefold() == m.casefold() for m in kpi_metric_options):
+            kpi_metric = next(m for m in kpi_metric_options if m.casefold() == resolved.casefold())
     if not kpi_metric and kpi_metric_options:
         volume = [m for m in kpi_metric_options if _metric_meta(st, m)["semanticType"] == "kpi_volume"]
         kpi_metric = volume[0] if volume else kpi_metric_options[0]
     kpi_df = kpi_all[_casefold_eq(kpi_all["metric"], kpi_metric)] if kpi_metric else kpi_all.iloc[0:0]
 
     # DATA-007/008: each metric's aggregation + display metadata, resolved once.
-    metric_meta = {m: _metric_meta(st, m) for m in metrics}
+    # The aggregation is taken from `_metric_agg`, so a SUM/AVG the user set at 2.1
+    # governs the chart and the table exactly as it governs the model.
+    metric_meta = {m: {**_metric_meta(st, m), "aggregation": _metric_agg(st, m)} for m in metrics}
     kpi_agg = _metric_agg(st, kpi_metric) if kpi_metric else "sum"
 
     # Assemble a shared period axis over KPI + every overlay series, each rolled up
@@ -407,7 +466,9 @@ def validation_series(
             "metric": m,
             "metricType": _norm(filter_base[_casefold_eq(filter_base["metric"], m)]["metric_type"].iloc[0])
             if not filter_base[_casefold_eq(filter_base["metric"], m)].empty else "",
-            "kind": "bar" if _is_spend_metric(filter_base, m) else "line",
+            # Chart roles (user-confirmed 2026-07-24): Y is the area backdrop
+            # (handled above), spending → line, every other metric → bar.
+            "kind": "line" if _is_spend_metric(filter_base, m) else "bar",
             "data": [d.get(k) for k in axis],  # None = gap
             # DATA-008: display metadata so the UI formats the axis/tooltip correctly.
             "unit": mm["unit"], "numberFormat": mm["numberFormat"],
@@ -415,10 +476,11 @@ def validation_series(
         })
 
     years = sorted({int(y) for y in pd.to_numeric(scoped["year"], errors="coerce").dropna().unique()})
-    kpi_meta = _metric_meta(st, kpi_metric) if kpi_metric else {"aggregation": "sum", "unit": "", "numberFormat": "number"}
+    kpi_meta = ({**_metric_meta(st, kpi_metric), "aggregation": kpi_agg} if kpi_metric
+                else {"aggregation": "sum", "unit": "", "numberFormat": "number"})
     named = ([(kpi_metric or "KPI", kpi_df, kpi_meta)] if not kpi_df.empty else []) + \
             [(m, l3_sel[_casefold_eq(l3_sel["metric"], m)], metric_meta[m]) for m in metrics]
-    yearly = _yearly_table(years, named)
+    yearly = _yearly_table(years, named, yoy_month)
 
     # DATA-005 comparison: current-window vs comparison-window totals (equal-length,
     # same-season). Computed from the FULL (un-window-scoped) frame so the comparison
@@ -451,11 +513,12 @@ def validation_series(
         "breadcrumb": breadcrumb,
         "options": {
             "grains": grains,
-            # DATA-009: the KPI backdrop choices (Volume / Value) the chart can switch.
-            "kpiMetrics": [{"metric": m, "semanticType": _metric_meta(st, m)["semanticType"]}
-                           for m in kpi_metric_options],
-            # Each level's options cascade from the levels above it; an empty list
-            # tells the UI to hide that level (Not Available) rather than draw it.
+            # No `kpiMetrics`: the response is decided once, at 2.1. The chart used
+            # to expose a Volume/Value switcher, which let the backdrop disagree with
+            # what the model was actually fitted on.
+            # Each level's options cascade from the levels above it; the UI renders a
+            # level with no options as unavailable rather than dropping it, so the
+            # hierarchy reads the same whatever the data covers.
             "l4": _distinct(opt_bases["l4"], "l4"),
             "l5": _distinct(opt_bases["l5"], "l5"),
             "l6": _distinct(opt_bases["l6"], "l6"),

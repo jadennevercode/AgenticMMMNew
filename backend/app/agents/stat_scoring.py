@@ -49,6 +49,17 @@ DETREND_PERIOD = 12
 # explanation. Below this many resulting rows, skip differencing altogether.
 MIN_DETRENDED_POINTS = 6
 
+# Minimum observed months for an indicator's statistics to mean anything —
+# aligned with `pivot.MIN_MONTHS`, which is the bar for entering the model at all.
+# A shorter indicator is still emitted (with a zero total and an explicit note)
+# rather than dropped, so the funnel count stays honest about what was screened.
+MIN_SCORED_MONTHS = 12
+_SHORT_COVERAGE_VERDICT = "unconsiderable"
+
+# How many indicators a VIF is measured against — the width of a *realistic* model,
+# mirroring `pivot.MAX_DRIVERS`. See `_design_vifs` for why this is not "all of them".
+from app.mmm.pivot import MAX_DRIVERS as SCREEN_DESIGN_COLS  # noqa: E402
+
 
 def _yoy(a: np.ndarray, period: int = DETREND_PERIOD) -> np.ndarray:
     """Year-over-year difference along axis 0.
@@ -88,27 +99,59 @@ def _complete_month_index(idx: "pd.Index") -> "pd.Index":
     return pd.Index(months, name=idx.name)
 
 
-def _monthly_y(df: pd.DataFrame) -> pd.Series | None:
-    """Global monthly KPI (Y) series — the response the indicators are scored against."""
+def _roll_monthly(grp: pd.DataFrame, st, l4: object, metric: object) -> pd.Series:
+    """One value per month, rolled up the way 2.1 says this indicator rolls up.
+
+    A national row is still split across the L5–L8 residual, so within a single
+    month there can be several rows for one indicator. Summing them is only right
+    for an additive metric: a coverage rate or a price index summed across its
+    sub-paths produces a number with no meaning, and it was that number the CV,
+    Pearson and VIF tests were scoring.
+    """
+    from app.agents.overrides import pandas_agg, resolve_aggregation
+
+    return (grp.dropna(subset=["month"])
+            .groupby("month")["value"]
+            .agg(pandas_agg(resolve_aggregation(st, l4, metric)))
+            .sort_index())
+
+
+def _monthly_y(df: pd.DataFrame, st=None) -> pd.Series | None:
+    """Monthly KPI (Y) series — the response the indicators are scored against.
+
+    The response is whichever indicator the user tagged ``Y`` at 2.1, resolved
+    through ``overrides.resolved_y_metric``. 2.4 used to auto-pick its own Y by
+    month coverage, so it could correlate every indicator against a different
+    response than 2.5 would go on to fit.
+    """
+    from app.agents.overrides import resolved_y_metric
+
     y_rows = df[_is_y_row(df)]
     if y_rows.empty:
         return None
-    y_metric = _pick_y_metric(y_rows)
-    s = (
-        y_rows[y_rows["metric"] == y_metric]
-        .dropna(subset=["month"])
-        .groupby("month")["value"].sum()
-        .sort_index()
-    )
+    y_metric = resolved_y_metric(st, df) or _pick_y_metric(y_rows)
+    sel = y_rows[y_rows["metric"] == y_metric]
+    if sel.empty:
+        return None
+    y_l4 = str(sel["l4"].iloc[0]) if "l4" in sel.columns else ""
+    s = _roll_monthly(sel, st, y_l4, y_metric)
     return s if not s.empty else None
 
 
-def _indicator_series(df: pd.DataFrame) -> tuple[list[dict], pd.DataFrame]:
+def _indicator_series(df: pd.DataFrame, st=None) -> tuple[list[dict], pd.DataFrame]:
     """Build one monthly series per (l1,l2,l3,l4,metric) indicator.
 
     Returns (metas, wide) where ``wide`` is a month-indexed frame with one column
-    per indicator (aligned, gaps zero-filled) and ``metas`` carries its L1–L4 path.
-    Constant / all-NaN indicators are dropped (no volatility, undefined VIF).
+    per indicator and ``metas`` carries its L1–L4 path plus the number of months
+    the indicator was actually observed. Constant / all-NaN indicators are dropped
+    (no volatility, undefined VIF).
+
+    **Gaps stay NaN.** They used to be zero-filled, which silently turned "this
+    indicator did not exist before 2023" into "this indicator was zero for two
+    years": CV then measured a step function instead of the series' own movement,
+    Pearson correlated the zero block against the KPI's trend, and every short
+    indicator shared that same zero block so VIF read them as collinear with each
+    other. All three tests were scoring the padding.
     """
     metas: list[dict] = []
     series: dict[str, pd.Series] = {}
@@ -119,26 +162,68 @@ def _indicator_series(df: pd.DataFrame) -> tuple[list[dict], pd.DataFrame]:
             continue
         if _is_y_row(grp).all():  # the KPI itself is not a candidate driver
             continue
-        s = (
-            grp.dropna(subset=["month"])
-            .groupby("month")["value"].sum()
-            .sort_index()
-        )
+        s = _roll_monthly(grp, st, l4, metric)
         if s.empty or float(np.nanstd(s.to_numpy(dtype=float))) == 0.0:
             continue
         col = f"i{i}"
         series[col] = s
         metas.append({"col": col, "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
-                      "l4": _s(l4), "indicator": name})
+                      "l4": _s(l4), "indicator": name,
+                      "months": int(s.notna().sum())})
     if not series:
         return [], pd.DataFrame()
     wide = pd.concat(series, axis=1).sort_index()
-    wide = wide.fillna(0.0)
     return metas, wide
 
 
 def _s(v: object) -> str:
     return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v)
+
+
+def _design_vifs(detr: np.ndarray, r_by_col: list[float]) -> tuple[np.ndarray, list[int]]:
+    """Per-indicator VIF measured against a **realistic model**, not the whole
+    candidate universe.
+
+    VIF is a property of a design matrix: "how much is this column's variance
+    inflated by the *other columns in the model*". Screening asked it of all ~73
+    candidates at once on ~24 detrended periods — far into the under-determined
+    regime, where `vif_all` falls back to the pairwise-max proxy. Among that many
+    co-seasonal marketing series almost every one has some peer correlated above
+    0.89, so nearly everything scored VIF >= 5, the 2.33 band zeroed its total, and
+    2.4 dropped ~90% of the indicators it was asked to screen. Downstream, 2.5 was
+    then left with one candidate per factor and nothing to search.
+
+    So each indicator is measured against the model it could actually be in: the
+    ``SCREEN_DESIGN_COLS`` most Y-correlated indicators. Members of that set get
+    their VIF from that matrix; an indicator outside it is measured against the
+    strongest ``SCREEN_DESIGN_COLS - 1`` peers plus itself — the same question,
+    asked of a design it could plausibly join.
+
+    The 2.33 band is untouched (``VIF <= 1`` → 1, ``< 5`` → 0.5, ``>= 5`` → 0) and
+    `vif_all` itself is untouched; only the matrix it is handed changes.
+
+    Returns ``(vifs, base_idx)``.
+    """
+    n_cols = detr.shape[1]
+    k = min(SCREEN_DESIGN_COLS, n_cols)
+    base = sorted(range(n_cols), key=lambda i: -abs(r_by_col[i]))[:k]
+    base_set = set(base)
+
+    vifs = np.ones(n_cols, dtype=float)
+    base_vifs = get_tool("stat.vif").run(detr[:, base])
+    for pos, i in enumerate(base):
+        vifs[i] = float(base_vifs[pos])
+
+    # Secondary path — deliberately untraced, so screening still records exactly
+    # one `stat.vif` invocation per task run (see CLAUDE.md's tracing granularity).
+    peers = base[: max(k - 1, 1)]
+    for i in range(n_cols):
+        if i in base_set:
+            continue
+        cols = [j for j in peers if j != i] + [i]
+        out = get_tool("stat.vif").run(detr[:, cols])
+        vifs[i] = float(out[-1])
+    return vifs, base
 
 
 def build_stat_scorecard(st: ProjectState, *, eng=None,
@@ -167,16 +252,17 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
     all_rows: list[StatScoreRow] = []
     for obj in model_objects(st):
         df = full[full["channel_type"].astype("string").str.strip() == obj]
-        y = _monthly_y(df)
-        metas, wide = _indicator_series(df)
+        y = _monthly_y(df, st)
+        metas, wide = _indicator_series(df, st)
         if not metas or y is None:
             continue
 
         # Reindex onto the complete, contiguous calendar range before anything is
         # differenced positionally — a month missing anywhere in the panel would
-        # otherwise silently shift a[12:]-a[:-12] across the gap. New months are
-        # zero-filled, consistent with how _indicator_series already zero-fills gaps.
-        wide = wide.reindex(_complete_month_index(wide.index), fill_value=0.0)
+        # otherwise silently shift a[12:]-a[:-12] across the gap. Inserted months
+        # stay NaN: the reindex exists to keep the differencing paired on real
+        # calendar months, not to invent observations.
+        wide = wide.reindex(_complete_month_index(wide.index))
 
         inherited = drops_before(st, "statistical", obj)
         if inherited:
@@ -209,16 +295,6 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
             else f"{len(detr)} monthly points (too short to detrend)"
         )
 
-        # VIF is computed once across the whole candidate set, at indicator granularity.
-        vifs = traced(
-            eng, st, task_id, "stat.vif", f"{obj}: {n} indicators × {period_label}",
-            get_tool("stat.vif").run, detr,
-            summarize=lambda v: f"max VIF {float(np.nanmax(v)):.1f} · "
-                                f"{int(np.nansum(np.asarray(v) >= 5))} at or above 5"
-                                if len(v) else "no indicators",
-        )
-        vif_by_col = dict(zip(cols, vifs))
-
         rs = traced(
             eng, st, task_id, "stat.pearson",
             f"{obj}: {n} indicators vs KPI ({period_label})",
@@ -230,12 +306,44 @@ def build_stat_scorecard(st: ProjectState, *, eng=None,
         )
         r_by_col = dict(zip(cols, rs))
 
+        # VIF is measured against a realistic model width, not the whole candidate
+        # universe — see `_design_vifs`. Needs `rs`, hence the order.
+        k_design = min(SCREEN_DESIGN_COLS, n)
+        vifs, _base = traced(
+            eng, st, task_id, "stat.vif",
+            f"{obj}: {n} indicators, each against a {k_design}-driver design × {period_label}",
+            _design_vifs, detr, list(rs),
+            summarize=lambda out: (
+                f"max VIF {float(np.nanmax(out[0])):.1f} · "
+                f"{int(np.nansum(np.asarray(out[0]) >= 5))} at or above 5"
+                if len(out[0]) else "no indicators"),
+        )
+        vif_by_col = dict(zip(cols, vifs))
+
         for m in metas:
             col = m["col"]
             cv = cv_by_col[col]
             corr = r_by_col[col]
             vif = float(vif_by_col.get(col, 1.0))
+            months = int(m.get("months", 0))
             sc = score_statistical(cv, corr, vif)
+            rationale = ""
+            if months < MIN_SCORED_MONTHS:
+                # Too little history for CV / Pearson / VIF to say anything. It is
+                # scored and shown — with the reason — rather than quietly omitted,
+                # so the funnel count still matches the indicator count.
+                rationale = (f"Only {months} observed month(s) — below the "
+                             f"{MIN_SCORED_MONTHS}-month minimum for statistical screening.")
+                all_rows.append(StatScoreRow(
+                    id=f"{obj}|s-{col}", object=obj, l1=m["l1"], l2=m["l2"], l3=m["l3"],
+                    l4=m["l4"], indicator=m["indicator"], cv=round(cv, 4),
+                    pearson=round(corr, 4), vif=round(vif, 3), cvScore=sc.cv_score,
+                    pearsonScore=sc.pearson_score, vifScore=sc.vif_score, total=0.0,
+                    autoVerdict=_SHORT_COVERAGE_VERDICT,
+                    disposition=_DISPOSITION_DEFAULT[_SHORT_COVERAGE_VERDICT],
+                    rationale=rationale,
+                ))
+                continue
             all_rows.append(StatScoreRow(
                 id=f"{obj}|s-{col}", object=obj, l1=m["l1"], l2=m["l2"], l3=m["l3"], l4=m["l4"],
                 indicator=m["indicator"], cv=round(cv, 4), pearson=round(corr, 4),

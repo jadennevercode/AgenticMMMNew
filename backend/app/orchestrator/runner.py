@@ -76,6 +76,17 @@ async def run_until_blocked(eng: Engine, st: ProjectState, *, autopilot: bool, m
             #    blocked until the user actually uploads, so S1 is parsed only from
             #    real input. Non-upload gates (and the S2 data gate) still proceed.
             acted = False
+            # 2.1 FactorTree↔DataAssets mapping is a human step with no autopilot
+            # equivalent — resolve it honestly here: bind each factor row's best
+            # genuine indicator match, ignore the dataless rest with a real reason.
+            # Never fabricates a binding, so a real project's 2.1 clears on real data.
+            for t in bp.TASKS:
+                a = t.get("assignment")
+                if a and a.get("requiresMapping") and st.assignments[a["id"]].status == "open":
+                    from app.dataeng.mapping import mapping_complete
+                    if not mapping_complete(st) and getattr(st, "factor_tree", None):
+                        from app.dataeng.mapping_auto import auto_resolve_factor_map
+                        auto_resolve_factor_map(st)
             for t in bp.TASKS:
                 if "assignment" in t and st.assignments[t["assignment"]["id"]].status == "open":
                     asg = t["assignment"]

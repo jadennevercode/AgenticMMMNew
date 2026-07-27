@@ -4,7 +4,6 @@ import type { StatDisposition, StatScoreRow } from '../../../lib/types'
 import { useSimStore } from '../../../store/useSimStore'
 import { cn } from '../../../lib/cn'
 import { FactorTreeCanvas } from '../factor-tree/FactorTreeCanvas'
-import { ChannelTypeSelect } from '../factor-tree/ChannelTypeSelect'
 import { indicatorKey } from '../factor-tree/keys'
 import { ledgerOnlyRows } from '../factor-tree/ledgerOnlyRows'
 import { useLedgerIndex } from '../factor-tree/useLedgerIndex'
@@ -31,29 +30,12 @@ const TONE: Record<string, FactorCanvasTone> = {
 export function StatCanvas() {
   const card = useSimStore((s) => s.statScorecard)
   const update = useSimStore((s) => s.updateStatScorecard)
-  const channel = useSimStore((s) => s.s2ChannelFilter)
-  const setChannel = useSimStore((s) => s.setS2ChannelFilter)
   const { index, blockedBeforeFor, reload } = useLedgerIndex()
   const [selected, setSelected] = useState('')
-  const [applyAll, setApplyAll] = useState(false)
 
+  // One national total model — every scorecard row is the single TOTAL object.
   const cardRows = useMemo(() => card?.rows ?? [], [card])
-
-  const channels = useMemo(
-    () => [...new Set(cardRows.map((r) => r.object).filter(Boolean) as string[])].sort(),
-    [cardRows],
-  )
-
-  const visibleCardRows = useMemo(() => {
-    if (channel) return cardRows.filter((r) => (r.object ?? '') === channel)
-    const seen = new Set<string>()
-    return cardRows.filter((r) => {
-      const k = indicatorKey(r.l4, r.indicator)
-      if (seen.has(k)) return false
-      seen.add(k)
-      return true
-    })
-  }, [cardRows, channel])
+  const visibleCardRows = cardRows
 
   const rows: FactorCanvasRow[] = useMemo(() => {
     const scored = visibleCardRows.map((r) => ({
@@ -69,11 +51,11 @@ export function StatCanvas() {
         `${r.vif.toFixed(1)} (${r.vifScore})`,
         r.total.toFixed(2),
       ],
-      blockedBy: blockedBeforeFor(r.l4, r.indicator, 'statistical', channel || undefined),
+      blockedBy: blockedBeforeFor(r.l4, r.indicator, 'statistical', undefined),
     }))
     const scoredKeys = new Set(visibleCardRows.map((r) => indicatorKey(r.l4, r.indicator)))
     return [...scored, ...ledgerOnlyRows(index, scoredKeys, 'statistical')]
-  }, [visibleCardRows, index, blockedBeforeFor, channel])
+  }, [visibleCardRows, index, blockedBeforeFor])
 
   const current: StatScoreRow | undefined = useMemo(
     () => cardRows.find((r) => r.id === selected),
@@ -84,13 +66,7 @@ export function StatCanvas() {
 
   function setDisposition(id: string, disposition: StatDisposition) {
     // A drop here is a statistical-layer verdict the selection step inherits.
-    // Default: this channel's row only. "Apply to all channels" writes every
-    // object's row for the same indicator.
-    const target = cardRows.find((r) => r.id === id)
-    const applies = (r: StatScoreRow) =>
-      r.id === id ||
-      (applyAll && target != null && indicatorKey(r.l4, r.indicator) === indicatorKey(target.l4, target.indicator))
-    void update({ rows: cardRows.map((r) => (applies(r) ? { ...r, disposition } : r)) }).then(reload)
+    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) }).then(reload)
   }
 
   const zeroed = visibleCardRows.filter((r) => r.total === 0).length
@@ -100,17 +76,7 @@ export function StatCanvas() {
         <h3 className="text-sm font-medium">Statistical Score</h3>
         <p className="text-[11px] text-muted-foreground">
           {visibleCardRows.length} scored · {zeroed} failed a test · Total = CV × Pearson × VIF
-          {channel && <> · <span className="text-primary">{channel}</span></>}
         </p>
-      </div>
-      <div className="flex items-center gap-2">
-        <ChannelTypeSelect options={channels} value={channel} onChange={setChannel} />
-        {channel && (
-          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
-            <input type="checkbox" checked={applyAll} onChange={(e) => setApplyAll(e.target.checked)} />
-            apply to all channels
-          </label>
-        )}
       </div>
     </header>
   )

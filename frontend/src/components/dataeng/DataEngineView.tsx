@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { BookMarked, Database, PanelLeftClose, PanelLeftOpen, Plus, Table2 } from 'lucide-react'
+import {
+  BookMarked, Database, Loader2, PanelLeftClose, PanelLeftOpen, Plus, Table2,
+} from 'lucide-react'
 import type { DataAssetStatus } from '../../lib/types'
 import { useSimStore } from '../../store/useSimStore'
 import { Button } from '../ui/button'
@@ -13,14 +15,13 @@ type EngineView = 'assets' | 'schema' | 'indicators'
 const DOT: Record<DataAssetStatus, string> = {
   raw: 'bg-muted-foreground/40',
   reviewed: 'bg-primary',
-  spec: 'bg-primary',
-  cleaned: 'bg-amber-500',
   published: 'bg-emerald-500',
 }
 
 export default function DataEngineView() {
   const assets = useSimStore((s) => s.dataAssets)
   const selectedId = useSimStore((s) => s.selectedDataAssetId)
+  const assetsLoading = useSimStore((s) => s.dataAssetsLoading)
   const { loadDataAssets, loadFiles, createDataAsset, selectDataAsset } = useSimStore.getState()
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
@@ -71,13 +72,15 @@ export default function DataEngineView() {
           </div>
         </div>
 
+        {/* Clicking the active tab returns to the asset it was opened from — with no
+            "Assets" tab of its own, that is the only way back when nothing is selected. */}
         <div className="flex gap-1 border-b border-border p-2">
-          <button type="button" onClick={() => setView('schema')}
+          <button type="button" onClick={() => setView((v) => (v === 'schema' ? 'assets' : 'schema'))}
             className={cn('flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors',
               view === 'schema' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-accent')}>
             <Table2 className="size-3.5" />Schema
           </button>
-          <button type="button" onClick={() => setView('indicators')}
+          <button type="button" onClick={() => setView((v) => (v === 'indicators' ? 'assets' : 'indicators'))}
             className={cn('flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors',
               view === 'indicators' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-accent')}>
             <BookMarked className="size-3.5" />Indicators
@@ -102,7 +105,11 @@ export default function DataEngineView() {
         )}
 
         <div className="min-h-0 flex-1 overflow-auto p-2">
-          {assets.length === 0 ? (
+          {assetsLoading && assets.length === 0 ? (
+            <p className="flex items-center justify-center gap-2 px-2 py-6 text-[12px] text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />Loading assets…
+            </p>
+          ) : assets.length === 0 ? (
             <p className="px-2 py-6 text-center text-[12px] text-muted-foreground">
               No data assets yet. Click + to register one and turn the client's raw data into a reusable asset.
             </p>

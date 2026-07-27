@@ -28,7 +28,7 @@ import type {
 } from '../lib/types'
 import { TASKS } from '../lib/scenario'
 import { bodyToMarkdown } from '../lib/artifact-format'
-import type { LedgerEntry } from '../lib/types'
+import type { ChatMention, LedgerEntry } from '../lib/types'
 import { STAGE_ORDER } from '../lib/profiles'
 import { api, type CreateProjectBody } from '../api/client'
 
@@ -251,7 +251,10 @@ interface SimStore {
   submitAssignment: (taskId: string, note: string, choice?: string) => Promise<void>
   resolveProposal: (proposalId: string, accept: boolean) => Promise<void>
   resolveInsight: (insightId: string, actioned: boolean) => Promise<void>
-  askAssistant: (text: string) => Promise<void>
+  askAssistant: (text: string, mentions?: ChatMention[]) => Promise<void>
+  /** Mentions staged by another surface ("Ask about this chart") for the composer. */
+  pendingMentions: ChatMention[]
+  stageMentions: (mentions: ChatMention[]) => void
   chooseAiOption: (setId: string, optionId: string) => Promise<void>
 
   /** Local-only optimistic artifact edits (manual canvas edits). */
@@ -417,7 +420,7 @@ function blankRuntime(): Partial<SimStore> {
     findings: {},
     events: [],
     toolInvocations: [],
-    assistant: [WELCOME],
+    assistant: [WELCOME], pendingMentions: [],
     ledger: [],
     files: [],
     filesLoading: false,
@@ -499,7 +502,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     findings: {},
     events: [],
     toolInvocations: [],
-    assistant: [WELCOME],
+    assistant: [WELCOME], pendingMentions: [],
     ledger: [],
     files: [],
     filesLoading: false,
@@ -675,15 +678,21 @@ export const useSimStore = create<SimStore>((set, get) => {
       }
     },
 
-    askAssistant: async (text) => {
+    stageMentions: (mentions) => {
+      // Replace rather than append: "Ask about this chart" means this chart, and
+      // a second click on a different chart should not silently ask about both.
+      set({ pendingMentions: mentions, panels: { ...get().panels, assistant: true } })
+    },
+
+    askAssistant: async (text, mentions = []) => {
       if (!text.trim()) return
       const pid = get().activeProjectId
       if (!pid) return
       const state = get()
       // optimistic: show the user's turn immediately
-      set({ assistant: [...state.assistant, { role: 'user', text }] })
+      set({ assistant: [...state.assistant, { role: 'user', text, mentions }], pendingMentions: [] })
       try {
-        const reply = await api.askAssistant(pid, text)
+        const reply = await api.askAssistant(pid, text, mentions)
         set((s) => ({ assistant: [...s.assistant, { role: 'assistant', text: reply.text }] }))
       } catch (e) {
         set((s) => ({

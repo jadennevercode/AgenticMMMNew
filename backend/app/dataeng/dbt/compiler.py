@@ -267,9 +267,16 @@ def _sql_enum_map(step: TransformStep, ref: str, *,
     fld = step.enum_field.strip()
     if not fld:
         raise CompileError(f"enum_map step {step.id} has no field")
-    rows = [e for e in step.enum_map if e.raw.strip() and e.canonical.strip()]
+    # Only confirmed rows reach the data: a low-confidence AI proposal sits in the
+    # step awaiting a human, and standardising on a guess is worse than not yet
+    # standardising at all.
+    rows = [e for e in step.enum_map
+            if e.raw.strip() and e.canonical.strip() and e.status == "accepted"]
     if not rows:
-        raise CompileError(f"enum_map step {step.id} has no accepted mappings")
+        pending = sum(1 for e in step.enum_map if e.status != "accepted")
+        raise CompileError(
+            f"enum_map step {step.id} has no accepted mappings"
+            + (f" — {pending} AI proposal(s) are still awaiting confirmation" if pending else ""))
 
     def body(map_ref: str) -> str:
         return (

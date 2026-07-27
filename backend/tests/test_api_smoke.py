@@ -297,7 +297,7 @@ def test_validation_chain_shape() -> None:
     # 2.5 renders the OLS factor-tree view, not a plain sheet.
     assert bp.ARTIFACT_MAP["a-ols-test"]["format"] == "olsTree"
     assert bp.TASK_MAP["2.6"]["produces"] == ["a-master-data"]
-    assert bp.TASK_MAP["2.6"]["depends_on"] == ["2.5r"]
+    assert bp.TASK_MAP["2.6"]["depends_on"] == ["2.5"]
     # 2.6 is a sliceable feature table, and locking it is a human act (2.6d).
     assert bp.ARTIFACT_MAP["a-master-data"]["format"] == "masterData"
     assert bp.TASK_MAP["2.6d"]["decision"]["id"] == "d-2.6"
@@ -306,31 +306,22 @@ def test_validation_chain_shape() -> None:
     assert {s["id"] for s in bp.STAGES} == {"s1", "s2", "s4", "s5"}
 
 
-def test_ols_setup_process_chain() -> None:
-    """2.5 is a five-step Process on one deliverable: propose → confirm Y →
-    review X → confirm settings → fit. The three middle steps are human gates
-    that produce nothing, so `buildChain` absorbs them into a-ols-test (cf. 2.2d).
-    """
-    chain = ["2.5", "2.5y", "2.5x", "2.5p", "2.5r"]
-    for prev, nxt in zip(chain, chain[1:]):
-        assert bp.TASK_MAP[nxt]["depends_on"] == [prev], nxt
-
-    # The producer proposes; only the last step re-produces the fitted artifact.
-    assert bp.TASK_MAP["2.5"]["produces"] == ["a-ols-test"]
-    assert bp.TASK_MAP["2.5r"]["produces"] == ["a-ols-test"]
-    for tid in ("2.5y", "2.5x", "2.5p"):
-        t = bp.TASK_MAP[tid]
-        assert t["produces"] == [], tid          # absorbed as a step, not a deliverable
-        assert t["klass"] == "H", tid
-        assert t["panel"], tid                   # renders a structured input inline
-
-    # Every gate must carry a recommended option or autopilot would stall.
-    for tid in ("2.5y", "2.5x", "2.5p", "2.5r"):
-        opts = bp.TASK_MAP[tid]["decision"]["options"]
-        assert any(o.get("recommended") for o in opts), tid
-
-    # The seasonality ai_options set was retired — the params panel owns it now.
-    assert "ai_options" not in bp.TASK_MAP["2.5"]
+def test_ols_search_single_task() -> None:
+    """2.5 is now a single automated indicator search (寻优), not a five-step manual
+    config: the AI searches each L4's candidate indicators over repeated fits and
+    the human reviews the chosen selection at the one d-2.5 gate. The old
+    2.5y/2.5x/2.5p/2.5r sub-tasks are gone."""
+    t = bp.TASK_MAP["2.5"]
+    assert t["klass"] == "M", "2.5 runs the search deterministically"
+    assert t["produces"] == ["a-ols-test"]
+    assert t["depends_on"] == ["2.4d"]
+    assert t["decision"]["id"] == "d-2.5"          # the single review gate lives on 2.5
+    assert any(o.get("recommended") for o in t["decision"]["options"])
+    # The former sub-steps must be fully retired from the blueprint.
+    for gone in ("2.5y", "2.5x", "2.5p", "2.5r"):
+        assert gone not in bp.TASK_MAP, gone
+    for gone in ("d-2.5y", "d-2.5x", "d-2.5p"):
+        assert all(t.get("decision", {}).get("id") != gone for t in bp.TASKS), gone
 
 
 def test_ols_gate_drop_feeds_master_data_exclusion() -> None:

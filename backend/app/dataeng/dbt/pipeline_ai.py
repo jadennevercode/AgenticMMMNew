@@ -226,5 +226,94 @@ def suggest_field_map_heuristic(source_columns: list[str],
     for src in source_columns:
         tgt = norm_tgt.get(_norm(src))
         if tgt:
-            out.append(FieldMapEntry(source=src, target=tgt))
+            out.append(FieldMapEntry(source=src, target=tgt, by="ai"))
     return out
+
+
+_CASTS = {"", "integer", "double", "date", "text"}
+
+
+async def suggest_field_map(source_columns: list[str], target_columns: list[str],
+                            target_doc: dict[str, str] | None = None,
+                            samples: dict[str, list[str]] | None = None,
+                            ) -> list[FieldMapEntry]:
+    """Match source columns onto target-schema columns, LLM first, heuristic after.
+
+    Name similarity only gets the easy half — a column called ``销售额`` or ``Amt``
+    means nothing to string matching but plenty to a model reading the target
+    column's definition and a few sample values. Anything the model does not answer
+    for falls back to the heuristic, so the result is never worse than before.
+    """
+    if not source_columns or not target_columns:
+        return []
+    try:
+        lines = []
+        for c in source_columns:
+            vals = (samples or {}).get(c, [])
+            lines.append(f"- {c}" + (f"  e.g. {', '.join(vals[:4])}" if vals else ""))
+        obj = await get_llm().json(
+            system=("Map each source column onto at most one target column of a "
+                    "marketing-mix long table. Return JSON: "
+                    '{"mappings": [{"source": "...", "target": "<a target column '
+                    'or empty string if none fits>", "cast": "<one of \'\', integer, '
+                    'double, date, text>"}]}. Omit a source column entirely rather '
+                    "than forcing a target that does not fit. Never map two source "
+                    "columns onto the same target."),
+            user=(f"Target columns:\n"
+                  + "\n".join(f"- {t}: {(target_doc or {}).get(t, '')}" for t in target_columns)
+                  + "\n\nSource columns:\n" + "\n".join(lines)),
+        )
+        rows = obj.get("mappings", []) if isinstance(obj, dict) else []
+        valid_src, valid_tgt = set(source_columns), set(target_columns)
+        out: list[FieldMapEntry] = []
+        claimed: set[str] = set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            src, tgt = str(r.get("source", "")), str(r.get("target", ""))
+            cast = str(r.get("cast", ""))
+            # The model is grounded, not trusted: a hallucinated column name or a
+            # duplicated target would compile into a mart nobody asked for.
+            if src not in valid_src or tgt not in valid_tgt or tgt in claimed:
+                continue
+            claimed.add(tgt)
+            out.append(FieldMapEntry(source=src, target=tgt,
+                                     cast=cast if cast in _CASTS else "", by="ai"))
+        done = {e.source for e in out}
+        out.extend(e for e in suggest_field_map_heuristic(
+            [c for c in source_columns if c not in done], target_columns)
+            if e.target not in claimed)
+        return out
+    except Exception:  # noqa: BLE001 — LLM unavailable → heuristic
+        return suggest_field_map_heuristic(source_columns, target_columns)
+
+
+async def suggest_sql(instruction: str, input_columns: dict[str, list[str]],
+                      target_columns: list[str],
+                      target_doc: dict[str, str] | None = None) -> tuple[str, str]:
+    """Write the body of a ``custom_sql`` step from a plain-English description.
+
+    Returns ``(sql, error)``. There is no heuristic fallback — without a model there
+    is no way to turn prose into SQL, and inventing one would be worse than saying so.
+    The caller validates the result in the sandbox before it is allowed near the data.
+    """
+    if not instruction.strip():
+        return "", "Describe what this step should do."
+    inputs = "\n".join(f"- {name}: {', '.join(cols)}" for name, cols in input_columns.items())
+    try:
+        obj = await get_llm().json(
+            system=("Write ONE DuckDB SELECT statement. The step's inputs are already "
+                    "available as CTEs named input_1, input_2, … — select from those, "
+                    "never from a table name. Return JSON: "
+                    '{"sql": "select ...", "note": "one line, what it does"}. '
+                    "No DDL, no INSERT/UPDATE/DELETE, no semicolon, no CTE named input_n."),
+            user=(f"Task: {instruction.strip()}\n\nAvailable inputs:\n{inputs}\n\n"
+                  "Target long-table columns:\n"
+                  + "\n".join(f"- {t}: {(target_doc or {}).get(t, '')}" for t in target_columns)),
+        )
+        sql = str(obj.get("sql", "")).strip() if isinstance(obj, dict) else ""
+        if not sql:
+            return "", "The model did not return any SQL."
+        return sql, ""
+    except Exception as e:  # noqa: BLE001
+        return "", f"SQL generation is unavailable: {e}"

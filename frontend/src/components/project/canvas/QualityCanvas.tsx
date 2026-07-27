@@ -1,14 +1,22 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
-import type { QualityDisposition, QualityRow } from '../../../lib/types'
+import { api } from '../../../api/client'
+import type { FactorMap, QualityDisposition, QualityRow } from '../../../lib/types'
 import { useSimStore } from '../../../store/useSimStore'
 import { cn } from '../../../lib/cn'
 import { FactorTreeCanvas } from '../factor-tree/FactorTreeCanvas'
-import { ChannelTypeSelect } from '../factor-tree/ChannelTypeSelect'
 import { indicatorKey } from '../factor-tree/keys'
 import { ledgerOnlyRows } from '../factor-tree/ledgerOnlyRows'
 import { useLedgerIndex } from '../factor-tree/useLedgerIndex'
 import type { FactorCanvasRow, FactorCanvasTone } from '../factor-tree/types'
+
+/** The 2.1 mapping status, as this canvas filters on it. */
+type StatusFilter = 'all' | 'matched' | 'unmatched'
+const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'matched', label: 'Matched' },
+  { id: 'unmatched', label: 'Unmatched' },
+]
 
 const DISPOSITIONS: { id: QualityDisposition; label: string; on: string }[] = [
   { id: 'accept', label: 'Accept', on: 'bg-emerald-500/15 text-emerald-600' },
@@ -34,33 +42,42 @@ const TONE: Record<string, FactorCanvasTone> = { pass: 'ok', borderline: 'warn',
 export function QualityCanvas() {
   const card = useSimStore((s) => s.qualityScorecard)
   const update = useSimStore((s) => s.updateQualityScorecard)
-  const channel = useSimStore((s) => s.s2ChannelFilter)
-  const setChannel = useSimStore((s) => s.setS2ChannelFilter)
+  const projectId = useSimStore((s) => s.activeProjectId)
+  const reportError = useSimStore((s) => s.reportError)
   const { index, blockedBeforeFor, reload } = useLedgerIndex()
   const [selected, setSelected] = useState('')
-  const [applyAll, setApplyAll] = useState(false)
+  const [status, setStatus] = useState<StatusFilter>('all')
+  const [matched, setMatched] = useState<Set<string> | null>(null)
 
-  const cardRows = useMemo(() => card?.rows ?? [], [card])
+  // Quality rows are grouped straight from the modeling table, so they carry no
+  // mapping status of their own — it is joined from the 2.1 factor map by
+  // `indicatorKey(l4, indicator)`. Fetched once here, like the 2.1 canvas does:
+  // it is derived from published indicators, not a polled ProjectState slice.
+  const loadMap = useCallback(() => {
+    if (!projectId) return
+    api.getFactorMap(projectId)
+      .then((m: FactorMap) => setMatched(new Set(
+        m.rows.filter((r) => r.status === 'mapped')
+          .map((r) => indicatorKey(r.l4, r.metric || r.indicator)),
+      )))
+      .catch((e) => { setMatched(null); reportError(e) })
+  }, [projectId, reportError])
 
-  // Data-derived channel options — the distinct model objects the scorecard rows
-  // were screened under. Never hardcoded.
-  const channels = useMemo(
-    () => [...new Set(cardRows.map((r) => r.object).filter(Boolean) as string[])].sort(),
-    [cardRows],
+  useEffect(loadMap, [loadMap])
+
+  const isMatched = useCallback(
+    (l4: string, indicator: string) => matched?.has(indicatorKey(l4, indicator)) ?? false,
+    [matched],
   )
 
-  // A channel is selected → that channel's own rows. "All channels" → each
-  // indicator once (dedup by key, first occurrence) to reproduce the collapsed view.
+  // One national total model — every scorecard row belongs to the single TOTAL
+  // object, so there is no channel dimension to filter or dedup on.
+  const cardRows = useMemo(() => card?.rows ?? [], [card])
   const visibleCardRows = useMemo(() => {
-    if (channel) return cardRows.filter((r) => (r.object ?? '') === channel)
-    const seen = new Set<string>()
-    return cardRows.filter((r) => {
-      const k = indicatorKey(r.l4, r.indicator)
-      if (seen.has(k)) return false
-      seen.add(k)
-      return true
-    })
-  }, [cardRows, channel])
+    if (status === 'all' || matched === null) return cardRows
+    const want = status === 'matched'
+    return cardRows.filter((r) => isMatched(r.l4, r.indicator) === want)
+  }, [cardRows, status, matched, isMatched])
 
   const rows: FactorCanvasRow[] = useMemo(() => {
     const scored = visibleCardRows.map((r) => ({
@@ -75,11 +92,15 @@ export function QualityCanvas() {
         r.completeness.toString(), r.granularity.toString(),
         r.total.toFixed(2),
       ],
-      blockedBy: blockedBeforeFor(r.l4, r.indicator, 'quality', channel || undefined),
+      blockedBy: blockedBeforeFor(r.l4, r.indicator, 'quality', undefined),
     }))
-    const scoredKeys = new Set(visibleCardRows.map((r) => indicatorKey(r.l4, r.indicator)))
-    return [...scored, ...ledgerOnlyRows(index, scoredKeys, 'quality')]
-  }, [visibleCardRows, index, blockedBeforeFor, channel])
+    const scoredKeys = new Set(cardRows.map((r) => indicatorKey(r.l4, r.indicator)))
+    // Ledger-only rows (rejected before 2.2 ever scored them) obey the same
+    // filter — otherwise the filter would visibly leak rows it excluded.
+    const extra = ledgerOnlyRows(index, scoredKeys, 'quality').filter((r) =>
+      status === 'all' || matched === null || isMatched(r.l4, r.indicator) === (status === 'matched'))
+    return [...scored, ...extra]
+  }, [visibleCardRows, cardRows, index, blockedBeforeFor, status, matched, isMatched])
 
   const current: QualityRow | undefined = useMemo(
     () => cardRows.find((r) => r.id === selected),
@@ -91,32 +112,41 @@ export function QualityCanvas() {
   function setDisposition(id: string, disposition: QualityDisposition) {
     // A drop here is a quality-layer verdict every later layer inherits — reload
     // the ledger so the "Denied @ …" badges downstream reflect it immediately.
-    // Default: this channel's row only. "Apply to all channels": every object's
-    // row for the same indicator.
-    const target = cardRows.find((r) => r.id === id)
-    const applies = (r: QualityRow) =>
-      r.id === id ||
-      (applyAll && target != null && indicatorKey(r.l4, r.indicator) === indicatorKey(target.l4, target.indicator))
-    void update({ rows: cardRows.map((r) => (applies(r) ? { ...r, disposition } : r)) }).then(reload)
+    void update({ rows: cardRows.map((r) => (r.id === id ? { ...r, disposition } : r)) }).then(reload)
   }
 
   const header = (
-    <header className="flex items-center justify-between gap-2">
+    <header className="flex flex-wrap items-center justify-between gap-2">
       <div>
         <h3 className="text-sm font-medium">Data Quality Score</h3>
         <p className="text-[11px] text-muted-foreground">
-          {visibleCardRows.length} indicators · {visibleCardRows.filter((r) => r.disposition === 'drop').length} dropped
-          {channel && <> · <span className="text-primary">{channel}</span></>}
+          {status === 'all'
+            ? `${cardRows.length} indicators`
+            : `${visibleCardRows.length} shown of ${cardRows.length} indicators`}
+          {' · '}
+          {visibleCardRows.filter((r) => r.disposition === 'drop').length} dropped
         </p>
       </div>
-      <div className="flex items-center gap-2">
-        <ChannelTypeSelect options={channels} value={channel} onChange={setChannel} />
-        {channel && (
-          <label className="flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground">
-            <input type="checkbox" checked={applyAll} onChange={(e) => setApplyAll(e.target.checked)} />
-            apply to all channels
-          </label>
-        )}
+      <div
+        role="group"
+        aria-label="Filter by Data Processing status"
+        className="inline-flex rounded-md border border-border p-0.5"
+      >
+        {STATUS_FILTERS.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            aria-pressed={status === f.id}
+            disabled={f.id !== 'all' && matched === null}
+            onClick={() => setStatus(f.id)}
+            className={cn(
+              'rounded px-2 py-0.5 text-[11px] transition-colors disabled:opacity-40',
+              status === f.id ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/60',
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
       </div>
     </header>
   )

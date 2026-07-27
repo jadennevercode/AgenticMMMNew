@@ -4,7 +4,8 @@ import {
   PanelRightOpen, Play, RefreshCw, Save, Sparkles, Table2, XCircle,
 } from 'lucide-react'
 import type {
-  DataAsset, DbtWorkspaceInfo, EnumMapEntry, StepKind, TransformPipeline, TransformStep,
+  ColumnValuesResult, DataAsset, DbtWorkspaceInfo, EnumSuggestion, FieldMapSuggestion,
+  InputColumnsResult, SqlSuggestion, StepKind, TransformPipeline, TransformStep,
 } from '../../../lib/types'
 import { api } from '../../../api/client'
 import { useSimStore } from '../../../store/useSimStore'
@@ -45,7 +46,7 @@ const EMPTY_PIPE: TransformPipeline = { steps: [], outputStep: '', note: '' }
 function newStep(kind: StepKind, n: number): TransformStep {
   return {
     id: `step_${Date.now().toString(36)}_${n}`, kind, name: KIND_META[kind].label.toLowerCase(),
-    note: '', inputs: [], fieldMap: [], enumField: '', enumMap: [], join: null,
+    note: '', inputs: [], fieldMap: [], enumField: '', enumTarget: '', enumMap: [], join: null,
     groupBy: [], aggs: [], filterExpr: '', derive: [], sql: '',
   }
 }
@@ -62,6 +63,12 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
   // server pipeline we reconciled against. Used to avoid clobbering unsaved edits.
   const assetIdRef = useRef(asset.id)
   const syncedRef = useRef(JSON.stringify(asset.pipeline ?? EMPTY_PIPE))
+  // Leaving the screen must not throw the work away. The pipeline is configuration —
+  // saving it changes nothing downstream on its own (Build and Publish are separate
+  // gates) — so an unsaved edit is flushed on the way out rather than lost silently.
+  // Keyed on the asset we are *bound to*, not the incoming prop, so the flush on an
+  // asset switch writes the outgoing pipeline to the asset it came from.
+  const pendingRef = useRef({ assetId: asset.id, pipe: EMPTY_PIPE, dirty: false })
   const [selected, setSelected] = useState<string | null>(null)
   const [view, setView] = useState<'table' | 'graph'>('table')
   // A wide result needs the room more than the form does; the inspector folds away.
@@ -72,6 +79,16 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
 
   const refresh = useCallback(async () => setInfo(await dbtStatus(asset.id)), [asset.id, dbtStatus])
   useEffect(() => { void refresh() }, [refresh, asset.updatedAt])
+  // Mirrors the editable state for the unmount / asset-switch flush. Declared before
+  // the reconcile effect so that on an asset change it still holds the outgoing
+  // asset's work when the reconcile effect reads it.
+  useEffect(() => {
+    pendingRef.current = { assetId: assetIdRef.current, pipe, dirty }
+  }, [pipe, dirty])
+  useEffect(() => () => {
+    const { assetId, pipe: last, dirty: unsaved } = pendingRef.current
+    if (unsaved) void putPipeline(assetId, last)
+  }, [putPipeline])
   // Reconcile the local (editable) pipeline with the server copy.
   //  - Switching to a different asset always adopts that asset's pipeline.
   //  - For the same asset, adopt a genuinely-changed server pipeline (after a
@@ -83,6 +100,9 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
     const server = asset.pipeline ?? EMPTY_PIPE
     const serverJson = JSON.stringify(server)
     if (assetIdRef.current !== asset.id) {
+      // Flush the outgoing asset's unsaved edits before adopting the new one's.
+      const prev = pendingRef.current
+      if (prev.dirty && prev.assetId === assetIdRef.current) void putPipeline(prev.assetId, prev.pipe)
       assetIdRef.current = asset.id
       syncedRef.current = serverJson
       setPipe(server)
@@ -93,14 +113,24 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
       syncedRef.current = serverJson
       setPipe(server)
     }
-  }, [asset.id, asset.pipeline, dirty])
+  }, [asset.id, asset.pipeline, dirty, putPipeline])
   useEffect(() => {
     if (!pid) return
     void api.getTargetSchema(pid).then((cols) => setTargetCols(cols.map((c) => c.name)))
   }, [pid])
 
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => { if (pendingRef.current.dirty) e.preventDefault() }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [])
+
   const sources = useMemo(() => info?.sources ?? [], [info])
-  const available = info?.available ?? true
+  const sourceTables = useMemo(() => info?.sourceTables ?? [], [info])
+  const sourceIssues = useMemo(() => info?.sourceIssues ?? [], [info])
+  // Unknown means unavailable: defaulting to true made a failed status call render
+  // "engine ready" and offer a build that could not run.
+  const available = info?.available ?? false
   const statusByStep = useMemo(() => {
     const byModel = new Map((summary?.nodes ?? []).map((n) => [n.name, n.status]))
     const out: Record<string, string> = {}
@@ -131,10 +161,47 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
     () => [...sources.map((s) => `source:${s}`),
            ...pipe.steps.filter((s) => s.id !== activeId).map((s) => s.id)],
     [sources, pipe.steps, activeId])
+  const inputLabel = useCallback((input: string) => {
+    if (input.startsWith('source:')) return input.slice(7)
+    const s = pipe.steps.find((x) => x.id === input)
+    return s ? (s.name || KIND_META[s.kind].label) : input
+  }, [pipe.steps])
+  // Same rule the canvas enforces on a drag, so wiring from the form and wiring on
+  // the graph cannot disagree about what is a legal edge.
+  const wouldCycle = useCallback((input: string, stepId: string) => {
+    if (input.startsWith('source:')) return false
+    if (input === stepId) return true
+    const byId = new Map(pipe.steps.map((s) => [s.id, s]))
+    const reaches = (from: string, target: string, seen = new Set<string>()): boolean => {
+      const s = byId.get(from)
+      if (!s) return false
+      for (const i of s.inputs) {
+        if (i === target) return true
+        if (!seen.has(i)) { seen.add(i); if (reaches(i, target, seen)) return true }
+      }
+      return false
+    }
+    return reaches(input, stepId)
+  }, [pipe.steps])
 
-  const mutate = (next: TransformPipeline) => { setPipe(next); setDirty(true) }
-  const patchStep = (next: TransformStep) =>
-    mutate({ ...pipe, steps: pipe.steps.map((s) => (s.id === next.id ? next : s)) })
+  // Edits compose off the latest pipeline, not the one captured at render: deleting
+  // a node fires both a step delete and an edge delete in the same tick, and two
+  // object-valued updates would have silently discarded the first.
+  const mutate = useCallback((fn: (p: TransformPipeline) => TransformPipeline) => {
+    setPipe(fn)
+    setDirty(true)
+  }, [])
+  const patchStep = useCallback((next: TransformStep) =>
+    mutate((p) => ({ ...p, steps: p.steps.map((s) => (s.id === next.id ? next : s)) })), [mutate])
+  const deleteStep = useCallback((stepId: string) => {
+    mutate((p) => ({
+      ...p,
+      steps: p.steps.filter((s) => s.id !== stepId)
+        .map((s) => ({ ...s, inputs: s.inputs.filter((i) => i !== stepId) })),
+      outputStep: p.outputStep === stepId ? '' : p.outputStep,
+    }))
+    setSelected((cur) => (cur === stepId ? null : cur))
+  }, [mutate])
 
   async function save(): Promise<boolean> {
     if (!pid) return false
@@ -156,18 +223,49 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
     setInstruction('')
     await refresh()
   }
-  const suggestEnum = useCallback(async (field: string, targetColumn: string): Promise<EnumMapEntry[] | null> => {
-    if (!pid) return null
-    try { return await api.suggestEnumMap(pid, asset.id, field, targetColumn) } catch { return null }
-  }, [pid, asset.id])
+  // The in-editor pipeline travels with each of these, so an unsaved rewiring is
+  // reflected in what the AI sees and in the values the field lookup returns.
+  const stepId = selectedStep?.id ?? ''
+  const suggestEnum = useCallback(async (field: string, targetColumn: string): Promise<EnumSuggestion | null> => {
+    if (!pid || !stepId) return null
+    try { return await api.suggestEnumMap(pid, asset.id, pipe, stepId, field, targetColumn) } catch { return null }
+  }, [pid, asset.id, pipe, stepId])
   const clusterEnum = useCallback(async (field: string) => {
-    if (!pid || !selectedStep) return null
-    try { return await api.clusterEnumValues(pid, asset.id, pipe, selectedStep.id, field) } catch { return null }
-  }, [pid, asset.id, pipe, selectedStep])
+    if (!pid || !stepId) return null
+    try { return await api.clusterEnumValues(pid, asset.id, pipe, stepId, field) } catch { return null }
+  }, [pid, asset.id, pipe, stepId])
+  const suggestFieldMap = useCallback(async (): Promise<FieldMapSuggestion | null> => {
+    if (!pid || !stepId) return null
+    try { return await api.suggestFieldMap(pid, asset.id, pipe, stepId) } catch { return null }
+  }, [pid, asset.id, pipe, stepId])
+  const inputColumns = useCallback(async (): Promise<InputColumnsResult> => {
+    if (!pid || !stepId) return { ok: false, error: 'No step selected.', columns: [] }
+    try { return await api.inputColumns(pid, asset.id, pipe, stepId) }
+    catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : 'Could not read the columns.', columns: [] }
+    }
+  }, [pid, asset.id, pipe, stepId])
+  const suggestSql = useCallback(async (instruction: string): Promise<SqlSuggestion | null> => {
+    if (!pid || !stepId) return null
+    try { return await api.suggestSql(pid, asset.id, pipe, stepId, instruction) } catch { return null }
+  }, [pid, asset.id, pipe, stepId])
+  const columnValues = useCallback(async (field: string): Promise<ColumnValuesResult> => {
+    if (!pid || !stepId) return { ok: false, error: 'No step selected.', values: [] }
+    try { return await api.columnValues(pid, asset.id, pipe, stepId, field) }
+    catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : 'Could not read the values.', values: [] }
+    }
+  }, [pid, asset.id, pipe, stepId])
 
   function addStep(kind: StepKind) {
     const s = newStep(kind, pipe.steps.length + 1)
-    mutate({ ...pipe, steps: [...pipe.steps, s], outputStep: pipe.outputStep || s.id })
+    // Wire a new step to whatever is on screen, so it previews immediately instead
+    // of landing disconnected and erroring until the user finds the input picker.
+    const upstream = activeId && activeId !== s.id ? [activeId] : []
+    mutate((p) => ({
+      ...p, steps: [...p.steps, { ...s, inputs: upstream }],
+      outputStep: p.outputStep || s.id,
+    }))
     setSelected(s.id)
     setView('table')
   }
@@ -206,13 +304,32 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
         </Button>
       </Card>
 
+      {sourceIssues.length > 0 && (
+        <Card className="flex shrink-0 items-start gap-2 border-amber-500/30 bg-amber-500/5 p-2.5 text-[11px]">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+          <div className="min-w-0">
+            <p className="font-medium text-amber-800">
+              {sourceIssues.length} uploaded file{sourceIssues.length > 1 ? 's' : ''} produced no table
+            </p>
+            <ul className="mt-0.5 space-y-0.5 text-muted-foreground">
+              {sourceIssues.map((i) => (
+                <li key={i.fileId} className="truncate">
+                  <span className="font-mono">{i.filename || i.fileId}</span> — {i.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </Card>
+      )}
+
       {/* ── steps · data · configuration ── */}
       <div className={cn('grid min-h-0 flex-1 gap-3',
         inspectorOpen ? 'xl:grid-cols-[11.5rem_minmax(0,1fr)_21rem]'
           : 'xl:grid-cols-[11.5rem_minmax(0,1fr)_2.25rem]')}>
         <Card className="min-h-0 overflow-hidden p-0 max-xl:max-h-64">
           <StepList
-            pipeline={pipe} sources={sources} statusByStep={statusByStep}
+            pipeline={pipe} sources={sources} sourceTables={sourceTables}
+            sourceIssueCount={sourceIssues.length} statusByStep={statusByStep}
             selected={activeId} outputId={outputId}
             onSelect={(id) => setSelected(id)} onAdd={addStep}
           />
@@ -223,7 +340,7 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
             <h4 className="min-w-0 truncate text-[12px] font-semibold">
               {view === 'table' ? <>Preview · <span className="font-mono text-primary">{gridTitle}</span></> : 'Pipeline graph'}
             </h4>
-            {view === 'table' && dirty && (
+            {dirty && (
               <span className="shrink-0 whitespace-nowrap rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                 unsaved edits
               </span>
@@ -256,7 +373,9 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
               loading={preview.loading}
               error={preview.data && !preview.data.ok ? preview.data.error : ''}
               emptyMessage={sources.length === 0
-                ? 'Upload raw files in step 1 — the preview reads them directly.'
+                ? (sourceIssues.length > 0
+                  ? 'None of the uploaded files could be read — see the note above.'
+                  : 'Upload raw files in step 1 — the preview reads them directly.')
                 : 'Select a source or step to see its data.'}
             />
           ) : (
@@ -264,14 +383,17 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
               <PipelineCanvas
                 pipeline={pipe} sources={sources} statusByStep={statusByStep}
                 selected={activeId} onSelect={(id) => setSelected(id)}
-                onConnect={(src, tgt) => {
-                  const step = pipe.steps.find((s) => s.id === tgt)
-                  if (step && !step.inputs.includes(src)) patchStep({ ...step, inputs: [...step.inputs, src] })
-                }}
-                onDisconnect={(src, tgt) => {
-                  const step = pipe.steps.find((s) => s.id === tgt)
-                  if (step) patchStep({ ...step, inputs: step.inputs.filter((i) => i !== src) })
-                }}
+                onConnect={(src, tgt) => mutate((p) => ({
+                  ...p,
+                  steps: p.steps.map((s) => (s.id === tgt && !s.inputs.includes(src)
+                    ? { ...s, inputs: [...s.inputs, src] } : s)),
+                }))}
+                onDisconnect={(src, tgt) => mutate((p) => ({
+                  ...p,
+                  steps: p.steps.map((s) => (s.id === tgt
+                    ? { ...s, inputs: s.inputs.filter((i) => i !== src) } : s)),
+                }))}
+                onDeleteStep={deleteStep}
               />
             </div>
           )}
@@ -292,23 +414,23 @@ export function TransformPanel({ asset }: { asset: DataAsset }) {
         <Card className="min-h-0 overflow-hidden p-0 max-xl:min-h-72">
           {selectedStep ? (
             <StepInspector
+              // Remount per step: the inspector holds per-step working state (cluster
+              // proposals, loaded values) that must not carry over to another step.
+              key={selectedStep.id}
               onCollapse={() => setInspectorOpen(false)}
               step={selectedStep} inputOptions={inputOptions}
+              inputLabel={inputLabel} wouldCycle={wouldCycle}
               isOutput={selectedStep.id === outputId} targetColumns={targetCols}
               previewColumns={preview.data?.columns ?? []}
               onChange={patchStep}
-              onDelete={() => {
-                mutate({
-                  ...pipe,
-                  steps: pipe.steps.filter((s) => s.id !== selectedStep.id)
-                    .map((s) => ({ ...s, inputs: s.inputs.filter((i) => i !== selectedStep.id) })),
-                  outputStep: pipe.outputStep === selectedStep.id ? '' : pipe.outputStep,
-                })
-                setSelected(null)
-              }}
-              onMakeOutput={() => mutate({ ...pipe, outputStep: selectedStep.id })}
+              onDelete={() => deleteStep(selectedStep.id)}
+              onMakeOutput={() => mutate((p) => ({ ...p, outputStep: selectedStep.id }))}
               onSuggestEnum={suggestEnum}
               onClusterEnum={clusterEnum}
+              onColumnValues={columnValues}
+              onSuggestFieldMap={suggestFieldMap}
+              onInputColumns={inputColumns}
+              onSuggestSql={suggestSql}
             />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">

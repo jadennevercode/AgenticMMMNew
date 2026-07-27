@@ -36,8 +36,21 @@ DEFAULT_VOCAB = Vocab(
     y_keywords=frozenset({"offtake", "sales", "gmv", "出货", "完成", "volume", "箱数"}),
     y_tags=frozenset({"y", "kpi"}),
     driver_tags=frozenset({"x", "driver", "spending", "spend"}),
-    spend_types=frozenset({"spending", "rmb"}),
-    spend_keywords=frozenset({"spend", "spending", "投放", "费用", "金额", "promotion"}),
+    # A currency unit says "this row is money", not "this is money we spent" —
+    # ``rmb`` used to sit here and classified Value / GMV / sales value / RSP /
+    # Smartpath sales / Average Price as paid spend, giving a price metric an ROI
+    # of incremental/Σprice and flagging a (correctly) negative price coefficient
+    # as a wrong-sign paid driver. Every genuine spend row in the reference data
+    # is caught by ``spend_keywords`` on the metric name, and per-project uploads
+    # carry the explicit ``spending`` tag, so dropping it loses no real spend.
+    spend_types=frozenset({"spending"}),
+    # Aligned with ``indicator_metadata._SPEND_RE``, the semantic classifier every
+    # per-project binding tags through. This bank was missing 花费 / 投入 / 预算 /
+    # budget, so the two disagreed about the most common Chinese spend word of all;
+    # with ``rmb`` gone from ``spend_types`` the name is now the only signal a
+    # reference-taxonomy row has, and the gap would silently drop it from ROI.
+    spend_keywords=frozenset({"spend", "spending", "promotion", "budget",
+                              "花费", "费用", "投放", "金额", "投入", "预算"}),
     volume_keywords=frozenset({"箱", "volume", "unit"}),
     money_keywords=frozenset({"rmb", "value", "gmv", "金额", "元"}),
     y_l1_labels=frozenset({"KPI"}),

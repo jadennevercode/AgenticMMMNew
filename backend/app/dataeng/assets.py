@@ -53,11 +53,15 @@ def touch(asset: DataAsset) -> None:
 
 
 def delete_asset(project_id: str, st, asset_id: str) -> bool:
+    from app.dataeng import preview
+    from app.dataeng.dbt.workspace import Workspace
     before = len(st.data_assets)
     st.data_assets = [a for a in st.data_assets if a.id != asset_id]
     if len(st.data_assets) == before:
         return False
     shutil.rmtree(_asset_dir(project_id, asset_id), ignore_errors=True)
+    Workspace(project_id, asset_id).destroy()
+    preview.invalidate(project_id, asset_id)
     _invalidate(project_id)
     return True
 

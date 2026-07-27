@@ -361,13 +361,15 @@ _ENTRIES: list[_Entry] = [
                     "saturation on the drivers, then OLS against the chosen response.",
         inputSummary="Long table + model object, Y metric, selected X, transform/control params",
         outputSummary="R², adj. R², MAPE, Durbin-Watson, baseline %, per-driver contribution/ROI",
-        wraps="mmm.engine.run_mmm", usedBy=["2.5r"],
+        wraps="mmm.engine.run_mmm", usedBy=["2.5"],
         scenario=(
-            "Called once PER MODEL OBJECT — so a five-object project records five invocations "
-            "per run. Step 2.5 proposes the setup (Y / X / parameters) and 2.5r fits it once "
-            "the human has confirmed each part at 2.5y / 2.5x / 2.5p. The same resolved "
-            "selection drives 2.6 master data and S4 training, so what this tool fits is "
-            "exactly what the model is trained on — never a separately re-derived set."),
+            "Called once PER MODEL OBJECT PER TRIAL FIT — step 2.5 searches each L4's "
+            "candidate indicators over repeated regressions (寻优), keeping the choice that "
+            "lands the factor in its Knowledge ROI / Contribution range, so one run records "
+            "several invocations. The Y comes from the 2.1 Metrics Type; params scale to the "
+            "series length. The chosen selection drives 2.6 master data and S4 training, so "
+            "what this tool fits is exactly what the model is trained on — never a separately "
+            "re-derived set."),
         method=(
             "Each driver is transformed with geometric adstock (carry-over) then a Hill "
             "saturation curve (diminishing returns), optionally joined by trend and seasonality "

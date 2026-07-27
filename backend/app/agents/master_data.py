@@ -109,7 +109,17 @@ def adopted_mask(st: ProjectState, df: pd.DataFrame) -> pd.Series:
         rowsel = ct == obj
         rej = pd.Series([(a, b) in excl or b in metric_only
                          for a, b in zip(l4[rowsel], metric[rowsel])], index=l4[rowsel].index)
-        block = rej if inc is None else (rej | ~metric[rowsel].isin(inc))
+        if inc is None:
+            block = rej
+        else:
+            # `inc` is keyed (norm_l4, norm_metric); legacy configs may still
+            # carry bare metric names, which keep that metric under any L4.
+            inc_pairs = {i for i in inc if isinstance(i, tuple)}
+            inc_metrics = {i for i in inc if isinstance(i, str)}
+            picked = pd.Series([(a, b) in inc_pairs or b in inc_metrics
+                                for a, b in zip(l4[rowsel], metric[rowsel])],
+                               index=l4[rowsel].index)
+            block = rej | ~picked
         keep.loc[rowsel] = ~block
 
     unmapped = ct == ""
@@ -180,16 +190,23 @@ def master_table(
     if grain not in _available_grains(df):
         grain = "month" if "month" in _available_grains(df) else "year"
 
-    # The primary KPI (the response the wide table explains) — prefer the Volume KPI
-    # so it matches the OLS default Y (DATA-011/012), else the most frequent KPI.
+    # The primary KPI (the response the wide table explains) is the response the
+    # user set at 2.1 and the model was fitted on — resolved through the one
+    # authority so the master table cannot headline a different Y than the fit.
+    # Falls back to the Volume-preferring auto-pick for un-configured projects.
     kpi_rows = df[_kpi_mask(df)]
     kpi_metric = ""
     if not kpi_rows.empty:
         from app.agents.indicator_metadata import classify_indicator
+        from app.agents.overrides import resolved_y_metric
         kpi_names = _distinct(kpi_rows, "metric")
-        volume = [m for m in kpi_names if classify_indicator(m).metric_type == "kpi_volume"]
-        kpi_metric = volume[0] if volume else (
-            str(kpi_rows["metric"].mode().iloc[0]) if not kpi_rows["metric"].mode().empty else "")
+        resolved = resolved_y_metric(st, df) or ""
+        if resolved and any(_lower(resolved) == _lower(m) for m in kpi_names):
+            kpi_metric = next(m for m in kpi_names if _lower(m) == _lower(resolved))
+        else:
+            volume = [m for m in kpi_names if classify_indicator(m).metric_type == "kpi_volume"]
+            kpi_metric = volume[0] if volume else (
+                str(kpi_rows["metric"].mode().iloc[0]) if not kpi_rows["metric"].mode().empty else "")
 
     if indicators:
         wanted = {_lower(i) for i in indicators} | {_lower(kpi_metric)}
@@ -237,6 +254,108 @@ def master_table(
     }
 
 
+# ── 2.32 reference shape: granularity reference + data station ──────────────
+# The `model input_2.32.xlsx` deliverable is two sheets: a per-indicator model
+# granularity reference (渠道 scope × 区域 granularity; blank = not selected) and
+# the long-format Data Station (the model-input rows at those granularities).
+
+_NA_TOKENS = {"", "nan", "none", "na", "<na>", "total"}
+
+
+def _clean_set(series: pd.Series) -> list[str]:
+    vals = series.astype("string").str.strip().dropna().tolist()
+    return sorted({v for v in vals if v and v.lower() not in _NA_TOKENS})
+
+
+def _channel_scope(channels: list[str]) -> str:
+    """渠道 scope string: 全渠道 when the indicator is national/all-channel data
+    (no specific channel_type in the raw rows), else the channel-type list."""
+    return "全渠道" if not channels else ",".join(channels)
+
+
+def _region_scope(regions: list[str]) -> str:
+    """区域 granularity: National when the indicator is only national, else the
+    province-group set (e.g. A,B,C,D)."""
+    letters = [r for r in regions if r.lower() != "national"]
+    if not letters:
+        return "National"
+    return ",".join(sorted(letters))
+
+
+def granularity_reference(st: ProjectState) -> list[dict]:
+    """The 模型颗粒度参考表 sheet: every active factor row with its 渠道 scope and
+    区域 granularity (a data fact from the raw per-channel table), blank when the
+    indicator was not adopted into the model."""
+    from app.agents.dataset_cache import raw_long_df
+    from app.agents.ledger import _norm_pair, indicator_ledger
+    from app.dataeng.mapping import resolve_factor_map
+
+    raw = raw_long_df(st)
+    cov: dict[tuple[str, str], tuple[list[str], list[str]]] = {}
+    if not raw.empty and {"l4", "metric", "channel_type", "province_group"} <= set(raw.columns):
+        for (l4, metric), sub in raw.groupby(
+                [raw["l4"].astype("string"), raw["metric"].astype("string")], dropna=False):
+            cov[_norm_pair(l4, metric)] = (_clean_set(sub["channel_type"]),
+                                           _clean_set(sub["province_group"]))
+
+    # The ledger keys its adopted rows by `(l4.strip().lower(), metric.strip().lower())`
+    # — match that exactly (its `_norm_pair`), not `indicator_key`'s space-stripped form.
+    adopted_keys = {r.key for r in indicator_ledger(st) if r.adopted}
+    rows: list[dict] = []
+    for fm in resolve_factor_map(st).rows:
+        metric = fm.metric or fm.indicator
+        key = _norm_pair(fm.l4, metric)
+        adopted = key in adopted_keys
+        channels, regions = cov.get(key, ([], []))
+        rows.append({
+            "l1": fm.l1, "l2": fm.l2, "l3": fm.l3, "l4": fm.l4,
+            "indicator": fm.indicator or metric,
+            "adopted": adopted,
+            # Blank channel + region = not selected into the model (2.32 convention).
+            "channelScope": _channel_scope(channels) if adopted else "",
+            "regionScope": _region_scope(regions) if adopted else "",
+        })
+    return rows
+
+
+# The Data Station columns, in the 2.32 reference order.
+DATA_STATION_COLS = [
+    ("task_name", "Task name"), ("brand", "品牌"), ("province_group", "省份组别"),
+    ("channel_type", "渠道类型"), ("channel", "渠道"), ("year", "年"), ("month", "月"),
+    ("source", "数据源"), ("l1", "数据类型Level1"), ("l2", "数据类型Level2"),
+    ("l3", "数据类型Level3"), ("l4", "数据类型Level4"), ("l5", "数据类型Level5"),
+    ("l6", "数据类型Level6"), ("l7", "数据类型Level7"), ("l8", "数据类型Level8"),
+    ("metric_type", "METRICS类型"), ("metric", "METRICS"), ("value", "VALUE"),
+]
+DATA_STATION_CAP = 5000
+
+
+def data_station(st: ProjectState, *, limit: int = DATA_STATION_CAP) -> dict:
+    """The D.Data Station sheet: the raw per-channel long rows for the **adopted**
+    indicators, at their native channel/region/time granularity."""
+    from app.agents.dataset_cache import raw_long_df
+    from app.agents.ledger import _norm_pair, indicator_ledger
+
+    raw = raw_long_df(st)
+    if raw.empty:
+        return {"columns": [c for _, c in DATA_STATION_COLS], "rows": [],
+                "rowCount": 0, "truncated": False}
+    adopted_keys = {r.key for r in indicator_ledger(st) if r.adopted}
+    keys = [_norm_pair(a, b) for a, b in zip(raw["l4"].astype("string"), raw["metric"].astype("string"))]
+    mask = pd.Series([k in adopted_keys for k in keys], index=raw.index)
+    sub = raw[mask]
+    total = len(sub)
+    truncated = total > limit
+    sub = sub.head(limit)
+    rows = [
+        [None if pd.isna(r.get(col)) else (round(float(r[col]), 2) if col == "value"
+         else str(r.get(col, ""))) for col, _ in DATA_STATION_COLS]
+        for _, r in sub.iterrows()
+    ]
+    return {"columns": [c for _, c in DATA_STATION_COLS], "rows": rows,
+            "rowCount": total, "truncated": truncated}
+
+
 def _kpi_metric(df: pd.DataFrame) -> str:
     """The primary KPI in a slice — prefer the Volume KPI (matches the OLS default Y)."""
     kpi_rows = df[_kpi_mask(df)]
@@ -272,50 +391,31 @@ def _wide_frame(st: ProjectState, df: pd.DataFrame, grain: str):
     return cols, wide
 
 
-def build_export(
-    st: ProjectState,
-    *,
-    brand: Optional[list[str]] = None,
-    province_group: Optional[list[str]] = None,
-    channel_type: Optional[list[str]] = None,
-    channel: Optional[list[str]] = None,
-    grain: str = "month",
-) -> bytes:
-    """The full adopted feature matrix as xlsx — one sheet per Channel Type, NOT
-    subject to the master-table display cap. Each channel carries its own adopted
-    indicators (the per-object mask), so different channels export different columns.
-    """
+def build_export(st: ProjectState, **_ignored) -> bytes:
+    """The 2.32 ``model input`` deliverable as xlsx: two sheets —
+    ``模型颗粒度参考表`` (per-indicator 渠道 scope × 区域 granularity) and
+    ``D.Data Station`` (the adopted indicators' raw long rows). Uncapped."""
     from io import BytesIO
     import openpyxl
-    from app.agents.dataset_cache import model_objects
-
-    try:
-        df = _adopted_df(st)
-    except Exception:  # noqa: BLE001 — no bound data; return an empty workbook
-        df = pd.DataFrame()
-    if not df.empty:
-        df = _apply_dims(df, {"brand": brand, "provinceGroup": province_group, "channel": channel})
-
-    objs = model_objects(st)
-    if channel_type:
-        wanted = {_lower(c) for c in channel_type}
-        objs = [o for o in objs if _lower(o) in wanted]
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-    for obj in objs:
-        sub = df[df["channel_type"].astype("string").str.strip() == obj] if not df.empty else df
-        if sub.empty:
-            continue
-        g = grain if grain in _available_grains(sub) else ("month" if "month" in _available_grains(sub) else "year")
-        cols, wide = _wide_frame(st, sub, g)
-        if not cols:
-            continue
-        ws = wb.create_sheet(title=str(obj)[:31] or "sheet")
-        ws.append(["Period"] + [str(c) for c in cols])
-        for k in wide.index:
-            ws.append([_period_label(int(k), g)]
-                      + [None if pd.isna(v := wide.at[k, c]) else round(float(v), 2) for c in cols])
+
+    # Sheet 1 — 模型颗粒度参考表
+    ws1 = wb.create_sheet(title="模型颗粒度参考表")
+    ws1.append(["生意因子-Level 1", "生意因子-Level 2", "生意因子-Level 3",
+                "生意影响因子-Level 4", "指标选择", "渠道", "区域"])
+    for r in granularity_reference(st):
+        ws1.append([r["l1"], r["l2"], r["l3"], r["l4"], r["indicator"],
+                    r["channelScope"], r["regionScope"]])
+
+    # Sheet 2 — D.Data Station (uncapped)
+    ws2 = wb.create_sheet(title="D.Data Station")
+    ds = data_station(st, limit=10_000_000)
+    ws2.append(ds["columns"])
+    for row in ds["rows"]:
+        ws2.append(row)
+
     if not wb.sheetnames:
         wb.create_sheet(title="empty")
     buf = BytesIO()

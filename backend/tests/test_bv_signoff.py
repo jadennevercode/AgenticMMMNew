@@ -56,6 +56,35 @@ def test_bv_pairs_land_in_the_ledger_key_space() -> None:
     print("✓ bv pairs land in the ledger key space")
 
 
+def test_signoff_key_shape_is_mirrored_by_the_frontend() -> None:
+    """`st.signoffs` keys are read by the UI, so their shape is a contract.
+
+    The frontend has its own `signoffKey` (validation/signoff.ts). When the object
+    segment was added here and not there, every verdict the UI wrote was read back
+    under a key that no longer existed: the Y/N buttons stayed blank however many
+    times they were pressed. This pins the exact string both sides must produce.
+    """
+    from pathlib import Path
+
+    from app.agents.ledger import OBJECT_ANY, signoff_key
+
+    assert OBJECT_ANY == "*"
+    assert signoff_key(" 陈列 ", " 费用 ") == "i:*:陈列|费用"
+    assert signoff_key("TT Display", "Spend", "MT") == "i:MT:tt display|spend"
+
+    ts = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "components"
+          / "project" / "validation" / "signoff.ts")
+    if not ts.exists():
+        print("  ~ frontend not present, skipped the mirror check")
+        return
+    src = ts.read_text(encoding="utf-8")
+    assert "i:${object || OBJECT_ANY}:${l4.trim().toLowerCase()}|${indicator.trim().toLowerCase()}" in src, \
+        "frontend signoffKey no longer mirrors ledger.signoff_key"
+    assert "export const OBJECT_ANY = '*'" in src
+    print("✓ signoff key shape is mirrored by the frontend")
+
+
 if __name__ == "__main__":
     test_bv_groups_carry_their_indicator_pairs()
     test_bv_pairs_land_in_the_ledger_key_space()
+    test_signoff_key_shape_is_mirrored_by_the_frontend()

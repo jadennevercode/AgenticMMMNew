@@ -252,10 +252,13 @@ def test_build_ols_review_shape() -> None:
         print(f"  ~ skipped test_build_ols_review_shape ({e})")
         return
 
-    assert set(body) == {"objects", "tree", "summary", "setup", "note"}
+    # `search` carries the per-L4 indicator search's trial record; it is None until
+    # the 2.5 handler runs the search and attaches it.
+    assert set(body) == {"objects", "tree", "summary", "setup", "note", "search"}
     assert set(body["setup"]) >= {"dataSource", "roiUnit", "configured", "selectedX", "totalX"}
     s = body["summary"]
-    assert set(s) == {"total", "inModel", "inRange", "flagged", "noBenchmark", "notInModel", "dropped"}
+    assert set(s) == {"total", "inModel", "inRange", "flagged", "noBenchmark",
+                      "notInModel", "notMapped", "dropped"}
     assert s["total"] == len(body["tree"])
     # camelCase keys present on rows / objects.
     if body["tree"]:
@@ -263,13 +266,139 @@ def test_build_ols_review_shape() -> None:
         for k in ("tValue", "pValue", "roiRange", "contributionRange", "rangeSource",
                   "roiStatus", "contributionStatus", "status", "flagReason", "results"):
             assert k in row, f"missing key {k}"
-        assert row["status"] in {"inRange", "review", "noBenchmark", "notInModel", "dropped"}
+        assert row["status"] in {"inRange", "review", "noBenchmark", "notInModel",
+                                 "notMapped", "dropped"}
     if body["objects"]:
         assert "adjR2" in body["objects"][0] and "durbinWatson" in body["objects"][0]
     # flagged list mirrors the review rows.
     assert len(flagged) == s["flagged"]
     for f in flagged:
-        assert set(f) == {"l4", "indicator", "reason"}
+        # `object` rides along so a flag can be attributed to the model that
+        # raised it (one national TOTAL today, historically one per channel).
+        assert set(f) == {"l4", "indicator", "reason", "object"}
+
+
+def test_search_tries_every_candidate_not_only_out_of_range_factors() -> None:
+    """The regression the search exists to prevent.
+
+    It used to skip any factor whose range status was not exactly ``out`` — and
+    with most factors carrying no Knowledge benchmark at all, that meant it never
+    tried an alternate indicator for them. The whole "per-L4 optimisation" ran a
+    handful of fits and the Build process had nothing to show. Every factor with
+    more than one candidate must now be tried, and every trial recorded.
+    """
+    from app.agents.ols_review import build_ols_search
+
+    from app.store.state import get_store
+    st = get_store().get("danone-mizone")
+    if st is None or st.factor_tree is None:
+        print("  ~ skipped test_search_tries_every_candidate (no seeded project)")
+        return
+    try:
+        _cfg, trace = build_ols_search(st, max_fits=40, max_seconds=60.0)
+    except Exception as e:  # noqa: BLE001 — reference dataset likely absent
+        print(f"  ~ skipped test_search_tries_every_candidate ({e})")
+        return
+
+    assert trace["fits"] >= 1
+    assert trace["candidates"] >= trace["l4Searched"], \
+        "every searched factor contributes at least its own candidate"
+    # One trial record per (factor, indicator) actually fitted — the metrics the
+    # reviewer needs to answer "why this indicator and not that one".
+    assert trace["trials"], "the search must record what it tried"
+    for t in trace["trials"]:
+        assert set(t) >= {"l4", "indicator", "r2", "coef", "tValue", "pValue",
+                          "roi", "contribution", "roiStatus", "contributionStatus",
+                          "signExpected", "signCorrect"}
+    # A factor with alternates must have had them fitted, not skipped for lack of
+    # a benchmark.
+    multi = [f for f in trace["perFactor"] if len(f["candidates"]) > 1]
+    for f in multi:
+        tried = {t["indicator"] for t in trace["trials"] if t["l4"] == f["l4"]}
+        assert len(tried) > 1, f"{f['l4']} had {len(f['candidates'])} candidates but only tried {tried}"
+    print(f"    ({trace['fits']} fits · {trace['candidates']} candidates · "
+          f"{len(multi)} multi-candidate factor(s) · {len(trace['trials'])} trials recorded)")
+
+
+def test_search_loop_tries_every_alternate_even_without_a_benchmark() -> None:
+    """The search loop itself, on a factor set with real alternates.
+
+    The seeded project happens to have one surviving candidate per factor, so the
+    integration test above cannot exercise a swap. This drives the loop directly:
+    three factors × two candidates, none of them benchmarked (status ``none``), and
+    the second candidate of one factor is the better model. The old loop skipped
+    every factor whose status was not ``out`` — so it would try nothing here and
+    return the seed.
+    """
+    from app.agents import ols_review as orv
+    from app.domain.models import OlsConfig, OlsXCandidate
+
+    cands = [
+        OlsXCandidate(key=f"{l4}|{m}", l4=l4, indicator=m, metric=m,
+                      selected=False, pearson=p)
+        for l4, m, p in [("A", "a1", 0.9), ("A", "a2", 0.4),
+                         ("B", "b1", 0.8), ("B", "b2", 0.3),
+                         ("C", "c1", 0.7), ("C", "c2", 0.2)]
+    ]
+    proposal = OlsConfig(xCandidates=cands)
+
+    # 'b2' is the better choice; everything else is indistinguishable. No factor
+    # carries a benchmark, so `in_range` is 0 throughout and only the sign term
+    # and R² can separate the trials.
+    def fake_score(_st, cfg):
+        picked = {c.metric for c in cfg.x_candidates if c.selected}
+        signed = 1 if "b2" in picked else 0
+        return orv.SearchScore(
+            in_range=0, signed_ok=signed, r2=0.5 + 0.1 * signed,
+            per_l4={"a": "none", "b": "none", "c": "none"},
+            trials=[{"l4": c.l4, "indicator": c.metric, "r2": 0.5,
+                     "coef": 1.0, "tValue": 2.0, "pValue": 0.05, "significant": True,
+                     "signExpected": True, "signCorrect": c.metric == "b2",
+                     "roi": None, "contribution": None,
+                     "roiStatus": "none", "contributionStatus": "none",
+                     "roiRange": "", "contributionRange": ""}
+                    for c in cfg.x_candidates if c.selected],
+        )
+
+    real_proposal, real_score = orv.build_ols_proposal, orv._search_score
+    orv.build_ols_proposal, orv._search_score = (lambda _st: proposal), fake_score
+    try:
+        cfg, trace = orv.build_ols_search(ProjectState(), max_fits=40, max_seconds=30.0)
+    finally:
+        orv.build_ols_proposal, orv._search_score = real_proposal, real_score
+
+    # Seed (a1/b1/c1) + one alternate per factor = 4 fits in pass 1; pass 1
+    # improved, so a confirming second pass runs. What matters is that every
+    # factor's alternate was actually fitted, not the exact count.
+    assert trace["fits"] >= 4, trace["fits"]
+    assert trace["candidates"] == 6 and trace["l4Searched"] == 3
+    assert trace["swaps"] == 1, "the better alternate must have been adopted"
+    chosen = {c.l4: c.metric for c in cfg.x_candidates if c.selected}
+    assert chosen == {"A": "a1", "B": "b2", "C": "c1"}, chosen
+    # Every alternate that was fitted is in the record, winner or not.
+    tried_b = {t["indicator"] for t in trace["trials"] if t["l4"] == "B"}
+    assert tried_b == {"b1", "b2"}, tried_b
+
+
+def test_search_does_not_persist_a_trial_configuration() -> None:
+    """A trial must never look like a decision. The search used to write each
+    candidate assignment to `st.ols_config`, so a crash mid-search left a trial
+    persisted as if a human had confirmed it."""
+    from app.agents.ols_review import build_ols_search
+
+    from app.store.state import get_store
+    st = get_store().get("danone-mizone")
+    if st is None or st.factor_tree is None:
+        print("  ~ skipped test_search_does_not_persist (no seeded project)")
+        return
+    before = getattr(st, "ols_config", None)
+    try:
+        build_ols_search(st, max_fits=6, max_seconds=30.0)
+    except Exception as e:  # noqa: BLE001
+        print(f"  ~ skipped test_search_does_not_persist ({e})")
+        return
+    assert getattr(st, "ols_config", None) is before, \
+        "the search must leave the project's saved configuration untouched"
 
 
 if __name__ == "__main__":

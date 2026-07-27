@@ -46,9 +46,35 @@ def default_target_schema() -> list[TargetColumn]:
     return cols
 
 
+# Columns the engine writes and depends on. `source` carries per-row origin (which
+# uploaded file / sheet a row came from) and is stamped automatically by the
+# compiler; the Data module reads it as a filter. Nobody edits its values, and
+# removing the column would silently switch provenance off for the whole project,
+# so it is restored rather than treated as a user choice.
+SYSTEM_COLUMNS = ("source",)
+
+
+def _with_system_columns(cols: list[TargetColumn]) -> list[TargetColumn]:
+    by_name = {c.name: c for c in cols}
+    defaults = {c.name: c for c in default_target_schema()}
+    out = list(cols)
+    for name in SYSTEM_COLUMNS:
+        if name in by_name:
+            by_name[name].system = True
+        elif name in defaults:
+            restored = defaults[name].model_copy()
+            restored.system = True
+            out.append(restored)
+    return out
+
+
 def schema_for(st) -> list[TargetColumn]:
-    """The project's target schema, or the default if none has been customised."""
-    return st.target_schema if st.target_schema else default_target_schema()
+    """The project's target schema, or the default if none has been customised.
+
+    System columns are always present — see :data:`SYSTEM_COLUMNS`.
+    """
+    return _with_system_columns(
+        list(st.target_schema) if st.target_schema else default_target_schema())
 
 
 def columns_and_docs(st) -> tuple[list[str], dict[str, str]]:

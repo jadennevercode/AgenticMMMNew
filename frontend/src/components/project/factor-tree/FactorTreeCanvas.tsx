@@ -51,6 +51,14 @@ function layout(rows: FactorCanvasRow[]): Laid[] {
  * Repeated parent values are merged vertically (shown once per run), giving the
  * editorial-table hierarchy without a repeated-value grid. The component owns no
  * data and derives no verdicts: modules pass rows built from their own slice.
+ *
+ * **Uniform typography.** Every cell renders at the same weight and the same
+ * colour. The hierarchy is carried by the column order and the vertical merge,
+ * not by weight or opacity: the old ladder (semibold L1, 80%/70%/45%/40% opacity
+ * per level, muted L4, medium Indicator) made a wide row read as five different
+ * kinds of text and made a repeated parent look disabled. Emphasis is reserved
+ * for the things that actually differ per row — the status chip and the blocked
+ * state.
  */
 export function FactorTreeCanvas({
   rows,
@@ -99,20 +107,20 @@ export function FactorTreeCanvas({
         <table className="w-full min-w-[720px] border-collapse text-[11.5px]">
           <thead>
             <tr className="border-b border-border text-left text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-              <th className="px-2 py-1.5 font-semibold">L1</th>
-              <th className="px-2 py-1.5 font-medium">L2</th>
-              <th className="px-2 py-1.5 font-medium">L3</th>
-              <th className="px-2 py-1.5 font-medium">L4</th>
-              <th className="px-2 py-1.5 font-medium">Indicator</th>
+              <th className="px-2 py-1.5 font-normal">L1</th>
+              <th className="px-2 py-1.5 font-normal">L2</th>
+              <th className="px-2 py-1.5 font-normal">L3</th>
+              <th className="px-2 py-1.5 font-normal">L4</th>
+              <th className="px-2 py-1.5 font-normal">Indicator</th>
               {columns.map((c) => (
-                <th key={c} className="px-2 py-1.5 text-right font-medium">{c}</th>
+                <th key={c} className="px-2 py-1.5 text-right font-normal">{c}</th>
               ))}
-              <th className="px-2 py-1.5 font-medium">Status</th>
-              {actions && <th className="px-2 py-1.5 font-medium">Action</th>}
+              <th className="px-2 py-1.5 font-normal">Status</th>
+              {actions && <th className="px-2 py-1.5 font-normal">Action</th>}
             </tr>
           </thead>
           <tbody>
-            {laid.map(({ row: r, groupKey, firstL1, firstL2, firstL3, groupFirst, groupCount }) => {
+            {laid.map(({ row: r, groupKey, firstL1, firstL3, groupFirst, groupCount }) => {
               const isCollapsed = collapsed.has(groupKey)
               // A collapsed group shows only a single summary row (its first).
               if (isCollapsed && !groupFirst) return null
@@ -120,7 +128,7 @@ export function FactorTreeCanvas({
               if (isCollapsed) {
                 return (
                   <tr key={groupKey} className="border-b border-border/40 bg-muted/20">
-                    <td className="px-2 py-1 align-top font-semibold">
+                    <td className="px-2 py-1 align-top">
                       <button
                         type="button"
                         onClick={() => toggle(groupKey)}
@@ -130,9 +138,9 @@ export function FactorTreeCanvas({
                         <span>{r.l1 || '—'}</span>
                       </button>
                     </td>
-                    <td className="px-2 py-1 align-top text-muted-foreground">{r.l2}</td>
-                    <td className="px-2 py-1 align-top text-muted-foreground">{r.l3}</td>
-                    <td className="px-2 py-1 align-top text-muted-foreground/60" colSpan={2 + columns.length + lastCols}>
+                    <td className="px-2 py-1 align-top">{r.l2}</td>
+                    <td className="px-2 py-1 align-top">{r.l3}</td>
+                    <td className="px-2 py-1 align-top text-muted-foreground" colSpan={2 + columns.length + lastCols}>
                       {groupCount} indicator{groupCount === 1 ? '' : 's'} — collapsed
                     </td>
                   </tr>
@@ -149,11 +157,12 @@ export function FactorTreeCanvas({
                     selectedKey === r.key && 'bg-accent',
                   )}
                 >
-                  <td className="px-2 py-1 align-top font-semibold">
-                    {firstL1 ? r.l1 || '—' : ''}
-                  </td>
-                  <td className="px-2 py-1 align-top text-foreground/80">{firstL2 ? r.l2 : ''}</td>
-                  <td className="px-2 py-1 align-top text-foreground/70">
+                  {/* Every level shows its value on every row, at the same weight
+                      and colour. The run-start flags now drive only the collapse
+                      affordance and the group rule — never the type treatment. */}
+                  <td className="px-2 py-1 align-top">{r.l1 || '—'}</td>
+                  <td className="px-2 py-1 align-top">{r.l2}</td>
+                  <td className="px-2 py-1 align-top">
                     {firstL3 ? (
                       <button
                         type="button"
@@ -164,12 +173,14 @@ export function FactorTreeCanvas({
                         <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground/60" />
                         <span>{r.l3}</span>
                       </button>
-                    ) : ''}
+                    ) : (
+                      <span className="flex items-center gap-1 pl-4">{r.l3}</span>
+                    )}
                   </td>
-                  <td className="px-2 py-1 align-top text-muted-foreground">{r.l4}</td>
-                  <td className="px-2 py-1 align-top font-medium">{r.indicator}</td>
+                  <td className="px-2 py-1 align-top">{r.l4}</td>
+                  <td className="px-2 py-1 align-top">{r.indicator}</td>
                   {columns.map((c, i) => (
-                    <td key={c} className="px-2 py-1 text-right align-top tabular-nums text-muted-foreground">
+                    <td key={c} className="px-2 py-1 text-right align-top tabular-nums">
                       {r.cells?.[i] ?? ''}
                     </td>
                   ))}

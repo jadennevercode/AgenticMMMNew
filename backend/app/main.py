@@ -337,9 +337,15 @@ async def download_file(project_id: str, file_id: str) -> FileResponse:
 
 @app.delete("/api/projects/{project_id}/files/{file_id}")
 async def delete_file(project_id: str, file_id: str) -> dict:
-    _require_state(project_id)
+    from app.dataeng import preview
+    st = _require_state(project_id)
     if not get_files().delete(project_id, file_id):
         raise HTTPException(404, "file not found")
+    # A data asset still listing this file must re-read its sources, or the editor
+    # keeps previewing a table whose file is gone.
+    for asset in st.data_assets:
+        if file_id in asset.source_file_ids:
+            preview.invalidate(project_id, asset.id)
     return {"ok": True}
 
 
@@ -565,8 +571,15 @@ async def dbt_generate(project_id: str, asset_id: str, body: GenerateBody | None
 
 @app.get("/api/projects/{project_id}/data-assets/{asset_id}/pipeline")
 async def get_pipeline(project_id: str, asset_id: str) -> dict:
+    from app.dataeng import preview
+    from app.dataeng.sources import heal_pipeline_inputs
     _, asset = _require_asset(project_id, asset_id)
     pipe = asset.pipeline or TransformPipeline()
+    # Persist the one-off re-pointing of inputs stranded by the pre-stable raw
+    # table naming, so the editor loads a pipeline that actually compiles.
+    if heal_pipeline_inputs(pipe, preview.cached_sources(project_id, asset).tables):
+        asset.pipeline = pipe
+        get_store().save(project_id)
     return pipe.model_dump(by_alias=True)
 
 
@@ -579,16 +592,32 @@ async def put_pipeline(project_id: str, asset_id: str, body: TransformPipeline) 
 
 
 class SuggestEnumBody(BaseModel):
+    """Ground the suggestion on the values reaching the step, not on the raw files:
+    an enum step usually sits downstream of a rename, so the column it standardises
+    exists only in the pipeline stream."""
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""
     field: str
     targetColumn: str
 
 
 @app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/suggest-enum")
-async def pipeline_suggest_enum(project_id: str, asset_id: str, body: SuggestEnumBody) -> list[dict]:
+async def pipeline_suggest_enum(project_id: str, asset_id: str, body: SuggestEnumBody) -> dict:
     from app.dataeng.dbt import service
     st, asset = _require_asset(project_id, asset_id)
-    entries = await service.suggest_enum_map(st, project_id, asset, body.field, body.targetColumn)
-    return [e.model_dump(by_alias=True) for e in entries]
+    if not body.field.strip():
+        raise HTTPException(422, "field is required")
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+    upstream, err = _upstream_of(pipe, body.stepId)
+    if err:
+        return {"ok": False, "error": err, "entries": []}
+    step = next((s for s in (pipe.steps if pipe else []) if s.id == body.stepId), None)
+    entries, error = await service.suggest_enum_map(
+        st, project_id, asset, pipe, upstream, body.field.strip(), body.targetColumn,
+        existing=(step.enum_map if step else []))
+    if error:
+        return {"ok": False, "error": error, "entries": []}
+    return {"ok": True, "error": "", "entries": [e.model_dump(by_alias=True) for e in entries]}
 
 
 class PreviewBody(BaseModel):
@@ -618,6 +647,108 @@ async def pipeline_preview(project_id: str, asset_id: str, body: PreviewBody) ->
     }
 
 
+class InputColumnsBody(BaseModel):
+    """Columns available at a step — the field-map editor cannot ask a person to
+    name source columns it has never shown them."""
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""            # the step whose *input* is read, or 'source:<table>'
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/input-columns")
+async def pipeline_input_columns(project_id: str, asset_id: str, body: InputColumnsBody) -> dict:
+    from app.dataeng import preview
+    st, asset = _require_asset(project_id, asset_id)
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+    upstream, err = _upstream_of(pipe, body.stepId)
+    if err:
+        return {"ok": False, "error": err, "columns": []}
+    columns, error = preview.input_columns(st, project_id, asset, pipe, upstream)
+    return {"ok": not error, "error": error, "columns": columns}
+
+
+class SuggestFieldMapBody(BaseModel):
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/suggest-field-map")
+async def pipeline_suggest_field_map(project_id: str, asset_id: str,
+                                     body: SuggestFieldMapBody) -> dict:
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+    upstream, err = _upstream_of(pipe, body.stepId)
+    if err:
+        return {"ok": False, "error": err, "entries": []}
+    step = next((s for s in (pipe.steps if pipe else []) if s.id == body.stepId), None)
+    entries, error = await service.suggest_field_map(
+        st, project_id, asset, pipe, upstream, existing=(step.field_map if step else []))
+    if error:
+        return {"ok": False, "error": error, "entries": []}
+    return {"ok": True, "error": "", "entries": [e.model_dump(by_alias=True) for e in entries]}
+
+
+class SuggestSqlBody(BaseModel):
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""
+    instruction: str
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/suggest-sql")
+async def pipeline_suggest_sql(project_id: str, asset_id: str, body: SuggestSqlBody) -> dict:
+    """Draft a custom_sql step from plain English (validated in the sandbox first)."""
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+    sql, error = await service.suggest_sql(
+        st, project_id, asset, pipe, body.stepId, body.instruction)
+    return {"ok": not error, "error": error, "sql": sql}
+
+
+class ColumnValuesBody(BaseModel):
+    """Distinct values of one column as they reach a step — the enum editor's
+    ground truth. Like the preview, the pipeline travels with the request so an
+    unsaved rewiring is reflected immediately."""
+    pipeline: Optional[TransformPipeline] = None
+    stepId: str = ""            # the step whose *input* is read, or 'source:<table>'
+    column: str
+    limit: int = 500
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/column-values")
+async def pipeline_column_values(project_id: str, asset_id: str, body: ColumnValuesBody) -> dict:
+    from app.dataeng import preview
+    st, asset = _require_asset(project_id, asset_id)
+    if not body.column.strip():
+        raise HTTPException(422, "column is required")
+    pipe = body.pipeline if body.pipeline is not None else asset.pipeline
+    upstream, err = _upstream_of(pipe, body.stepId)
+    if err:
+        return {"ok": False, "error": err, "values": []}
+    values, error = preview.column_values(
+        st, project_id, asset, pipe, upstream, body.column.strip(), limit=body.limit)
+    if error:
+        return {"ok": False, "error": error, "values": []}
+    return {"ok": True, "error": "", "values": [[v, n] for v, n in values]}
+
+
+def _upstream_of(pipe, step_id: str) -> tuple[str, str]:
+    """Resolve what a step *reads* — its first input, or the source token itself.
+
+    Enum standardisation is decided against the values arriving at a step, never
+    the ones it has already rewritten, so both the value list and the clustering
+    key on the upstream rather than the step.
+    """
+    if step_id.startswith("source:"):
+        return step_id, ""
+    step = next((s for s in (pipe.steps if pipe else []) if s.id == step_id), None)
+    if step is None:
+        return "", f"step {step_id!r} is not in this pipeline"
+    if not step.inputs:
+        return "", "Connect an input to this step first."
+    return step.inputs[0], ""
+
+
 class ClusterEnumBody(BaseModel):
     """Cluster the values reaching an enum_map step, so near-duplicate spellings
     are reviewed as one decision instead of row by row."""
@@ -634,15 +765,9 @@ async def pipeline_cluster_enum(project_id: str, asset_id: str, body: ClusterEnu
         raise HTTPException(422, "field is required")
     pipe = body.pipeline if body.pipeline is not None else asset.pipeline
 
-    upstream = body.stepId
-    if not upstream.startswith("source:"):
-        step = next((s for s in (pipe.steps if pipe else []) if s.id == body.stepId), None)
-        if step is None:
-            raise HTTPException(404, f"step {body.stepId!r} not found in the pipeline")
-        if not step.inputs:
-            return {"ok": False, "error": "Connect an input to this step first.",
-                    "values": 0, "clusters": []}
-        upstream = step.inputs[0]
+    upstream, err = _upstream_of(pipe, body.stepId)
+    if err:
+        return {"ok": False, "error": err, "values": 0, "clusters": []}
 
     values, error = preview.column_values(
         st, project_id, asset, pipe, upstream, body.field.strip())
@@ -701,15 +826,30 @@ async def dbt_preview(project_id: str, asset_id: str, model: str, limit: int = 5
 @app.get("/api/projects/{project_id}/data-assets/{asset_id}/raw-preview")
 async def raw_preview(project_id: str, asset_id: str, table: str, limit: int = 50) -> dict:
     """Preview a raw source table (before any transform) straight from the files."""
-    from app.dataeng.sources import asset_tables
+    from app.dataeng import preview
     from app.dataeng.dbt.service import _df_payload
     _, asset = _require_asset(project_id, asset_id)
-    tables = asset_tables(project_id, asset)
+    tables = preview.cached_sources(project_id, asset).tables
     if table not in tables:
         raise HTTPException(404, f"raw table {table!r} not found")
     return _df_payload(tables[table], cap=limit)
 
 
+
+
+class FullSqlBody(BaseModel):
+    """Compile the whole pipeline to one SQL statement. The pipeline may travel with
+    the request so the editor can show the compiled result before saving."""
+    pipeline: Optional[TransformPipeline] = None
+
+
+@app.post("/api/projects/{project_id}/data-assets/{asset_id}/pipeline/full-sql")
+async def pipeline_full_sql(project_id: str, asset_id: str,
+                            body: FullSqlBody | None = None) -> dict:
+    from app.dataeng.dbt import service
+    st, asset = _require_asset(project_id, asset_id)
+    sql, error = service.full_sql(st, project_id, asset, body.pipeline if body else None)
+    return {"ok": not error, "error": error, "sql": sql}
 
 
 @app.post("/api/projects/{project_id}/data-assets/{asset_id}/dbt/publish")
@@ -734,10 +874,13 @@ async def get_target_schema(project_id: str) -> list[dict]:
 
 @app.put("/api/projects/{project_id}/target-schema")
 async def put_target_schema(project_id: str, body: list[TargetColumn]) -> list[dict]:
+    from app.dataeng.dbt import target_schema
     st = _require_state(project_id)
-    st.target_schema = body
+    # Re-assert the engine-owned columns: dropping `source` here would silently turn
+    # off per-row provenance for every asset in the project.
+    st.target_schema = target_schema._with_system_columns(list(body))
     get_store().save(project_id)
-    return [c.model_dump(by_alias=True) for c in body]
+    return [c.model_dump(by_alias=True) for c in st.target_schema]
 
 
 @app.get("/api/projects/{project_id}/indicators")
@@ -761,7 +904,8 @@ class ValidationSeriesQuery(BaseModel):
     channelType: list[str] = []
     provinceGroup: list[str] = []
     timeWindowId: str = ""   # DATA-005: scope + comparison against a saved time window
-    kpiMetric: str = ""      # DATA-009: which KPI (Volume/Value) is the backdrop
+    kpiMetric: str = ""      # explorer-only override; the 2.3 chart never sends one
+    yoyMonth: int = 0        # 1–12 → same-month YoY in the table; 0 = full year
 
 
 @app.post("/api/projects/{project_id}/validation/series")
@@ -777,7 +921,62 @@ async def post_validation_series(project_id: str, body: ValidationSeriesQuery) -
         grain=body.grain, sources=body.sources or None, brand=body.brand or None,
         channel_type=body.channelType or None, province_group=body.provinceGroup or None,
         window=resolve_window(st, body.timeWindowId), kpi_metric_req=body.kpiMetric or None,
+        yoy_month=body.yoyMonth,
     )
+
+
+class ValidationAnalysisQuery(ValidationSeriesQuery):
+    """A series query plus a regenerate flag."""
+    force: bool = False
+
+
+# A chart analysis is cheap to keep but unbounded in the number of filter
+# permutations a user can produce, so the map is capped and evicted oldest-first.
+_MAX_CHART_ANALYSES = 200
+
+
+@app.post("/api/projects/{project_id}/validation/chart-analysis")
+async def post_validation_chart_analysis(project_id: str, body: ValidationAnalysisQuery) -> dict:
+    """The AI's reading of exactly the chart these filters produce.
+
+    Cached per filter state and validated against a digest of the plotted numbers:
+    a cached analysis whose digest no longer matches the freshly-computed series is
+    regenerated rather than shown, because it is a reading of numbers that moved.
+    """
+    from datetime import datetime, timezone
+
+    from app.agents import validation_analysis as va
+    from app.agents.time_windows import resolve_window
+    from app.dataeng import validation_query
+
+    st = _require_state(project_id)
+    query = body.model_dump(by_alias=True)
+    res = validation_query.validation_series(
+        st, l3=body.l3, l4=body.l4 or None, l5=body.l5 or None, l6=body.l6 or None,
+        l7=body.l7 or None, l8=body.l8 or None, indicators=body.indicators or None,
+        grain=body.grain, sources=body.sources or None, brand=body.brand or None,
+        channel_type=body.channelType or None, province_group=body.provinceGroup or None,
+        window=resolve_window(st, body.timeWindowId), kpi_metric_req=body.kpiMetric or None,
+        yoy_month=body.yoyMonth,
+    )
+
+    key = va.analysis_key(query)
+    digest = va.series_digest(res)
+    cached = (st.validation_chart_analyses or {}).get(key)
+    if cached and not body.force and cached.get("seriesDigest") == digest:
+        return cached
+
+    analysis = await va.analyze_chart(
+        res, query, now=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    store = st.validation_chart_analyses or {}
+    store[key] = analysis.model_dump(by_alias=True)
+    if len(store) > _MAX_CHART_ANALYSES:
+        for stale in sorted(store, key=lambda k: store[k].get("generatedAt", ""))[
+                :len(store) - _MAX_CHART_ANALYSES]:
+            store.pop(stale, None)
+    st.validation_chart_analyses = store
+    get_store().save(project_id)
+    return store[key]
 
 
 @app.get("/api/projects/{project_id}/validation-dataset")
@@ -957,29 +1156,27 @@ async def post_master_table(project_id: str, body: MasterTableQuery) -> dict:
     )
 
 
-@app.get("/api/projects/{project_id}/master-data/export")
-async def export_master_data(
-    project_id: str,
-    brand: str = "",
-    provinceGroup: str = "",
-    channelType: str = "",
-    channel: str = "",
-    grain: str = "month",
-) -> Response:
-    """Download the full adopted feature matrix as xlsx — one sheet per Channel
-    Type, uncapped (not the master-table display slice)."""
+@app.get("/api/projects/{project_id}/master-data/data-station")
+async def get_data_station(project_id: str, limit: int = 5000) -> dict:
+    """The D.Data Station sheet (2.32): the adopted indicators' raw long rows at
+    their native channel/region/time granularity."""
     from app.agents import master_data
     st = _require_state(project_id)
-    data = master_data.build_export(
-        st, brand=[brand] if brand else None,
-        province_group=[provinceGroup] if provinceGroup else None,
-        channel_type=[channelType] if channelType else None,
-        channel=[channel] if channel else None, grain=grain,
-    )
+    return master_data.data_station(st, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/master-data/export")
+async def export_master_data(project_id: str) -> Response:
+    """Download the 2.32 ``model input`` deliverable as xlsx — two sheets:
+    模型颗粒度参考表 (per-indicator 渠道×区域 granularity) and D.Data Station (the
+    adopted indicators' raw long rows), uncapped."""
+    from app.agents import master_data
+    st = _require_state(project_id)
+    data = master_data.build_export(st)
     return Response(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="master-data-{project_id}.xlsx"'},
+        headers={"Content-Disposition": f'attachment; filename="model-input-{project_id}.xlsx"'},
     )
 
 
@@ -1053,6 +1250,7 @@ def _factor_map_payload(st) -> dict:
             "assetId": r.asset_id, "assetName": r.asset_name, "metric": r.metric,
             "coverageStart": r.coverage_start, "coverageEnd": r.coverage_end,
             "ignoreNote": r.ignore_note,
+            "metricType": r.metric_type, "aggregation": r.aggregation,
             "suggestions": [{
                 "indicatorId": s.indicator_id, "metric": s.metric,
                 "assetId": s.asset_id, "assetName": s.asset_name, "unit": s.unit,
@@ -1146,6 +1344,74 @@ async def put_factor_map_bind(project_id: str, body: FactorMapBindBody) -> dict:
             raise HTTPException(404, f"indicator {body.indicatorId} not found")
     else:
         mapping_suggest.unbind(st, body.rowId)
+    if st.artifact("a-data-processing") is not None:
+        await _engine.handlers["2.1"](_engine, st, bp.TASK_MAP["2.1"])
+    get_store().save(project_id)
+    return _factor_map_payload(st)
+
+
+class FactorMapMetricTypeBody(BaseModel):
+    l4: str
+    metric: str
+    """The user's model role: "Y" (response) / "X" (driver) / "excluded"."""
+    metricType: str
+
+
+@app.put("/api/projects/{project_id}/factor-map/metric-type")
+async def put_factor_map_metric_type(project_id: str, body: FactorMapMetricTypeBody) -> dict:
+    """Set an indicator's model role (Y / X / excluded), maintained in 2.1.
+
+    Keyed by ``indicator_key(l4, metric)``. Choosing a new Y demotes every other
+    current Y to X, so the model always has exactly one response. The change is
+    applied at the ``model_df`` seam, so screening / OLS / charts / master data all
+    see it consistently; the dataset cache is invalidated so they recompute."""
+    from app.agents.indicator_metadata import indicator_key
+    from app.agents.dataset_cache import invalidate_project
+    from app.agents.overrides import METRIC_ROLE_Y, _VALID_ROLES
+    if body.metricType not in _VALID_ROLES:
+        raise HTTPException(422, f"metricType must be one of {sorted(_VALID_ROLES)}")
+    st = _require_state(project_id)
+    key = indicator_key(body.l4, body.metric)
+    if body.metricType == METRIC_ROLE_Y:
+        # Single-Y invariant: demote any indicator currently tagged Y to X.
+        for k, v in list(st.metric_type_overrides.items()):
+            if v == METRIC_ROLE_Y and k != key:
+                st.metric_type_overrides[k] = "X"
+    st.metric_type_overrides[key] = body.metricType
+    invalidate_project(project_id)
+    if st.artifact("a-data-processing") is not None:
+        await _engine.handlers["2.1"](_engine, st, bp.TASK_MAP["2.1"])
+    get_store().save(project_id)
+    return _factor_map_payload(st)
+
+
+class FactorMapAggregationBody(BaseModel):
+    l4: str
+    metric: str
+    aggregation: str
+
+
+@app.put("/api/projects/{project_id}/factor-map/aggregation")
+async def put_factor_map_aggregation(project_id: str, body: FactorMapAggregationBody) -> dict:
+    """Set an indicator's aggregation method, maintained in 2.1.
+
+    The user-facing vocabulary is deliberately just SUM / AVG — the two choices
+    that answer "does this indicator add up across periods and dimensions, or
+    average?". Every roll-up in the pipeline honours it (national collapse, 2.2
+    subchecks, 2.3 series and yearly table, 2.4 screen, 2.5 design matrix, 2.6
+    master table) via ``overrides.resolve_aggregation``.
+
+    Legacy saved values (``weighted_average``/``min``/``max``/count variants) are
+    still *read* — ``national._agg_group`` keeps their branches — they just can no
+    longer be set."""
+    from app.agents.indicator_metadata import indicator_key
+    from app.agents.dataset_cache import invalidate_project
+    valid = {"sum", "average"}
+    if body.aggregation not in valid:
+        raise HTTPException(422, f"aggregation must be one of {sorted(valid)}")
+    st = _require_state(project_id)
+    st.aggregation_overrides[indicator_key(body.l4, body.metric)] = body.aggregation
+    invalidate_project(project_id)
     if st.artifact("a-data-processing") is not None:
         await _engine.handlers["2.1"](_engine, st, bp.TASK_MAP["2.1"])
     get_store().save(project_id)
@@ -1255,32 +1521,84 @@ class AskBody(BaseModel):
     text: str
 
 
+class ChatMention(BaseModel):
+    """An object the user pinned as the subject of a question.
+
+    ``payload`` carries the ``ValidationSeriesQuery`` that produced a chart, so the
+    backend re-resolves the rows itself rather than trusting numbers from the client.
+    """
+    kind: str          # 'chartTable' | 'chartAnalysis' | 'artifact'
+    refId: str
+    label: str = ""
+    payload: dict = {}
+
+
+class AskWithMentions(AskBody):
+    mentions: list[ChatMention] = []
+
+
+@app.get("/api/projects/{project_id}/mentionables")
+async def mentionables(project_id: str, q: str = "") -> list[dict]:
+    """Everything the chat can `@`-mention: artifacts, chart tables, AI analyses."""
+    from app.agents.mentions import catalogue
+    items = catalogue(_require_state(project_id))
+    needle = q.strip().lower()
+    if needle:
+        items = [i for i in items if needle in i["label"].lower()]
+    return items[:60]
+
+
 @app.post("/api/projects/{project_id}/assistant")
-async def assistant(project_id: str, body: AskBody) -> dict:
+async def assistant(project_id: str, body: AskWithMentions) -> dict:
+    from app.agents.mentions import resolve as resolve_mentions
+
     store = get_store()
     st = _require_state(project_id)
-    st.assistant.append({"role": "user", "text": body.text})  # type: ignore[arg-type]
+    mentions = [m.model_dump() for m in body.mentions]
+    st.assistant.append({"role": "user", "text": body.text,  # type: ignore[arg-type]
+                         "mentions": [{"kind": m["kind"], "refId": m["refId"],
+                                       "label": m["label"]} for m in mentions]})
     # Prioritize result-bearing artifacts, then the rest.
     priority = ["a-decomp-results", "a-tech-review", "a-final-report", "a-model-candidates",
                 "a-stat-tests", "a-quality-scorecard", "a-factor-tree"]
     present = [a.id for a in st.artifacts if not a.internal]
     visible = [aid for aid in priority if aid in present] + [a for a in present if a not in priority]
-    ctx = artifact_text(st, visible[:16])
+    # With a mention the subject is already pinned, so the artifacts are background:
+    # carry far fewer of them. Sixteen artifacts plus a chart's own table overran
+    # the model's budget and came back empty.
+    ctx = artifact_text(st, visible[:6 if body.mentions else 16])
     # Compact real model results from the analysis blackboard (authoritative numbers).
     picked = st.analysis.get("picked", {})
     results = "; ".join(
         f"{o}: R²={c.get('r2'):.3f}, MAPE={c.get('mape'):.1f}%, baseline={c.get('baseline_pct'):.1f}%, "
         f"flags={len(c.get('red_flags', []))}" for o, c in picked.items()
     ) or "no model results yet"
+    mention_text, mention_labels = resolve_mentions(st, mentions)
+    system = (agent_system("control")
+              + " Answer the user's question about the MMM project grounded ONLY in the real "
+              "results and artifacts below. The MODEL RESULTS line holds the authoritative "
+              "computed numbers.")
+    user = f"MODEL RESULTS: {results}\n\n"
+    if mention_text:
+        system += (" MENTIONED CONTEXT is the specific subject of this question — answer about "
+                   "it first and cite its own numbers; the artifacts are background. If it does "
+                   "not contain what is being asked, say so instead of answering from the "
+                   "artifacts as if it did.")
+        user += f"MENTIONED CONTEXT:\n{mention_text}\n\n"
+    user += f"ARTIFACTS:\n{ctx}\n\nQUESTION: {body.text}"
     try:
         answer = await get_llm().chat([
-            {"role": "system", "content": agent_system("control")
-             + " Answer the user's question about the MMM project grounded ONLY in the real results and "
-             "artifacts below. The MODEL RESULTS line holds the authoritative computed numbers."},
-            {"role": "user", "content": f"MODEL RESULTS: {results}\n\nARTIFACTS:\n{ctx}\n\nQUESTION: {body.text}"},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ], temperature=0.3, max_tokens=2048)
     except Exception as e:  # noqa: BLE001
         answer = f"(assistant unavailable: {e})"
+    # An empty reply is a failure, not an answer — returning "" rendered as a blank
+    # bubble with nothing to retry from.
+    if not answer.strip():
+        answer = ("(the assistant returned nothing — the question plus its context may "
+                  "have exceeded the model's limit. Try mentioning fewer objects, or "
+                  "narrowing the chart's filters before asking.)")
     turn = {"role": "assistant", "text": answer.strip()}
     st.assistant.append(turn)  # type: ignore[arg-type]
     store.save(project_id)

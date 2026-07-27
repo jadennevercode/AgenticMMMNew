@@ -593,8 +593,17 @@ class OlsParams(CamelModel):
     caps: list[OlsCapWindow] = Field(default_factory=list)
     # Controls enter the design matrix raw (never adstocked/saturated) and fold
     # into the baseline — they absorb trend/seasonality so the paid drivers do not.
+    #
+    # Seasonality defaults **off**. On a ~34-month national series a linear trend
+    # plus 2 Fourier harmonics is 5 extra columns competing with ~12 drivers for
+    # 34 observations, and it consistently over-absorbed: baselines above 100%
+    # (once 250%), wrong-sign paid drivers, and contributions so far outside every
+    # Knowledge band that the range check stopped meaning anything. The trend stays
+    # on — it is one column and a growing market genuinely needs it. Turn Fourier
+    # back on per project in the OLS settings when the series is long enough to
+    # pay for it.
     trend: OlsTrend = "linear"
-    seasonality: OlsSeasonality = "fourier"
+    seasonality: OlsSeasonality = "none"
     fourier_k: int = Field(default=2, alias="fourierK")
     # Optional unit price: converts an incremental *volume* Y into revenue so ROI
     # becomes a real 增量Revenue/Spend. None → ROI stays volume-per-spend.
@@ -632,6 +641,38 @@ class AnomalyHypothesis(CamelModel):
 
 class AnomalyReview(CamelModel):
     rows: list[AnomalyHypothesis] = []
+
+
+# ── 2.3 · per-chart AI analysis ──────────────────────────
+class ChartObservation(CamelModel):
+    """One thing the analysis noticed, anchored to a period so it can be found."""
+    period: str = ""
+    metric: str = ""
+    note: str = ""
+
+
+class ValidationChartAnalysis(CamelModel):
+    """The AI's reading of exactly the series a factor chart is showing.
+
+    Keyed by a hash of the filter state that produced the chart, and carrying a
+    digest of the plotted numbers, so a cached analysis can be told apart from
+    one that has gone stale under it. Every number quoted in the prose is
+    computed before the call and handed to the model as fact — the analysis
+    narrates the series, it never calculates it.
+    """
+    key: str = ""
+    l3: str = ""
+    filter_label: str = Field(default="", alias="filterLabel")
+    headline: str = ""
+    trends: list[str] = []
+    anomalies: list[ChartObservation] = []
+    inflections: list[ChartObservation] = []
+    caveats: list[str] = []
+    series_digest: str = Field(default="", alias="seriesDigest")
+    generated_at: str = Field(default="", alias="generatedAt")
+    # True when no LLM was configured and the deterministic facts were rendered
+    # as prose instead — an honest analysis, just not an AI-written one.
+    fallback: bool = False
 
 
 class OlsConfig(CamelModel):
@@ -796,7 +837,9 @@ class DataRequestManifest(CamelModel):
 # unified long table. AI drafts DuckDB SQL from a field-level cleaning spec; the
 # cleaned output persists as parquet and, once published, feeds ``model_df``.
 
-DataAssetStatus = Literal["raw", "reviewed", "spec", "cleaned", "published"]
+# The lifecycle the pipeline actually walks. ("spec"/"cleaned" were states of
+# the pre-pipeline design and were never assigned by any code path.)
+DataAssetStatus = Literal["raw", "reviewed", "published"]
 
 
 class RawTable(CamelModel):
@@ -804,6 +847,9 @@ class RawTable(CamelModel):
     name: str
     file_id: str = Field(alias="fileId")
     filename: str = ""
+    # Worksheet this table came from. A workbook contributes several tables, so the
+    # filename alone cannot say which one a row originated in.
+    sheet: str = ""
     row_count: int = Field(default=0, alias="rowCount")
     columns: list[str] = []
 
@@ -971,14 +1017,25 @@ class FieldMapEntry(CamelModel):
     target: str = ""            # output column name
     cast: str = ""              # '' | integer | double | date | text
     expr: str = ""              # optional SQL expression overriding source (e.g. a constant)
+    # Who decided this row. Unlike an enum mapping, a wrong field map is loud — the
+    # preview grid shows the wrong column immediately — so AI rows apply directly
+    # and this only marks what still deserves a second look.
+    by: Literal["ai", "human"] = "human"
 
 
 class EnumMapEntry(CamelModel):
-    """Map one raw value to its canonical value (compiled into a dbt seed)."""
+    """Map one raw value to its canonical value (compiled into a dbt seed).
+
+    ``status`` is what keeps a guess out of the data: only ``accepted`` rows are
+    compiled. A confident AI match is accepted outright; anything the model is
+    unsure of arrives as ``proposed`` — pre-filled so it is one click to confirm,
+    but inert until a human does.
+    """
     raw: str
     canonical: str = ""
     confidence: float = 1.0     # AI-suggestion confidence; 1.0 for human entries
     by: Literal["ai", "human"] = "human"
+    status: Literal["accepted", "proposed"] = "accepted"
 
 
 class JoinConfig(CamelModel):
@@ -1010,6 +1067,9 @@ class TransformStep(CamelModel):
     inputs: list[str] = Field(default_factory=list)
     field_map: list[FieldMapEntry] = Field(default_factory=list, alias="fieldMap")
     enum_field: str = Field(default="", alias="enumField")   # column the enum_map applies to
+    # Target-schema column whose maintained standard values this field maps onto.
+    # Persisted so the AI suggester is grounded on the same vocabulary next session.
+    enum_target: str = Field(default="", alias="enumTarget")
     enum_map: list[EnumMapEntry] = Field(default_factory=list, alias="enumMap")
     join: Optional[JoinConfig] = None
     group_by: list[str] = Field(default_factory=list, alias="groupBy")
@@ -1041,6 +1101,9 @@ class TargetColumn(CamelModel):
     kind: TargetColumnKind = "dimension"
     required: bool = True
     standard_values: list[str] = Field(default_factory=list, alias="standardValues")
+    # Written by the engine, not by a person (see target_schema.SYSTEM_COLUMNS).
+    # A system column cannot be renamed or removed — the pipeline depends on it.
+    system: bool = False
 
 
 # FND-001 · Unified indicator metadata.
@@ -1089,6 +1152,9 @@ class Indicator(CamelModel):
     # FactorRow id; unmatched → flagged for human review in the catalog.
     tree_grounded: bool = Field(default=False, alias="treeGrounded")
     tree_row_id: str = Field(default="", alias="treeRowId")
+    # How the row binding was made. A human binding is a decision and survives a
+    # re-publish; an automatic one is re-derived from the factor tree each time.
+    bound_by: Literal["", "auto", "human"] = Field(default="", alias="boundBy")
 
 
 class DataAsset(CamelModel):

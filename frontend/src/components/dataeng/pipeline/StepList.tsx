@@ -1,5 +1,5 @@
-import { CheckCircle2, Circle, Database, Plus, Target, XCircle } from 'lucide-react'
-import type { StepKind, TransformPipeline } from '../../../lib/types'
+import { CheckCircle2, Circle, Database, Plus, Target, Unplug, XCircle } from 'lucide-react'
+import type { RawSourceTable, StepKind, TransformPipeline } from '../../../lib/types'
 import { cn } from '../../../lib/cn'
 import { KIND_META } from './StepInspector'
 
@@ -16,6 +16,10 @@ import { KIND_META } from './StepInspector'
 export interface StepListProps {
   pipeline: TransformPipeline
   sources: string[]
+  /** Per-source detail (origin file, size) — the names alone don't say where they came from. */
+  sourceTables?: RawSourceTable[]
+  /** Files that produced no table at all, so the rail can say so rather than look empty. */
+  sourceIssueCount?: number
   /** step id → 'success' | 'error', from the last dbt build. */
   statusByStep: Record<string, string>
   selected: string | null
@@ -25,28 +29,37 @@ export interface StepListProps {
 }
 
 export function StepList({
-  pipeline, sources, statusByStep, selected, outputId, onSelect, onAdd,
+  pipeline, sources, sourceTables = [], sourceIssueCount = 0, statusByStep,
+  selected, outputId, onSelect, onAdd,
 }: StepListProps) {
+  const detail = new Map(sourceTables.map((t) => [t.name, t]))
   return (
     <div className="flex min-h-0 flex-col">
       <Heading>Sources</Heading>
       <ul className="px-1.5">
         {sources.length === 0 && (
-          <li className="px-2 py-2 text-[10px] text-muted-foreground">
-            No raw tables yet — upload files in step 1.
+          <li className="px-2 py-2 text-[10px] leading-relaxed text-muted-foreground">
+            {sourceIssueCount > 0
+              ? `${sourceIssueCount} uploaded file${sourceIssueCount > 1 ? 's' : ''} could not be read as a table.`
+              : 'No raw tables yet — upload files in step 1.'}
           </li>
         )}
-        {sources.map((table) => (
-          <li key={table}>
-            <Row
-              active={selected === `source:${table}`}
-              onClick={() => onSelect(`source:${table}`)}
-              icon={<Database className="size-3 text-muted-foreground" />}
-              title={table}
-              subtitle="raw table"
-            />
-          </li>
-        ))}
+        {sources.map((table) => {
+          const d = detail.get(table)
+          return (
+            <li key={table}>
+              <Row
+                active={selected === `source:${table}`}
+                onClick={() => onSelect(`source:${table}`)}
+                icon={<Database className="size-3 text-muted-foreground" />}
+                title={table}
+                // The origin label, not the filename: it is what every row this table
+                // produces carries in `source`, and what the Data module filters on.
+                subtitle={d ? `${d.sourceLabel} · ${d.rowCount.toLocaleString()} rows` : 'raw table'}
+              />
+            </li>
+          )
+        })}
       </ul>
 
       <Heading>Applied steps</Heading>
@@ -58,19 +71,23 @@ export function StepList({
         )}
         {pipeline.steps.map((step, i) => {
           const status = statusByStep[step.id]
+          // A step with nothing feeding it cannot preview or build; say so here rather
+          // than leaving the user to decode a compile error in the grid.
+          const unwired = step.inputs.length === 0 && step.kind !== 'custom_sql'
           return (
             <li key={step.id}>
               <Row
                 active={selected === step.id}
                 onClick={() => onSelect(step.id)}
                 icon={
-                  status === 'success' ? <CheckCircle2 className="size-3 text-emerald-500" />
-                    : status === 'error' ? <XCircle className="size-3 text-rose-500" />
-                      : <Circle className="size-3 text-muted-foreground/40" />
+                  unwired ? <Unplug className="size-3 text-amber-500" />
+                    : status === 'success' ? <CheckCircle2 className="size-3 text-emerald-500" />
+                      : status === 'error' ? <XCircle className="size-3 text-rose-500" />
+                        : <Circle className="size-3 text-muted-foreground/40" />
                 }
                 index={i + 1}
                 title={step.name || KIND_META[step.kind].label}
-                subtitle={step.note || KIND_META[step.kind].hint}
+                subtitle={unwired ? 'not connected — pick an input' : (step.note || KIND_META[step.kind].hint)}
                 badge={step.id === outputId ? <Target className="size-3 text-primary" /> : null}
                 kind={KIND_META[step.kind].label}
               />
