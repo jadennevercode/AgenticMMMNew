@@ -41,6 +41,52 @@ def active_rows(st: ProjectState) -> list[FactorRow]:
     return [r for r in ft.rows if r.status in ACTIVE_STATUSES]
 
 
+def _norm(s: str) -> str:
+    return "".join(str(s or "").lower().split())
+
+
+def resolve_coverage(st: ProjectState) -> dict[str, list[IndicatorCoverage]]:
+    """row id → the coverages supplying it, for every active row. One pass.
+
+    Two ways a coverage reaches a row, in precedence order:
+
+    1. **Explicitly bound** (`tree_row_id`) — set at publish when the mart's path
+       matched, or pinned by a human. Authoritative.
+    2. **Matched here** on full L1–L4 path, then L3 + metric name.
+
+    Tier 2 exists because coverage can legitimately be written *before* the tree:
+    resetting the Danone case seeds its 29 reference assets while `factor_tree` is
+    still None (the tree is built later, by task 1.21). Matching only at write
+    time left every one of them an orphan forever, and the 2.1 map permanently
+    pending. The old resolver matched on read for exactly this reason.
+    """
+    rows = active_rows(st)
+    covs = list(getattr(st, "indicator_coverage", None) or [])
+    out: dict[str, list[IndicatorCoverage]] = {r.id: [] for r in rows}
+
+    by_path: dict[tuple, str] = {}
+    by_l3_metric: dict[tuple, str] = {}
+    for r in rows:
+        by_path.setdefault((_norm(r.l1), _norm(r.l2), _norm(r.l3), _norm(r.l4)), r.id)
+        if r.l3 and r.indicator:
+            by_l3_metric.setdefault((_norm(r.l3), _norm(r.indicator)), r.id)
+
+    claimed: set[str] = set()
+    for c in covs:
+        if c.tree_row_id and c.tree_row_id in out:
+            out[c.tree_row_id].append(c)
+            claimed.add(c.id)
+    for c in covs:
+        if c.id in claimed or c.tree_row_id:
+            continue
+        hit = (by_path.get((_norm(c.l1), _norm(c.l2), _norm(c.l3), _norm(c.l4)))
+               or (by_l3_metric.get((_norm(c.l3), _norm(c.metric))) if c.metric else None))
+        if hit is not None:
+            out[hit].append(c)
+            claimed.add(c.id)
+    return out
+
+
 def coverages_for(st: ProjectState, tree_row_id: str) -> list[IndicatorCoverage]:
     """Every published (asset × metric) supplying this row.
 
@@ -49,21 +95,21 @@ def coverages_for(st: ProjectState, tree_row_id: str) -> list[IndicatorCoverage]
     """
     if not tree_row_id:
         return []
-    return [c for c in (getattr(st, "indicator_coverage", None) or [])
-            if c.tree_row_id == tree_row_id]
+    return resolve_coverage(st).get(tree_row_id, [])
 
 
-def primary_coverage(st: ProjectState, tree_row_id: str) -> Optional[IndicatorCoverage]:
-    """The coverage that represents the row in flat, single-value views.
-
-    A human pin wins outright — it is a decision, and a bigger automatic match is
-    not a reason to overrule it. Otherwise the widest series wins.
-    """
-    covs = coverages_for(st, tree_row_id)
+def _primary(covs: list[IndicatorCoverage]) -> Optional[IndicatorCoverage]:
+    """A human pin wins outright — it is a decision, and a bigger automatic match
+    is not a reason to overrule it. Otherwise the widest series wins."""
     if not covs:
         return None
     pinned = [c for c in covs if c.bound_by == "human"]
     return (pinned or sorted(covs, key=lambda c: -c.rows))[0]
+
+
+def primary_coverage(st: ProjectState, tree_row_id: str) -> Optional[IndicatorCoverage]:
+    """The coverage that represents the row in flat, single-value views."""
+    return _primary(coverages_for(st, tree_row_id))
 
 
 def _declared(row: FactorRow, cov: Optional[IndicatorCoverage]) -> Indicator:
@@ -115,13 +161,20 @@ def _orphan(cov: IndicatorCoverage) -> Indicator:
 
 def declared_indicators(st: ProjectState) -> list[Indicator]:
     """The data target list: one indicator per active factor row, in tree order."""
-    return [_declared(r, primary_coverage(st, r.id)) for r in active_rows(st)]
+    resolved = resolve_coverage(st)
+    return [_declared(r, _primary(resolved.get(r.id, []))) for r in active_rows(st)]
 
 
 def orphan_indicators(st: ProjectState) -> list[Indicator]:
-    """Supplied metrics with no factor row — awaiting adoption or dismissal."""
+    """Supplied metrics reaching no factor row — awaiting adoption or dismissal.
+
+    A coverage matched to a row by `resolve_coverage` is NOT an orphan even
+    without an explicit `tree_row_id`; otherwise the same record would appear as
+    both a supplied factor and an unclaimed metric.
+    """
+    supplied = {c.id for covs in resolve_coverage(st).values() for c in covs}
     return [_orphan(c) for c in (getattr(st, "indicator_coverage", None) or [])
-            if not c.tree_row_id]
+            if c.id not in supplied]
 
 
 def derive_indicators(st: ProjectState) -> list[Indicator]:

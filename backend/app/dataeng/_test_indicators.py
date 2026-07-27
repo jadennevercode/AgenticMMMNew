@@ -117,8 +117,45 @@ def test_orphans_are_separate_and_not_declared() -> None:
     assert len(ind.derive_indicators(st)) == 3
 
 
+def test_coverage_written_before_the_tree_still_matches() -> None:
+    """Resetting the Danone case seeds 29 reference assets while `factor_tree` is
+    still None — the tree is built later by task 1.21. Matching only at publish
+    time left every one of them an orphan forever and the 2.1 map permanently
+    pending, so unbound coverage is matched on read.
+    """
+    from app.dataeng import indicators as ind
+
+    st = ProjectState(project_id="_t")            # no factor tree yet
+    st.indicator_coverage.append(IndicatorCoverage(
+        id="c-early", tree_row_id="", asset_id="a1", asset_name="TV spend",
+        metric="TV投放金额", l1="MARKETING FACTOR", l2="ATL", l3="TV", l4="卫视",
+        coverage_start="202201", coverage_end="202412", rows=36))
+    assert len(ind.orphan_indicators(st)) == 1, "no tree → nothing to match against"
+
+    st.factor_tree = _st().factor_tree             # the tree arrives afterwards
+    tv = next(i for i in ind.declared_indicators(st) if i.id == "ind-ft-1")
+    assert tv.asset_id == "a1", "the late tree must pick up the early coverage"
+    assert ind.orphan_indicators(st) == [], \
+        "a matched coverage is not also an orphan"
+
+
+def test_l3_and_metric_name_is_the_looser_anchor() -> None:
+    """Second tier: the mart's path disagrees but L3 + the factor's own indicator
+    name line up. This is what the old resolver's third tier did."""
+    from app.dataeng import indicators as ind
+
+    st = _st()
+    st.indicator_coverage.append(IndicatorCoverage(
+        id="c-loose", tree_row_id="", asset_id="a2", asset_name="Weather",
+        metric="TV投放金额", l1="不同", l2="不同", l3="TV", l4="不同", rows=9))
+    tv = next(i for i in ind.declared_indicators(st) if i.id == "ind-ft-1")
+    assert tv.asset_id == "a2"
+
+
 def main() -> int:
     for fn in (test_coverage_model_defaults, test_state_carries_coverage,
+               test_coverage_written_before_the_tree_still_matches,
+               test_l3_and_metric_name_is_the_looser_anchor,
                test_declared_one_per_active_row,
                test_source_map_covers_every_factor_source,
                test_coverage_fills_the_declared_row,
