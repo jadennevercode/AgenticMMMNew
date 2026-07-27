@@ -1241,7 +1241,10 @@ export function isLlmConfigured(cfg: GlobalModelConfig | null | undefined): bool
 
 /* ── Factor tree (per-project, with per-node confirm) ───── */
 
-export type FactorSource = 'template' | 'ai' | 'interview' | 'manual' | 'upload'
+export type FactorSource =
+  | 'template' | 'ai' | 'interview' | 'manual' | 'upload'
+  /** adopted from published data that no factor row had asked for */
+  | 'data_upload'
 export type FactorStatus = 'baseline' | 'proposed' | 'accepted' | 'rejected'
 
 export interface FactorRow {
@@ -1802,7 +1805,8 @@ export type MetricType =
 export type Aggregation =
   | 'sum' | 'count' | 'average' | 'min' | 'max' | 'distinct_count' | 'weighted_average'
 export type IndicatorSource =
-  | 'project_material' | 'interview' | 'uploaded_tree' | 'template' | 'ai' | 'data_upload'
+  | 'project_material' | 'interview' | 'uploaded_tree' | 'template' | 'ai'
+  | 'manual' | 'data_upload'
 
 export interface Indicator {
   id: string
@@ -1834,6 +1838,38 @@ export interface Indicator {
   /** matched a Business-Understanding factor-tree row */
   treeGrounded: boolean
   treeRowId: string
+  /** how the row binding was made; a human binding survives a re-publish */
+  boundBy?: '' | 'auto' | 'human'
+}
+
+/**
+ * One published (asset × metric) supplying one factor-tree row.
+ *
+ * The only thing publish persists — `Indicator` itself is derived from the
+ * factor tree. `treeRowId === ''` marks an orphan: a supplied metric no factor
+ * row asked for.
+ */
+export interface IndicatorCoverage {
+  id: string
+  treeRowId: string
+  assetId: string
+  assetName: string
+  metric: string
+  metricType: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  semanticType?: MetricType
+  unit: string
+  currency?: string | null
+  aggregation?: Aggregation
+  numberFormat?: string
+  ruleVersion?: string
+  coverageStart: string
+  coverageEnd: string
+  rows: number
+  boundBy: '' | 'auto' | 'human'
 }
 
 /** One active factor-tree row's mapping status against the published data assets. */

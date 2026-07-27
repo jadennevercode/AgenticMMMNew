@@ -33,6 +33,7 @@ from app.domain.models import (
     DecisionRuntime,
     FactorTree,
     Indicator,
+    IndicatorCoverage,
     IndustryRef,
     Insight,
     LedgerEntry,
@@ -141,10 +142,16 @@ class ProjectState(BaseModel):
     # FND-002: project-scoped time windows (comparable-period definitions), reused by
     # Business Validation and Reporting. Not blueprint-derived → persists across heal.
     time_windows: list[TimeWindow] = Field(default_factory=list, alias="timeWindows")
-    # Data Engine: the target long-table schema (None → the default) and the
-    # indicators registered when assets publish.
+    # Data Engine: the target long-table schema (None → the default).
     target_schema: Optional[list[TargetColumn]] = Field(default=None, alias="targetSchema")
+    # LEGACY (drained by heal_state): indicators used to be stored here, built by
+    # groupby over each published mart. They are now derived from the factor tree
+    # (app/dataeng/indicators.py). The field stays declared only so a saved
+    # project's human bindings can be migrated — Pydantic drops unknown keys on
+    # load, so removing it outright would destroy them before the migration ran.
     indicators: list[Indicator] = Field(default_factory=list, alias="indicators")
+    # What publish persists: which (asset × metric) supplies which factor row.
+    indicator_coverage: list[IndicatorCoverage] = Field(default_factory=list)
     tick: int = 0
     event_seq: int = 0
     tasks: dict[str, TaskRuntime] = {}

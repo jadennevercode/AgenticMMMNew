@@ -400,7 +400,7 @@ class GlobalModelConfig(CamelModel):
 
 
 # ── Factor tree (per-project, with per-node confirm state) ─
-FactorSource = Literal["template", "ai", "interview", "manual", "upload"]
+FactorSource = Literal["template", "ai", "interview", "manual", "upload", "data_upload"]
 FactorStatus = Literal["baseline", "proposed", "accepted", "rejected"]
 
 
@@ -1117,7 +1117,8 @@ MetricType = Literal[
 Aggregation = Literal[
     "sum", "count", "average", "min", "max", "distinct_count", "weighted_average"]
 IndicatorSource = Literal[
-    "project_material", "interview", "uploaded_tree", "template", "ai", "data_upload"]
+    "project_material", "interview", "uploaded_tree", "template", "ai",
+    "manual", "data_upload"]
 
 
 class Indicator(CamelModel):
@@ -1154,6 +1155,43 @@ class Indicator(CamelModel):
     tree_row_id: str = Field(default="", alias="treeRowId")
     # How the row binding was made. A human binding is a decision and survives a
     # re-publish; an automatic one is re-derived from the factor tree each time.
+    bound_by: Literal["", "auto", "human"] = Field(default="", alias="boundBy")
+
+
+class IndicatorCoverage(CamelModel):
+    """One published (asset × metric) supplying one factor-tree row.
+
+    This is the ONLY thing publish persists. ``Indicator`` itself is derived from
+    the factor tree (see ``app/dataeng/indicators.py``) — a stored catalog
+    eventually disagrees with the tree it was copied from, which is exactly the
+    drift this replaces.
+
+    ``tree_row_id == ""`` marks an **orphan**: a metric the data supplies that no
+    factor row asked for. Orphans are listed apart and can be proposed back into
+    the tree; they are never silently presented as project indicators.
+    """
+    id: str                 # stable across re-publish — see service._indicator_id
+    tree_row_id: str = Field(default="", alias="treeRowId")
+    asset_id: str = Field(default="", alias="assetId")
+    asset_name: str = Field(default="", alias="assetName")
+    # The mart's own labels. They may differ from the factor row's wording — that
+    # difference is the point of a mapping, so both sides are kept.
+    metric: str = ""
+    metric_type: str = Field(default="", alias="metricType")
+    l1: str = ""
+    l2: str = ""
+    l3: str = ""
+    l4: str = ""
+    semantic_type: MetricType = Field(default="other", alias="semanticType")
+    unit: str = ""
+    currency: Optional[str] = None
+    aggregation: Aggregation = "sum"
+    number_format: str = Field(default="number", alias="numberFormat")
+    rule_version: str = Field(default="", alias="ruleVersion")
+    coverage_start: str = Field(default="", alias="coverageStart")
+    coverage_end: str = Field(default="", alias="coverageEnd")
+    rows: int = 0
+    # "human" is a decision and survives re-publish; "auto" is re-derived each time.
     bound_by: Literal["", "auto", "human"] = Field(default="", alias="boundBy")
 
 
