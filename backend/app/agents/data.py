@@ -166,10 +166,12 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
     from app.agents.dataset_cache import diagnose_taxonomy, resolve_dataset
     from app.dataeng.mapping import resolve_factor_map
 
+    from app.dataeng.indicators import derive_indicators
+
     fmap = resolve_factor_map(st)
     published = [a for a in st.data_assets if a.status == "published"]
     asset_rows = [[a.name, f"v{max((v.version for v in a.versions), default=0)}",
-                   str(sum(1 for i in st.indicators if i.asset_id == a.id)),
+                   str(sum(1 for c in st.indicator_coverage if c.asset_id == a.id)),
                    a.description or ""] for a in published]
 
     # The mapping matrix — one row per active factor-tree indicator.
@@ -253,7 +255,7 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
     ]}
     eng.produce(st, "a-data-processing", body=body, state="confirmed", agent="data")
     eng.set_analysis(st, "data_processing", {
-        "assets": len(published), "indicators": len(st.indicators),
+        "assets": len(published), "indicators": len(derive_indicators(st)),
         "total": fmap.total, "mapped": fmap.mapped, "ignored": fmap.ignored,
         "pending": fmap.pending, "source": source, "rows": len(df),
     })

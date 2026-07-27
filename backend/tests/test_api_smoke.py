@@ -45,16 +45,16 @@ def _seed_s2_intake(st) -> None:  # noqa: ANN001
     therefore has to look like a project that really did its data intake.
     """
     from app.config import get_settings
-    from app.domain.models import FactorRow, FactorTree, Indicator
+    from app.domain.models import FactorRow, FactorTree, IndicatorCoverage
 
     st.factor_tree = FactorTree(rows=[FactorRow(
         id="fr-1", l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
         indicator="TV spend", status="baseline",
     )])
-    st.indicators = [Indicator(
-        id="ind-1", metric="TV spend", metricType="spending",
+    st.indicator_coverage = [IndicatorCoverage(
+        id="cov-1", treeRowId="fr-1", metric="TV spend", metricType="spending",
         l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
-        assetId="a-1", assetName="Media asset", treeGrounded=True, treeRowId="fr-1",
+        assetId="a-1", assetName="Media asset", boundBy="auto",
     )]
     # No published parquet in a stub run — let the reference table serve as the
     # project's data so the gate's modeling-readiness check has something real.
@@ -241,13 +241,13 @@ def test_factor_map_gate() -> None:
     The composite folds in a further modeling-readiness check (`_data_blockers`:
     is there an actual modelable table?), and resets its `path` to "none" whenever
     that later check fails — which this stub state always does (no bound/published
-    data, only factor-tree + indicator metadata) even once the mapping itself is
+    data, only factor-tree + coverage metadata) even once the mapping itself is
     genuinely complete, so asserting the composite (or its `path`) would falsely
     fail here regardless of whether the mapping layer works.
     """
     from app.agents.intake_status import _mapping_status
     from app.dataeng.mapping import mapping_complete, resolve_factor_map
-    from app.domain.models import FactorRow, FactorTree, Indicator
+    from app.domain.models import FactorRow, FactorTree, IndicatorCoverage
 
     st = initial_state(_test_meta("smoke-factor-map"))
     st.factor_tree = FactorTree(rows=[
@@ -258,8 +258,9 @@ def test_factor_map_gate() -> None:
     assert mapping_complete(st) is False
     assert _mapping_status(st)[0] is False
     # map fr-1 via an exact tree_row_id, ignore fr-2 → mapping resolved
-    st.indicators = [Indicator(id="i1", metric="折扣率", l1="生意", l2="营销", l3="店内促销",
-                               l4="折扣", assetId="a1", assetName="Promo", treeRowId="fr-1")]
+    st.indicator_coverage = [IndicatorCoverage(
+        id="c1", treeRowId="fr-1", metric="折扣率", l1="生意", l2="营销", l3="店内促销",
+        l4="折扣", assetId="a1", assetName="Promo", boundBy="auto")]
     st.factor_map_ignores = {"fr-2": "no reliable source"}
     fmap = resolve_factor_map(st)
     assert (fmap.mapped, fmap.ignored, fmap.pending) == (1, 1, 0)

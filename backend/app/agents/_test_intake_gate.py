@@ -13,7 +13,7 @@ import pandas as pd
 from app.agents import dataset_cache as dc
 from app.agents.intake_status import intake_status
 from app.domain import blueprint as bp
-from app.domain.models import FactorRow, FactorTree, Indicator, IndustryRef, ProjectMeta
+from app.domain.models import FactorRow, FactorTree, IndicatorCoverage, IndustryRef, ProjectMeta
 from app.store.state import initial_state
 
 ASG = bp.TASK_MAP["2.1"]["assignment"]
@@ -53,10 +53,10 @@ def _mapped_tree(st) -> None:
     st.factor_tree = FactorTree(rows=[FactorRow(
         id="fr-1", l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
         indicator="TV spend", status="baseline")])
-    st.indicators = [Indicator(
-        id="ind-1", metric="TV spend", metricType="spending",
+    st.indicator_coverage = [IndicatorCoverage(
+        id="cov-1", treeRowId="fr-1", metric="TV spend", metricType="spending",
         l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
-        assetId="a-1", assetName="Media", treeGrounded=True, treeRowId="fr-1")]
+        assetId="a-1", assetName="Media", boundBy="auto")]
 
 
 def test_empty_project_blocks_with_a_reason() -> None:
@@ -81,14 +81,15 @@ def test_pending_rows_block() -> None:
 
 
 def test_indicators_alone_do_not_open_the_gate() -> None:
-    """Publishing an indicator that covers NOTHING in the tree must not clear the
+    """Publishing a metric that covers NOTHING in the tree must not clear the
     gate. `bool(st.indicators)` used to be a shortcut through it."""
     st = _state("gate-orphan-indicator")
     st.factor_tree = FactorTree(rows=[FactorRow(
         id="fr-1", l1="MARKETING FACTOR", l2="Media", l3="TV", l4="TV",
         indicator="TV spend", status="baseline")])
-    st.indicators = [Indicator(id="ind-x", metric="Unrelated", l3="Other", l4="Other",
-                               assetId="a-9", assetName="Other")]
+    st.indicator_coverage = [IndicatorCoverage(
+        id="cov-x", metric="Unrelated", l3="Other", l4="Other",
+        assetId="a-9", assetName="Other")]
     assert not intake_status(st, ASG).ready
 
 

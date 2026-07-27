@@ -514,7 +514,7 @@ def publish(project_id: str, st, asset: DataAsset) -> DataAssetVersion:
     asset.latest_version = version
     asset.status = "published"
     _touch(asset)
-    register_indicators(st, asset, df)
+    claim_published_metrics(st, asset, df)
     asset_svc._invalidate(project_id)
     return ver
 
@@ -598,11 +598,6 @@ def claim_published_metrics(st, asset: DataAsset, df: pd.DataFrame) -> list[Indi
         ))
     st.indicator_coverage.extend(new)
     return new
-
-
-# Transitional alias — seed_reference_assets and _test_flow still call the old
-# name; both move in the migration task.
-register_indicators = claim_published_metrics
 
 
 # ── helpers ──────────────────────────────────────────────

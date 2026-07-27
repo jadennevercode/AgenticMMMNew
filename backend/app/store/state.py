@@ -234,7 +234,7 @@ def _seed_reference_data(st: ProjectState) -> None:
 
     Only for reference-backed projects (the Danone demo): their "uploaded data" is
     the real 23.8k-row client reference table. Registering it by source through the
-    real ``register_indicators`` path gives every indicator a real asset + coverage,
+    real ``claim_published_metrics`` path gives every coverage a real asset + window,
     so 2.1 mapping resolves against genuine published indicators — never the
     fabricated ``st.indicators`` splat the v2 demo used. A no-op (best-effort) for
     projects that bring their own data or when the reference files are absent.
@@ -249,11 +249,46 @@ def _seed_reference_data(st: ProjectState) -> None:
         pass
 
 
+def _migrate_indicators_to_coverage(st: ProjectState) -> int:
+    """Carry a saved project's manual factor bindings onto coverage records.
+
+    Indicators used to be stored, built by groupby over each published mart. They
+    are now derived from the factor tree, so the stored list is drained here.
+    Automatic bindings are dropped — they are re-derived on the next publish, or
+    re-proposed by ``mapping_auto``. **Human bindings are decisions and would be
+    destroyed if this did not run**, which is the one irreversible failure in the
+    move; they are carried across by id.
+
+    Returns the number of bindings carried, for logging/verification.
+    """
+    if not st.indicators:
+        return 0
+    known = {c.id for c in st.indicator_coverage}
+    carried = 0
+    for ind in st.indicators:
+        if ind.bound_by != "human" or not ind.tree_row_id or ind.id in known:
+            continue
+        st.indicator_coverage.append(IndicatorCoverage(
+            id=ind.id, treeRowId=ind.tree_row_id,
+            assetId=ind.asset_id, assetName=ind.asset_name,
+            metric=ind.metric, metricType=ind.metric_type,
+            l1=ind.l1, l2=ind.l2, l3=ind.l3, l4=ind.l4,
+            semanticType=ind.semantic_type, unit=ind.unit, currency=ind.currency,
+            aggregation=ind.aggregation, numberFormat=ind.number_format,
+            ruleVersion=ind.rule_version,
+            coverageStart=ind.coverage_start, coverageEnd=ind.coverage_end,
+            rows=ind.rows, boundBy="human"))
+        carried += 1
+    st.indicators = []
+    return carried
+
+
 def heal_state(st: ProjectState) -> ProjectState:
     """Reconcile a loaded state with the current blueprint: add any missing
     tasks/decisions/assignments/ai-choices, and prune ones the blueprint no
     longer defines (e.g. removed tasks/artifacts), so blueprint changes don't
     leave stale entries on saved projects."""
+    _migrate_indicators_to_coverage(st)
     template = initial_state(st.meta or danone_meta())
     pre_existing = set(st.tasks)
     for tid, rt in template.tasks.items():
@@ -339,21 +374,22 @@ def heal_state(st: ProjectState) -> ProjectState:
         for d in st.profile.model_scope.dimensions:
             if d.name.strip() in _LEGACY_DIM_RELABEL:
                 d.name = _LEGACY_DIM_RELABEL[d.name.strip()]
-    # FND-001 backfill: indicators published before the semantic classifier existed
-    # carry no ruleVersion — classify them now so their type/unit/aggregation/format
-    # are populated (the OLS role `metric_type` is left untouched).
-    if st.indicators:
+    # FND-001 backfill: coverage published before the semantic classifier existed
+    # carries no ruleVersion — classify it now so its type/unit/aggregation/format
+    # are populated (the OLS role `metric_type` is left untouched). Runs after the
+    # migration above, so records carried off the legacy list are covered too.
+    if st.indicator_coverage:
         from app.agents.indicator_metadata import (
             INDICATOR_META_RULE_VERSION, classify_indicator)
-        for ind in st.indicators:
-            if not ind.rule_version:
-                meta = classify_indicator(ind.metric)
-                ind.semantic_type = meta.metric_type
-                ind.unit = ind.unit or meta.unit
-                ind.currency = meta.currency
-                ind.aggregation = meta.aggregation
-                ind.number_format = meta.fmt
-                ind.rule_version = INDICATOR_META_RULE_VERSION
+        for cov in st.indicator_coverage:
+            if not cov.rule_version:
+                meta = classify_indicator(cov.metric)
+                cov.semantic_type = meta.metric_type
+                cov.unit = cov.unit or meta.unit
+                cov.currency = meta.currency
+                cov.aggregation = meta.aggregation
+                cov.number_format = meta.fmt
+                cov.rule_version = INDICATOR_META_RULE_VERSION
     # Backfill the factor-tree Dimension column on saved projects: seed empty
     # dimensions from the profile's model scope, then re-render the artifact sheet
     # so the new column shows on already-persisted projects.

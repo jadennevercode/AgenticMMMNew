@@ -33,7 +33,7 @@ def test_extract_desc() -> None:
     print("[desc] leading -- desc: comment extracted")
 
 
-def test_register_indicators() -> None:
+def test_claim_published_metrics() -> None:
     df = pd.DataFrame({
         "brand": ["M"] * 4,
         "channel": ["天猫", "京东", "天猫", "京东"],
@@ -44,19 +44,21 @@ def test_register_indicators() -> None:
         "metric": ["sell-out volume", "sell-out volume", "tv grp", "tv grp"],
         "value": [100.0, 80.0, 5.0, 6.0],
     })
-    st = SimpleNamespace(indicators=[])
+    st = SimpleNamespace(indicator_coverage=[], factor_tree=None)
     asset = SimpleNamespace(id="da-x", name="Channel Sales")
-    made = service.register_indicators(st, asset, df)
-    by_metric = {i.metric: i for i in made}
+    made = service.claim_published_metrics(st, asset, df)
+    by_metric = {c.metric: c for c in made}
     assert set(by_metric) == {"sell-out volume", "tv grp"}, by_metric
     so = by_metric["sell-out volume"]
     assert so.metric_type == "Y" and so.l1 == "KPI" and so.l3 == "Volume"
     assert so.coverage_start == "202301" and so.coverage_end == "202401"
     assert so.rows == 2 and so.asset_name == "Channel Sales"
-    # re-registering replaces this asset's indicators (no duplicates)
-    again = service.register_indicators(st, asset, df)
-    assert len(st.indicators) == len(again) == 2, st.indicators
-    print(f"[indicators] {len(made)} registered, coverage + replace-on-rerun correct")
+    # re-publishing replaces this asset's coverage (no duplicates)
+    again = service.claim_published_metrics(st, asset, df)
+    assert len(st.indicator_coverage) == len(again) == 2, st.indicator_coverage
+    # With no factor tree, nothing can be claimed — every metric is an orphan.
+    assert all(c.tree_row_id == "" for c in again), again
+    print(f"[coverage] {len(made)} claimed, window + replace-on-rerun correct")
 
 
 def test_conformance() -> None:
@@ -94,7 +96,7 @@ def test_conformance() -> None:
 def main() -> int:
     test_target_schema_default()
     test_extract_desc()
-    test_register_indicators()
+    test_claim_published_metrics()
     test_conformance()
     print("PASS")
     return 0

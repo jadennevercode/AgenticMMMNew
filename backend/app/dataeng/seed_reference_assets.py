@@ -9,8 +9,8 @@ This module registers the reference case the way a real project's data arrives �
 by **asset**, one per data *source* in the real 23.8k-row client table. Each source
 slice is materialised to a published parquet version (so the dataset resolver reads
 it via the ``published`` path, unioning back to the full table) and run through the
-real :func:`register_indicators`, so every indicator has a real ``assetId``,
-coverage window, and factor-tree grounding. No hand-written indicators.
+real :func:`claim_published_metrics`, so every coverage record has a real
+``assetId``, coverage window, and factor-tree claim. No hand-written indicators.
 
 The reference table itself is the genuine Danone client data (per CLAUDE.md), so
 nothing here is fabricated — only the *packaging* into assets is synthesised, and it
@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from app.dataeng import assets as asset_svc
-from app.dataeng.dbt.service import register_indicators
+from app.dataeng.dbt.service import claim_published_metrics
 from app.domain.models import DataAsset, DataAssetVersion
 
 
@@ -58,7 +58,7 @@ def _publish_slice(project_id: str, st, asset: DataAsset, df: pd.DataFrame) -> D
     asset.latest_version = version
     asset.status = "published"
     asset.updated_at = _now_iso()
-    register_indicators(st, asset, df)
+    claim_published_metrics(st, asset, df)
     return ver
 
 
@@ -69,9 +69,10 @@ def seed_reference_assets(project_id: str, st) -> dict:
     cleanly. Returns a small summary for logging/verification.
     """
     from app import ingest
+    from app.dataeng.indicators import derive_indicators
 
     # Wipe the fabrication + any prior seeded assets for this project.
-    st.indicators = []
+    st.indicator_coverage = []
     st.data_assets = []
 
     ref = ingest.load_model_dataset()
@@ -85,14 +86,15 @@ def seed_reference_assets(project_id: str, st) -> dict:
         asset = asset_svc.create_asset(st, name=name, description=f"Danone reference source · {name}")
         slice_df = grp.reset_index(drop=True)
         _publish_slice(project_id, st, asset, slice_df)
-        n_ind = sum(1 for ind in st.indicators if ind.asset_id == asset.id)
+        n_ind = sum(1 for c in st.indicator_coverage if c.asset_id == asset.id)
         summary.append({"asset": name, "assetId": asset.id, "rows": int(len(slice_df)), "indicators": n_ind})
 
     asset_svc._invalidate(project_id)
-    grounded = sum(1 for ind in st.indicators if ind.tree_grounded)
+    all_inds = derive_indicators(st)
+    grounded = sum(1 for i in all_inds if i.tree_grounded)
     return {
         "assets": len(st.data_assets),
-        "indicators": len(st.indicators),
+        "indicators": len(all_inds),
         "treeGrounded": grounded,
         "perSource": summary,
     }
