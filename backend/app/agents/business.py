@@ -16,9 +16,11 @@ from app.agents import sources
 from app.agents.common import (
     agent_system,
     artifact_text,
+    clip,
     llm_body,
     llm_findings,
     pack_knowledge_text,
+    truncation_finding,
 )
 from app.domain.models import (
     DiffLine,
@@ -95,7 +97,7 @@ async def _profile_from_materials(materials: str, origin: str) -> ProjectProfile
             "aligned to the dimensions order (only the combinations the SOW lists as in scope).\n"
             'Return JSON: {"intro":str,"timeGranularity":str,'
             '"dimensions":[{"name":str,"values":[str]}],"rows":[[str]]}\n\n'
-            "SOW / BRIEF:\n" + materials[:8000]
+            "SOW / BRIEF:\n" + clip(materials, label="SOW & brief").text
         ),
     )
     if not isinstance(obj, dict):
@@ -186,7 +188,7 @@ async def frame_profile(eng: Engine, st: ProjectState, task: dict) -> None:
 async def assemble_knowledge(eng: Engine, st: ProjectState, task: dict) -> None:
     # Input-driven only: assemble from the user's uploaded reports/materials. The
     # 1.1a upload gate guarantees these exist before this handler runs.
-    materials = sources.category_text(st.project_id, "industry_reference", max_chars=6000)
+    materials = sources.category_text(st.project_id, "industry_reference")
     if not materials:
         # 1.1a gate guarantees materials were uploaded — empty read = parse failure.
         eng.emit(st, "business", "info",
@@ -199,7 +201,7 @@ async def assemble_knowledge(eng: Engine, st: ProjectState, task: dict) -> None:
         "Assemble the industry-knowledge package for the beverage/functional-drinks category from the "
         "materials below. Produce sheets: '目录' (部分/内容), '行业知识' (L1 / L2（锁定）), "
         "'品牌生意分析框架' (维度/说明). Keep the locked L1/L2 skeleton faithful to the source.\n\n"
-        + materials[:6000],
+        + clip(materials, label="industry materials").text,
         "sheet",
     )
     eng.produce(st, "a-knowledge-package", body=body, state="confirmed", agent="business")
@@ -447,8 +449,9 @@ def _refresh_factor_analysis(eng: Engine, st: ProjectState) -> None:
     eng.set_analysis(st, "factor_l4", sorted({r.l4 for r in active if r.l4}))
 
 
-def _paths_block(rows: list[FactorRow], limit: int = 4000) -> str:
-    return "; ".join(sorted({f"{r.l1}/{r.l2}/{r.l3}/{r.l4}/{r.indicator}" for r in rows}))[:limit]
+def _paths_block(rows: list[FactorRow], limit: int | None = None) -> str:
+    joined = "; ".join(sorted({f"{r.l1}/{r.l2}/{r.l3}/{r.l4}/{r.indicator}" for r in rows}))
+    return clip(joined, limit, label="factor paths").text
 
 
 def _keydiff_supplement(uploaded: list[FactorRow], template_rows: list[FactorRow]) -> list[FactorRow]:
@@ -532,7 +535,10 @@ async def derive_factor_tree(eng: Engine, st: ProjectState, task: dict) -> None:
     # Ground AI recommendations strictly on the user's uploaded industry materials.
     materials = sources.category_text(st.project_id, "industry_reference")
     origin = "uploaded materials"
-    existing = "; ".join(sorted({f"{r.l1}/{r.l2}/{r.l3}" for r in grounded if r.l3}))[:3000]
+    mat_clip = clip(materials, label="industry materials")
+    paths_clip = clip("; ".join(sorted({f"{r.l1}/{r.l2}/{r.l3}" for r in grounded if r.l3})),
+                      label="existing paths")
+    existing = paths_clip.text
     # Ground additionally on the editable industry + general knowledge pack (best-effort).
     know = pack_knowledge_text(st)
     know_block = ("\n\nKNOWLEDGE PACK (team know-how — use to inform, not to invent numbers):\n" + know) if know else ""
@@ -554,7 +560,8 @@ async def derive_factor_tree(eng: Engine, st: ProjectState, task: dict) -> None:
                 "'TV投放金额（中央台/卫视/地方台）' becomes three complete factors — or emit each as its own complete "
                 "value; either way each value must read as a whole phrase with balanced brackets. Return JSON: "
                 "{\"recommendations\":[{\"l1\":str,\"l2\":str,"
-                "\"l3\":str,\"l4\":str,\"indicator\":str,\"rationale\":str}]}\n\nMATERIALS:\n" + materials[:6000]
+                "\"l3\":str,\"l4\":str,\"indicator\":str,\"rationale\":str}]}\n\nMATERIALS:\n"
+                + mat_clip.text
             ),
         )
     except Exception:  # noqa: BLE001
@@ -587,6 +594,10 @@ async def derive_factor_tree(eng: Engine, st: ProjectState, task: dict) -> None:
         eng.add_findings(st, task["id"], [TaskFinding(
             text=f"{len(proposed)} AI-recommended factors await your accept/reject in the Factor Tree.",
             tone="flag", evidence=[EvidenceRef(artifactId="a-factor-tree")])])
+    # A thin tree built off a truncated deck used to look exactly like a thin deck.
+    tf = truncation_finding([mat_clip, paths_clip])
+    if tf is not None:
+        eng.add_findings(st, task["id"], [tf])
 
 
 # ── Interview outline: 2-level hierarchy (Layer → Team / target) ─────────
@@ -769,9 +780,8 @@ async def _fill_business_preanswers(target: dict, materials: str, src_labels: li
                 "confidence (low|medium|high), and sources — a list chosen from these candidate labels: "
                 f"[{cand}]. Return JSON: "
                 "{\"answers\":[{\"n\":int,\"answer\":str,\"confidence\":str,\"sources\":[str]}]}\n\n"
-                f"CONTEXT:\n{materials[:5000]}\n\nQUESTIONS:\n{qlist}"
+                f"CONTEXT:\n{clip(materials, label='pre-answer context').text}\n\nQUESTIONS:\n{qlist}"
             ),
-            max_tokens=3000,
         )
     except Exception:  # noqa: BLE001
         obj = {}
@@ -803,7 +813,7 @@ async def pre_answer(eng: Engine, st: ProjectState, task: dict) -> None:
         return
     # Context for preliminary answers: the uploaded materials plus the project's
     # own framed artifacts (both derived from the user's input — no reference).
-    materials = (sources.category_text(st.project_id, "industry_reference", max_chars=4000)
+    materials = (sources.category_text(st.project_id, "industry_reference")
                  + "\n\n" + artifact_text(st, ["a-scope", "a-factor-tree"]))
     src_labels = _source_labels(st)
     # Business targets each need one grounded LLM call — run them CONCURRENTLY so
@@ -822,7 +832,7 @@ async def pre_answer(eng: Engine, st: ProjectState, task: dict) -> None:
              "AI pre-answers added inline (knowledge for reference, to validate in interviews)", task["id"])
 
 
-_MINUTES_PER_FILE_CHARS = 12000   # single-file cap; real transcripts are 1–9k
+_MINUTES_PER_FILE_CHARS = None   # per-file cap → the shared grounding budget
 _MAX_INSIGHTS = 3                  # merged insight cap (was [:2] on one call)
 
 
@@ -1238,8 +1248,9 @@ async def _bu_prose(instruction: str, ctx: str) -> str:
                    "business reading, not a list of counts (the platform reports counts separately). "
                    "Ground ONLY in the material below; never invent numbers or facts. Write in "
                    "English but keep Chinese domain terms (brand, factor, channel names) as-is. "
-                   "No markdown, no headings.\n\nMATERIAL:\n" + ctx[:5000])}],
-            temperature=0.3, max_tokens=2048)
+                   "No markdown, no headings.\n\nMATERIAL:\n"
+                   + clip(ctx, label="summary material").text)}],
+            temperature=0.3)
         return txt.strip()
     except Exception:  # noqa: BLE001
         return ""
@@ -1289,8 +1300,9 @@ async def _bu_hypotheses(ctx: str) -> list[str]:
                  "(High/Med/Low) — how the model tests it.\n"
                  "Ground ONLY in the material; never invent numbers or brand-specific facts. "
                  "Keep Chinese domain terms (channel/factor names) as-is. No markdown, no "
-                 "headings — just the lines.\n\nMATERIAL:\n" + ctx[:8000])}],
-            temperature=0.3, max_tokens=2048)
+                 "headings — just the lines.\n\nMATERIAL:\n"
+                 + clip(ctx, label="summary material").text)}],
+            temperature=0.3)
     except Exception:  # noqa: BLE001
         return []
     out: list[str] = []

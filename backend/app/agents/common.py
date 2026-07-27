@@ -8,17 +8,72 @@ quantitative artifacts are produced by app.mmm computation, not the LLM.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Optional
 
+from app.config import get_settings
 from app.domain.models import EvidenceRef, TaskFinding
 from app.llm.volcano import get_llm
 from app.store.state import ProjectState
 
-MAX_CTX_CHARS = 6000
+
+@dataclass(frozen=True)
+class ClipResult:
+    """Grounding text plus what budgeting cost it."""
+    text: str
+    dropped: int
+    label: str = ""
+
+    @property
+    def truncated(self) -> bool:
+        return self.dropped > 0
+
+    @property
+    def kept_ratio(self) -> float:
+        total = len(self.text) + self.dropped
+        return 1.0 if total == 0 else len(self.text) / total
+
+
+def grounding_budget() -> int:
+    """How much grounding material one agent call may see (characters)."""
+    return get_settings().grounding_max_chars
+
+
+def clip(text: str, budget: Optional[int] = None, *, label: str = "") -> ClipResult:
+    """Trim grounding material to the budget, remembering what was lost.
+
+    Replaces the bare ``[:N]`` slices this module and the S1 handlers used to
+    apply: those dropped material with nothing recording that they had, so a
+    deliverable built from the first slice of a long document was
+    indistinguishable from one built from a short document.
+    """
+    text = text or ""
+    cap = grounding_budget() if budget is None else budget
+    if len(text) <= cap:
+        return ClipResult(text=text, dropped=0, label=label)
+    return ClipResult(text=text[:cap], dropped=len(text) - cap, label=label)
+
+
+def truncation_finding(results: list[ClipResult]) -> Optional[TaskFinding]:
+    """A flag naming every source that did not fit, or None when all of them did.
+
+    Silent truncation is the failure this replaces — a thin deliverable built
+    from the first slice of a long document looks exactly like a thin document.
+    """
+    cut = [r for r in results if r.truncated]
+    if not cut:
+        return None
+    parts = ", ".join(
+        f"{r.label or 'material'} ({r.kept_ratio * 100:.0f}% used)" for r in cut)
+    return TaskFinding(
+        text=f"Grounding material exceeded the budget and was truncated: {parts}. "
+             f"Raise GROUNDING_MAX_CHARS or split the source if this matters.",
+        tone="flag")
 
 
 def artifact_text(st: ProjectState, ids: list[str]) -> str:
     """Serialize upstream artifact bodies into compact readable text for grounding."""
+    budget = grounding_budget()
     parts: list[str] = []
     for aid in ids:
         a = st.artifact(aid)
@@ -26,10 +81,10 @@ def artifact_text(st: ProjectState, ids: list[str]) -> str:
             continue
         parts.append(f"### {a.name} ({a.id}, {a.format})")
         if a.body:
-            parts.append(json.dumps(a.body, ensure_ascii=False)[:MAX_CTX_CHARS])
+            parts.append(clip(json.dumps(a.body, ensure_ascii=False), budget).text)
         elif a.content:
-            parts.append(a.content[:MAX_CTX_CHARS])
-    return "\n".join(parts)[: MAX_CTX_CHARS * 2]
+            parts.append(clip(a.content, budget).text)
+    return clip("\n".join(parts), budget * 2).text
 
 
 def pack_knowledge_text(st: ProjectState, include_rules: bool = False) -> str:
@@ -61,7 +116,7 @@ def pack_knowledge_text(st: ProjectState, include_rules: bool = False) -> str:
         parts.append("GENERAL KNOWLEDGE:\n" + "\n".join(
             f"- {n.title}: {n.body}" for n in gen.knowledge_notes if n.title or n.body))
 
-    return ("\n\n".join(parts))[: MAX_CTX_CHARS] if parts else ""
+    return clip("\n\n".join(parts)).text if parts else ""
 
 
 def project_context(st: Optional[ProjectState]) -> str:
@@ -213,7 +268,7 @@ async def llm_recommendation(system: str, instruction: str) -> str:
         txt = await get_llm().chat(
             [{"role": "system", "content": system},
              {"role": "user", "content": instruction + "\n\nReply with 1-3 sentences, no markdown."}],
-            temperature=0.2, max_tokens=2048,
+            temperature=0.2,
         )
         return txt.strip()
     except Exception:  # noqa: BLE001

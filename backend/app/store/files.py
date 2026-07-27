@@ -160,7 +160,7 @@ class ProjectFiles:
             return True
 
     def extract_category_text(self, project_id: str, category: FileCategory,
-                              max_chars: int = 9000) -> str:
+                              max_chars: Optional[int] = None) -> str:
         """Concatenate extracted text from all parsed files in a category.
 
         Returns "" when the category is empty; S1 callers treat that as a blocked
@@ -179,10 +179,11 @@ class ProjectFiles:
                 result = extract_document(found[1])
                 if result.text:
                     parts.append(f"### {rec.filename}\n{result.text}")
-            return "\n\n".join(parts)[:max_chars]
+            from app.agents.common import clip
+            return clip("\n\n".join(parts), max_chars).text
 
     def extract_category_files(self, project_id: str, category: FileCategory,
-                               per_file_cap: int = 12000) -> list[tuple[str, str]]:
+                               per_file_cap: Optional[int] = None) -> list[tuple[str, str]]:
         """Per-file extracted text: [(filename, text), ...] for each parsed file.
 
         Unlike extract_category_text (which concatenates every file then truncates
@@ -191,6 +192,7 @@ class ProjectFiles:
         file instead of only the ones that fit under a shared budget.
         """
         with self._lock:
+            from app.agents.common import clip
             records = [f for f in self._read_index(project_id)
                        if f.category == category and f.parsed]
             out: list[tuple[str, str]] = []
@@ -200,7 +202,7 @@ class ProjectFiles:
                     continue
                 result = extract_document(found[1])
                 if result.text:
-                    out.append((rec.filename, result.text[:per_file_cap]))
+                    out.append((rec.filename, clip(result.text, per_file_cap).text))
             return out
 
     def has_category(self, project_id: str, category: FileCategory) -> bool:

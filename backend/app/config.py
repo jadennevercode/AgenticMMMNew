@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     llm_paced_interval: float = 7.0
     asr_timeout: int = 600
 
+    # How much grounding material one agent call may see (characters). This used
+    # to be a dozen independently-chosen constants applied silently, so a 200-page
+    # deck and its first six thousand characters produced indistinguishable
+    # deliverables. Handlers that still have to clip now say so (see
+    # agents.common.truncation_finding).
+    grounding_max_chars: int = 100_000
+
     # Storage / data
     data_dir: str = "./data"
     db_path: str = "./data/mmm.db"

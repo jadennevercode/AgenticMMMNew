@@ -102,12 +102,31 @@ Each task has a collaboration/execution class that determines who runs it:
   exist in their Project-Folder category (no reference fallback) — autopilot skips them rather
   than fabricating input. The S2 data gate (2.1 Data Processing) carries `requiresMapping` **and**
   `requiresManifest`: it clears when the **FactorTree↔DataAssets mapping** is fully resolved —
-  every active factor row is either mapped by a published Data-Engine indicator or explicitly
+  every active factor row is either supplied by ≥1 published coverage record or explicitly
   **ignored** (`ProjectState.factor_map_ignores`, rowId→note) — **OR** the legacy per-L3 manifest
   validates (slot-upload projects). `app/dataeng/mapping.py::resolve_factor_map` / `mapping_complete`
-  derive per-row status (mapped/ignored/pending) from the published indicators; `engine.data_intake_ready`
-  combines the two paths. When no factor tree exists it degrades to the `requiresUpload` file-presence
-  check. Endpoints: `GET /factor-map`, `PUT /factor-map/ignore` (re-renders `a-data-processing`).
+  derive per-row status (mapped/ignored/pending) from the coverage records publish attaches to
+  factor rows; `engine.data_intake_ready` combines the two paths. When no factor tree exists it
+  degrades to the `requiresUpload` file-presence check. Endpoints: `GET /factor-map`,
+  `PUT /factor-map/ignore` (re-renders `a-data-processing`).
+
+**The Factor Tree IS the indicator catalog.** An `Indicator` is a *projection* of an active
+factor row (`app/dataeng/indicators.py`), never an entity the data manufactures. It exists the
+moment the tree is confirmed — the Data Engine shows the collection target before the first
+upload — and publishing only attaches an `IndicatorCoverage` ("this asset's metric supplies this
+row", `service.claim_published_metrics`). Three rules:
+
+- **Derive, don't store.** `ProjectState.indicators` is legacy, drained by `heal_state`
+  (`_migrate_indicators_to_coverage` carries every `bound_by="human"` binding across — dropping
+  those is the one irreversible failure here). Persisted state is `factor_tree` (the definition)
+  + `indicator_coverage` (the supply). Same rule as the ledger, for the same reason: a stored
+  copy eventually disagrees with the tree it was copied from.
+- **A metric no factor asked for is an orphan** (`tree_row_id == ""`), listed apart and resolved
+  by adoption into the tree (`source="data_upload"`, accepted on the spot — the S1 gates are
+  long closed) or dismissal (`app/dataeng/orphans.py`). It is never presented as a project
+  indicator; that is exactly what the old `treeGrounded=False` row did.
+- **One row may be supplied by several sources** (TV spend split across two files); one
+  published metric supplies at most one row, and at most one *human pin* per row represents it.
 
 ### Backend execution flow
 
@@ -126,7 +145,9 @@ app/mmm/               OLS MMM engine: transforms (adstock/Hill) · ols · pivot
 app/ingest/            real reference-data parsers (xlsx/xlsm/docx): dataset, factor_tree,
                        business, interviews, data_dictionary, validation, reference ·
                        extract.py = generic uploaded-file extractor (pdf/pptx/docx/xlsx/csv)
-app/agents/sources.py  grounding resolver: prefer uploaded Project-Folder files, else reference
+app/dataeng/indicators.py  the indicator catalog, DERIVED from the factor tree × coverage
+app/dataeng/orphans.py     adopt a supplied-but-undeclared metric into the tree, or dismiss it
+app/agents/sources.py  grounding resolver: uploaded Project-Folder files only (S1 has no fallback)
 app/agents/validation_rules.py  S1 preliminary data checks (completeness/granularity/volatility/YoY)
 app/domain/            models.py (Pydantic, mirror frontend types.ts) · blueprint.py (the DAG) ·
                        industries.py (L1–L3 industry taxonomy, mirrors lib/industries.ts)
@@ -309,6 +330,12 @@ the pipeline runs on. Path is configurable via `REFERENCE_DIR` in `backend/.env`
 
 ## Conventions
 
+- **Grounding material is budgeted once, and truncation is loud.** `Settings.grounding_max_chars`
+  (default 100k, `.env`-overridable) replaces the dozen hardcoded `[:6000]`/`9000`/`12000` slices
+  S1 used to apply silently — a 200-page deck and its first six thousand characters produced
+  indistinguishable deliverables. Clip through `agents.common.clip()` and emit
+  `truncation_finding()` when anything is dropped; never reintroduce a bare slice on grounding
+  text. Display limits (`evidence[:200]`, `title[:120]`) are not grounding and stay as they are.
 - **Backend numbers come from `app/mmm`**, not the LLM. The assistant/report prompts are
   explicitly told the computed `MODEL RESULTS` line is authoritative; keep it that way — don't
   let narrative agents invent metrics.

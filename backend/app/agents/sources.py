@@ -8,17 +8,20 @@ present, so by the time a producing S1 handler runs the category is non-empty.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from app.domain.models import FileCategory
 from app.store.files import get_files
 
 
-def category_text(project_id: str, category: FileCategory, max_chars: int = 9000) -> str:
+def category_text(project_id: str, category: FileCategory,
+                  max_chars: Optional[int] = None) -> str:
     """Extracted text from a project-folder category, or "" if empty."""
     return get_files().extract_category_text(project_id, category, max_chars=max_chars)
 
 
 def category_files(project_id: str, category: FileCategory,
-                   per_file_cap: int = 12000) -> list[tuple[str, str]]:
+                   per_file_cap: Optional[int] = None) -> list[tuple[str, str]]:
     """Per-file extracted text for a project-folder category (uploads only)."""
     return get_files().extract_category_files(project_id, category,
                                               per_file_cap=per_file_cap)
