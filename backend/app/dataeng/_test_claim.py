@@ -1,0 +1,101 @@
+"""Publish claims factor rows; it does not manufacture indicators.
+
+Run: ``PYTHONPATH=. .venv/bin/python -m app.dataeng._test_claim``
+"""
+from __future__ import annotations
+
+import pandas as pd
+
+from app.domain.models import DataAsset, FactorRow, FactorTree, IndicatorCoverage
+from app.store.state import ProjectState
+
+
+def _st() -> ProjectState:
+    st = ProjectState(project_id="_t")
+    st.factor_tree = FactorTree(rows=[
+        FactorRow(id="ft-1", l1="MARKETING FACTOR", l2="ATL", l3="TV", l4="卫视",
+                  indicator="TV投放金额", source="template", status="baseline"),
+    ])
+    return st
+
+
+def _asset() -> DataAsset:
+    return DataAsset(id="a1", name="TV spend")
+
+
+def _df(l3: str = "TV", l4: str = "卫视", metric: str = "TV投放金额") -> pd.DataFrame:
+    return pd.DataFrame({
+        "metric": [metric] * 3,
+        "metric_type": ["spending"] * 3,
+        "l1": ["MARKETING FACTOR"] * 3, "l2": ["ATL"] * 3,
+        "l3": [l3] * 3, "l4": [l4] * 3,
+        "month": [202201, 202202, 202203],
+        "value": [1.0, 2.0, 3.0],
+    })
+
+
+# L3 alone is the resolver's looser anchor, so an unmatched mart has to miss on
+# L3 too — changing only L4 still claims the row, by design.
+_MISS = {"l3": "WAREHOUSE", "l4": "库存"}
+
+
+def test_matching_mart_claims_the_row_and_makes_no_indicator() -> None:
+    from app.dataeng.dbt import service
+    st = _st()
+    covs = service.claim_published_metrics(st, _asset(), _df())
+
+    assert len(covs) == 1
+    assert covs[0].tree_row_id == "ft-1", "full L1–L4 path claims the row"
+    assert covs[0].bound_by == "auto"
+    assert covs[0].coverage_start == "202201" and covs[0].coverage_end == "202203"
+    assert covs[0].rows == 3
+    assert st.indicators == [], "publish no longer writes the legacy catalog"
+
+
+def test_unmatched_metric_becomes_an_orphan() -> None:
+    from app.dataeng.dbt import service
+    from app.dataeng import indicators as ind
+    st = _st()
+    service.claim_published_metrics(st, _asset(), _df(**_MISS, metric="仓库库存"))
+
+    assert ind.declared_indicators(st)[0].asset_id == "", "the factor is still unsupplied"
+    orph = ind.orphan_indicators(st)
+    assert len(orph) == 1 and orph[0].metric == "仓库库存"
+
+
+def test_human_pin_survives_republish() -> None:
+    from app.dataeng.dbt import service
+    st = _st()
+    covs = service.claim_published_metrics(st, _asset(), _df(**_MISS))
+    covs[0].tree_row_id = "ft-1"
+    covs[0].bound_by = "human"
+
+    service.claim_published_metrics(st, _asset(), _df(**_MISS))
+    after = st.indicator_coverage
+    assert len(after) == 1
+    assert after[0].tree_row_id == "ft-1" and after[0].bound_by == "human", \
+        "a human binding is a decision, not derived state"
+
+
+def test_republish_replaces_only_this_asset() -> None:
+    from app.dataeng.dbt import service
+    st = _st()
+    st.indicator_coverage.append(IndicatorCoverage(
+        id="other", tree_row_id="", asset_id="a2", asset_name="Other", metric="m"))
+    service.claim_published_metrics(st, _asset(), _df())
+    assert {c.asset_id for c in st.indicator_coverage} == {"a1", "a2"}
+
+
+def main() -> int:
+    for fn in (test_matching_mart_claims_the_row_and_makes_no_indicator,
+               test_unmatched_metric_becomes_an_orphan,
+               test_human_pin_survives_republish,
+               test_republish_replaces_only_this_asset):
+        fn()
+        print(f"ok  {fn.__name__}")
+    print("all publish-claim tests passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

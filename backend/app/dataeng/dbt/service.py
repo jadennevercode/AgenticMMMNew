@@ -19,9 +19,10 @@ from app.dataeng.duck import sanitize_ident
 from app.agents.indicator_metadata import (
     INDICATOR_META_RULE_VERSION, classify_indicator,
 )
+from app.dataeng import indicators
 from app.domain.models import (
     DataAsset, DataAssetVersion, DbtNode, DbtSummary, EnumMapEntry, EnumViolation,
-    Indicator, SchemaConformance,
+    IndicatorCoverage, SchemaConformance,
 )
 
 
@@ -534,21 +535,28 @@ def _indicator_id(asset_id: str, vals: dict) -> str:
     return f"ind-{asset_id}-{hashlib.sha1(key.encode('utf-8')).hexdigest()[:10]}"
 
 
-def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicator]:
-    """Register one indicator per (metric × factor path) in the published mart, so
-    Data Intake can reference indicators instead of raw files. Each indicator is
-    grounded against the Business-Understanding factor tree when a row matches
-    (unmatched ones are flagged for review). Replaces this asset's prior indicators —
-    but a human's row binding is a decision, not derived state, so it is carried
-    across by id rather than discarded on every publish."""
-    human_bindings = {ind.id: ind.tree_row_id for ind in st.indicators
-                      if ind.asset_id == asset.id and ind.bound_by == "human" and ind.tree_row_id}
-    st.indicators = [ind for ind in st.indicators if ind.asset_id != asset.id]
+def claim_published_metrics(st, asset: DataAsset, df: pd.DataFrame) -> list[IndicatorCoverage]:
+    """Attach this asset's metrics to the factor rows they supply.
+
+    Publish no longer *creates* indicators — the factor tree already declared
+    them (``app/dataeng/indicators.py``). Each (metric × factor path) in the mart
+    claims the row it matches, recorded as an ``IndicatorCoverage``; anything
+    that matches nothing is an orphan (``tree_row_id == ""``) and is offered back
+    to the tree rather than presented as a project indicator.
+
+    Replaces this asset's prior coverage — but a human's row binding is a
+    decision, not derived state, so it is carried across by id rather than
+    discarded on every publish.
+    """
+    pins = {c.id: c.tree_row_id for c in st.indicator_coverage
+            if c.asset_id == asset.id and c.bound_by == "human" and c.tree_row_id}
+    st.indicator_coverage = [c for c in st.indicator_coverage if c.asset_id != asset.id]
     if "metric" not in df.columns:
         return []
 
     # Factor-tree lookup: full L1–L4 path first, then L3-only as a looser anchor.
-    tree_rows = (st.factor_tree.rows if getattr(st, "factor_tree", None) else [])
+    tree_rows = [r for r in (st.factor_tree.rows if getattr(st, "factor_tree", None) else [])
+                 if r.status in indicators.ACTIVE_STATUSES]
     by_path = {_norm_path(r.l1, r.l2, r.l3, r.l4): r for r in tree_rows}
     by_l3 = {}
     for r in tree_rows:
@@ -557,7 +565,7 @@ def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicato
 
     key_cols = [c for c in ("metric", "metric_type", "l1", "l2", "l3", "l4") if c in df.columns]
     period = df["month"] if "month" in df.columns else (df["year"] if "year" in df.columns else None)
-    new: list[Indicator] = []
+    new: list[IndicatorCoverage] = []
     for keys, grp in df.groupby(key_cols, dropna=False):
         vals = dict(zip(key_cols, keys if isinstance(keys, tuple) else (keys,)))
         cov_start = cov_end = ""
@@ -568,30 +576,33 @@ def register_indicators(st, asset: DataAsset, df: pd.DataFrame) -> list[Indicato
         row = (by_path.get(_norm_path(vals.get("l1", ""), vals.get("l2", ""),
                                       vals.get("l3", ""), vals.get("l4", "")))
                or by_l3.get(_norm_path(vals.get("l3", ""))))
-        # FND-001: classify the indicator's semantic profile (type/unit/aggregation/
-        # format) from its metric name once, at publish, so downstream reads metadata
+        # FND-001: classify the metric's semantic profile (type/unit/aggregation/
+        # format) from its name once, at publish, so downstream reads metadata
         # rather than re-guessing. The OLS role (`metricType`) is left as-is.
         meta = classify_indicator(str(vals.get("metric", "")))
-        ind_id = _indicator_id(asset.id, vals)
-        pinned = human_bindings.get(ind_id, "")
-        ind = Indicator(
-            id=ind_id,
+        cov_id = _indicator_id(asset.id, vals)
+        pinned = pins.get(cov_id, "")
+        new.append(IndicatorCoverage(
+            id=cov_id,
+            treeRowId=pinned or (row.id if row is not None else ""),
+            assetId=asset.id, assetName=asset.name,
             metric=str(vals.get("metric", "")),
             metricType=str(vals.get("metric_type", "")),
             l1=str(vals.get("l1", "")), l2=str(vals.get("l2", "")),
             l3=str(vals.get("l3", "")), l4=str(vals.get("l4", "")),
             semanticType=meta.metric_type, unit=meta.unit, currency=meta.currency,
-            aggregation=meta.aggregation, numberFormat=meta.fmt, source="data_upload",
+            aggregation=meta.aggregation, numberFormat=meta.fmt,
             ruleVersion=INDICATOR_META_RULE_VERSION,
-            assetId=asset.id, assetName=asset.name,
             coverageStart=cov_start, coverageEnd=cov_end, rows=int(len(grp)),
-            treeGrounded=bool(pinned) or row is not None,
-            treeRowId=pinned or (row.id if row is not None else ""),
             boundBy="human" if pinned else ("auto" if row is not None else ""),
-        )
-        new.append(ind)
-    st.indicators.extend(new)
+        ))
+    st.indicator_coverage.extend(new)
     return new
+
+
+# Transitional alias — seed_reference_assets and _test_flow still call the old
+# name; both move in the migration task.
+register_indicators = claim_published_metrics
 
 
 # ── helpers ──────────────────────────────────────────────
