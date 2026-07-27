@@ -927,6 +927,18 @@ def accept_factor_rows(st: ProjectState, source_set: set[str]) -> None:
     for r in st.factor_tree.rows:
         if r.status == "proposed" and r.source in source_set:
             r.status = "accepted"
+    rerender_factor_tree(st)
+
+
+def rerender_factor_tree(st: ProjectState) -> None:
+    """Re-render a-factor-tree from the current rows, after an out-of-band edit.
+
+    Anything that mutates `st.factor_tree` outside a producing handler (a gate
+    acceptance, an orphan adoption in the Data Engine) has to call this, or the
+    artifact keeps rendering the tree as it was before the edit.
+    """
+    if st.factor_tree is None:
+        return
     art = st.artifact("a-factor-tree")
     if art is not None:
         art.body = _factor_tree_sheet(st.factor_tree)

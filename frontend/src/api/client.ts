@@ -309,6 +309,14 @@ export const api = {
     req<TargetColumn[]>(`${p(projectId)}/target-schema`, { method: 'PUT', body: JSON.stringify(cols) }),
   getIndicators: (projectId: string) =>
     req<Indicator[]>(`${p(projectId)}/indicators`),
+  /** Add a supplied-but-undeclared metric to the factor tree, and claim it. */
+  adoptOrphanIndicator: (projectId: string, coverageId: string) =>
+    req<Indicator[]>(`${p(projectId)}/indicators/orphans/${coverageId}/adopt`,
+      { method: 'POST' }),
+  /** Drop an orphan metric from the catalog (it supplies no factor). */
+  dismissOrphanIndicator: (projectId: string, coverageId: string) =>
+    req<Indicator[]>(`${p(projectId)}/indicators/orphans/${coverageId}/dismiss`,
+      { method: 'POST' }),
   validationSeries: (projectId: string, body: ValidationSeriesRequest) =>
     req<ValidationSeriesResponse>(`${p(projectId)}/validation/series`, {
       method: 'POST',

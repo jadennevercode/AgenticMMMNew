@@ -891,6 +891,35 @@ async def get_indicators(project_id: str) -> list[dict]:
     return [i.model_dump(by_alias=True) for i in derive_indicators(st)]
 
 
+@app.post("/api/projects/{project_id}/indicators/orphans/{coverage_id}/adopt")
+async def adopt_orphan(project_id: str, coverage_id: str) -> list[dict]:
+    """Add a supplied-but-undeclared metric to the factor tree, and claim it."""
+    from app.agents.business import rerender_factor_tree
+    from app.dataeng import orphans
+    from app.dataeng.indicators import derive_indicators
+    st = _require_state(project_id)
+    try:
+        orphans.adopt(st, coverage_id)
+    except KeyError as e:
+        raise HTTPException(404, f"No such indicator: {coverage_id}") from e
+    rerender_factor_tree(st)
+    get_store().save(project_id)
+    return [i.model_dump(by_alias=True) for i in derive_indicators(st)]
+
+
+@app.post("/api/projects/{project_id}/indicators/orphans/{coverage_id}/dismiss")
+async def dismiss_orphan(project_id: str, coverage_id: str) -> list[dict]:
+    """Drop an orphan metric from the catalog (it supplies no factor)."""
+    from app.dataeng import orphans
+    from app.dataeng.indicators import derive_indicators
+    st = _require_state(project_id)
+    if not orphans.dismiss(st, coverage_id):
+        raise HTTPException(409, "That indicator is not an orphan — release it in "
+                                 "the factor map first.")
+    get_store().save(project_id)
+    return [i.model_dump(by_alias=True) for i in derive_indicators(st)]
+
+
 # ── Business Validation live series (task 2.3) ───────────
 class ValidationSeriesQuery(BaseModel):
     l3: str
