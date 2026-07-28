@@ -764,42 +764,6 @@ def _minutes_files(st: ProjectState) -> list[tuple[str, str]]:
                                   per_file_cap=_MINUTES_PER_FILE_CHARS)
 
 
-def _merge_minutes_digests(results: list[dict]) -> dict:
-    """Merge per-transcript digests. Answers fill-first per question number, factor
-    changes dedup by (op, l1..l4, indicator), insights cap at _MAX_INSIGHTS."""
-    answers: dict[int, dict] = {}
-    changes: list[dict] = []
-    change_keys: set[tuple] = set()
-    insights: list[dict] = []
-    for res in results:
-        if not isinstance(res, dict):
-            continue
-        for a in res.get("answers", []) or []:
-            if not isinstance(a, dict):
-                continue
-            try:
-                n = int(a.get("n", 0))
-            except (TypeError, ValueError):
-                continue
-            if n <= 0 or n in answers:
-                continue
-            if str(a.get("answer", "")).strip():
-                answers[n] = a
-        for ch in res.get("factor_changes", []) or []:
-            if not isinstance(ch, dict):
-                continue
-            key = (str(ch.get("op", "add")), str(ch.get("l1", "")), str(ch.get("l2", "")),
-                   str(ch.get("l3", "")), str(ch.get("l4", "")), str(ch.get("indicator", "")))
-            if key in change_keys:
-                continue
-            change_keys.add(key)
-            changes.append(ch)
-        for ins in res.get("insights", []) or []:
-            if isinstance(ins, dict) and len(insights) < _MAX_INSIGHTS:
-                insights.append(ins)
-    return {"answers": answers, "factor_changes": changes, "insights": insights}
-
-
 def _make_real_target(department: str, participants: str, questions: list[dict]) -> dict:
     return {
         "id": _target_id("field", department), "layer": "field", "layerZh": department,
@@ -848,7 +812,7 @@ def _rebuild_targets_from_real_minutes(biz, files, results) -> list[dict]:
 
 def _merge_factor_side(results: list[dict]) -> dict:
     """Merge per-transcript factor_changes/insights only (no answers) — same
-    dedup key and insight cap as `_merge_minutes_digests`."""
+    dedup key and insight cap as the interview-answer rebuild path."""
     changes: list[dict] = []
     change_keys: set[tuple] = set()
     insights: list[dict] = []
@@ -975,26 +939,19 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
     results = await asyncio.gather(
         *(_digest_transcript(fn, tx, qlist, st) for fn, tx in files))
     files_used = sum(1 for r in results if isinstance(r, dict) and r)
-    merged = _merge_minutes_digests(results)
 
-    # ── Issue 1: write the AI-parsed final answers back as a COLUMN on each
-    # existing question row (not a separate sheet). ──
-    answers = merged["answers"]
-    answered = 0
-    for i, (q, _label) in enumerate(biz):
-        a = answers.get(i + 1)
-        ans_text = str(a.get("answer", "")).strip() if isinstance(a, dict) else ""
-        if ans_text:
-            q["finalAnswer"] = ans_text
-            q["answerSource"] = str(a.get("source", "")).strip() if isinstance(a, dict) else ""
-            answered += 1
-    if targets:
-        eng.set_analysis(st, "interview_targets", targets)
-        eng.set_analysis(st, "interview_questions", _flatten_targets(targets))
-        eng.produce(st, "a-interview", body=_interview_sheets(targets), state="draft", agent="business")
+    # ── Interview structure: rebuild into the client's REAL departments (from the
+    # minutes) — backfilled outline answers + newly-raised questions. ──
+    new_targets = _rebuild_targets_from_real_minutes(biz, files, results)
+    answered = sum(1 for t in new_targets for q in t["questions"] if q.get("origin") == "提纲")
+    emergent = sum(1 for t in new_targets for q in t["questions"] if q.get("origin") == "新问题")
+    eng.set_analysis(st, "interview_targets", new_targets)
+    eng.set_analysis(st, "interview_questions", _flatten_targets(new_targets))
+    eng.produce(st, "a-interview", body=_interview_sheets(new_targets), state="draft", agent="business")
     eng.emit(st, "business", "info",
-             f"Interview digest: {files_used}/{len(files)} transcripts used, "
-             f"{answered}/{len(biz)} business questions answered.", task["id"])
+             f"Interview digest: {files_used}/{len(files)} transcripts used → "
+             f"{len(new_targets)} departments · {answered} outline answers backfilled · "
+             f"{emergent} new questions extracted.", task["id"])
     if files_used < len(files):
         eng.emit(st, "business", "finding",
                  f"Only {files_used}/{len(files)} interview transcripts produced a usable "
@@ -1003,6 +960,7 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
 
     # ── Issue 2: interview-driven factor changes → 'proposed' rows on the factor
     # tree (user accepts at gate 1.4d) + proposals. ──
+    merged = _merge_factor_side(results)
     changes = merged["factor_changes"]
     if not changes:
         eng.emit(st, "business", "finding",
