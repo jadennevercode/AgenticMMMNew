@@ -911,7 +911,6 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
                 "\"finding\":str,\"confidence\":0-1}]}\n\n"
                 f"OUTLINE:\n{qlist}\n\nTRANSCRIPT ({filename}):\n{text}"
             ),
-            max_tokens=4000,
             timeout=_MINUTES_LLM_TIMEOUT,
         )
         return obj if isinstance(obj, dict) else {}

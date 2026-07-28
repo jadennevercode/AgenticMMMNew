@@ -22,27 +22,40 @@ def test_department_from_filename():
     print("OK department_from_filename")
 
 def test_rebuild_targets():
-    # outline: 2 business questions
+    # outline: 3 business questions — q1 will be double-claimed (fill-first),
+    # q2 answered once, q3 answered by no one (must be dropped).
     q1 = {"qType": "business", "question": "渠道占比?", "relatedFactorPath": "", "origin": "提纲"}
     q2 = {"qType": "business", "question": "新品节奏?", "relatedFactorPath": "", "origin": "提纲"}
-    biz = [(q1, "Marketing"), (q2, "Management")]
+    q3 = {"qType": "business", "question": "全年预算?", "relatedFactorPath": "", "origin": "提纲"}
+    biz = [(q1, "Marketing"), (q2, "Management"), (q3, "Ops")]
     files = [("市场部访谈.docx", "..."), ("管理层访谈.docx", "...")]
     results = [
         {"department": "市场部", "participants": "张三",
          "answers": [{"n": 1, "answer": "约40%", "source": "市场部纪要"}],
          "new_questions": [{"question": "竞品促销力度?", "answer": "很强", "source": "市场部纪要"}]},
         {"department": "", "participants": "",
-         "answers": [{"n": 2, "answer": "季度上新", "source": "管理层纪要"}],
+         # file-2 also tries to answer q1 (already claimed by file-1) — must be
+         # ignored (fill-first), only its q2 answer should land.
+         "answers": [{"n": 2, "answer": "季度上新", "source": "管理层纪要"},
+                     {"n": 1, "answer": "50%(重复)", "source": "管理层纪要"}],
          "new_questions": []},
     ]
     targets = B._rebuild_targets_from_real_minutes(biz, files, results)
     assert [t["layerZh"] for t in targets] == ["市场部", "管理层访谈".replace("访谈", "")], \
         [t["layerZh"] for t in targets]   # file-2 dept falls back to filename
-    mkt = targets[0]
-    origins = [(q["question"], q["origin"], q.get("finalAnswer", "")) for q in mkt["questions"]]
-    assert ("渠道占比?", "提纲", "约40%") in origins, origins
-    assert ("竞品促销力度?", "新问题", "很强") in origins, origins
+    mkt, mgmt = targets[0], targets[1]
+    mkt_origins = [(q["question"], q["origin"], q.get("finalAnswer", "")) for q in mkt["questions"]]
+    mgmt_origins = [(q["question"], q["origin"], q.get("finalAnswer", "")) for q in mgmt["questions"]]
+    assert ("渠道占比?", "提纲", "约40%") in mkt_origins, mkt_origins
+    assert ("竞品促销力度?", "新问题", "很强") in mkt_origins, mkt_origins
     assert mkt["participants"] == "张三"
+    # fill-first: q1 was claimed by file-1, so file-2's duplicate attempt at n=1
+    # must NOT appear anywhere in file-2's rebuilt target.
+    assert not any(q["question"] == "渠道占比?" for q in mgmt["questions"]), mgmt_origins
+    assert ("新品节奏?", "提纲", "季度上新") in mgmt_origins, mgmt_origins
+    # unanswered outline question (q3, 全年预算?) is dropped entirely — not in any target.
+    all_questions = [q["question"] for t in targets for q in t["questions"]]
+    assert "全年预算?" not in all_questions, all_questions
     print("OK rebuild_targets")
 
 def test_merge_factor_side_keeps_changes():
