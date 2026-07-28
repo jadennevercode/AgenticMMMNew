@@ -257,6 +257,52 @@ def _apply_reconcile_verdicts(template_rows: list[FactorRow],
     return out
 
 
+async def _reconcile_baseline_with_materials(st: ProjectState,
+                                             template_rows: list[FactorRow]) -> list[FactorRow]:
+    """Reconcile the template baseline against the uploaded materials: keep the
+    factors the materials support, rename to align wording, downgrade the ones the
+    materials don't mention to 'proposed' (user decides at d-1.21). Verbatim
+    fallback when there are no materials or the LLM yields nothing."""
+    if not template_rows:
+        return template_rows
+    materials = sources.category_text(st.project_id, "industry_reference")
+    if not materials.strip():
+        return template_rows
+    numbered = "\n".join(
+        f"{i}. {r.l1}/{r.l2}/{r.l3}/{r.l4} · {r.indicator}" for i, r in enumerate(template_rows, 1))
+    try:
+        obj = await get_llm().json(
+            system=agent_system("business", st),
+            user=(
+                "You are reconciling a standard industry factor-tree template against a "
+                "brand's uploaded materials. For EACH numbered template factor, decide:\n"
+                "- keep: the materials support this factor as-is.\n"
+                "- rename: the materials cover this factor but use different wording — give the "
+                "aligned 'indicator' name (keep l1-l4).\n"
+                "- downgrade: the materials do NOT mention it or contradict it (do not delete — "
+                "it will be offered for the analyst to confirm).\n"
+                "Judge against the materials; when unsure, keep. Return JSON: "
+                "{\"verdicts\":[{\"n\":int,\"decision\":\"keep|rename|downgrade\","
+                "\"indicator\":str,\"rationale\":str}]}\n\n"
+                f"TEMPLATE FACTORS:\n{numbered}\n\nMATERIALS:\n{materials[:6000]}"
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        obj = {}
+    recs = obj.get("verdicts", []) if isinstance(obj, dict) else []
+    verdicts: dict[int, dict] = {}
+    for rec in recs:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            verdicts[int(rec.get("n", 0))] = rec
+        except (TypeError, ValueError):
+            continue
+    if not verdicts:
+        return template_rows   # nothing usable → verbatim
+    return _apply_reconcile_verdicts(template_rows, verdicts)
+
+
 def _uploaded_factor_rows(st: ProjectState) -> list[FactorRow]:
     """Parse the user's own factor-tree workbook(s) from the `factor_tree`
     Project-Folder category into baseline FactorRows (source='upload')."""
@@ -548,7 +594,7 @@ async def derive_factor_tree(eng: Engine, st: ProjectState, task: dict) -> None:
             # User chose upload but nothing parsed — don't fabricate; fall back to the
             # template baseline and flag it so they can re-upload a valid workbook.
             eng.add_findings(st, task["id"], [_unreadable_upload_finding("a-factor-tree", "Factor Tree")])
-        baseline = template_rows
+        baseline = await _reconcile_baseline_with_materials(st, template_rows)
 
     grounded = baseline + supplement
     # Ground AI recommendations strictly on the user's uploaded industry materials.

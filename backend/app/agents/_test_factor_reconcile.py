@@ -1,10 +1,19 @@
 """Runnable checks for the factor-tree template↔materials reconcile (no LLM)."""
-from app.domain.models import FactorRow
+import asyncio
+
+from app.domain.models import FactorRow, IndustryRef, ProjectMeta
+from app.store.state import ProjectState
 from app.agents import business as B
 
 def _row(i, ind):
     return FactorRow(id=f"ft-tpl-{i}", l1="生意", l2="外部", l3="品类", l4="规模",
                      indicator=ind, dimension="", source="template", status="baseline")
+
+def _bare_state():
+    meta = ProjectMeta(id="t-reconcile", name="t", brand="b",
+                       industry=IndustryRef(l1="beverage", l2="functional", l3="sports"),
+                       createdAt="2026-01-01T00:00:00+00:00")
+    return ProjectState(project_id="t-reconcile", meta=meta)
 
 def test_apply_reconcile_verdicts():
     rows = [_row(0, "市场规模"), _row(1, "GDP增速"), _row(2, "竞品数")]
@@ -29,9 +38,18 @@ def test_missing_verdict_defaults_to_keep():
     assert out[0].status == "baseline" and out[0].indicator == "市场规模"
     print("OK missing_verdict_defaults_to_keep")
 
+def test_reconcile_falls_back_without_materials():
+    st = _bare_state()   # no uploaded materials in this project
+    rows = [_row(0, "市场规模"), _row(1, "GDP增速")]
+    out = asyncio.run(B._reconcile_baseline_with_materials(st, rows))
+    assert [r.indicator for r in out] == ["市场规模", "GDP增速"]
+    assert all(r.status == "baseline" for r in out)   # untouched verbatim
+    print("OK reconcile_falls_back_without_materials")
+
 def main():
     test_apply_reconcile_verdicts()
     test_missing_verdict_defaults_to_keep()
+    test_reconcile_falls_back_without_materials()
 
 if __name__ == "__main__":
     main()
