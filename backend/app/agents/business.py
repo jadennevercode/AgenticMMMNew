@@ -9,6 +9,7 @@ baseline skeleton; the LLM adds grounding on top of the uploaded sources.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from itertools import product
 
@@ -737,6 +738,20 @@ async def draft_interview(eng: Engine, st: ProjectState, task: dict) -> None:
 
 _MINUTES_PER_FILE_CHARS = 12000   # single-file cap; real transcripts are 1–9k
 _MAX_INSIGHTS = 3                  # merged insight cap (was [:2] on one call)
+
+
+_DEPT_STRIP = re.compile(r"(访谈|纪要|minutes|interview|记录)", re.IGNORECASE)
+_DEPT_PREFIX = re.compile(r"^(layer\d+|第[0-9一二三四五六七八九十]+层)[ _-]+", re.IGNORECASE)
+
+
+def _department_from_filename(filename: str) -> str:
+    """Best-effort department label from an interview file name. Client file names
+    clearly name the department (e.g. '市场部访谈.docx'); AI content inference is the
+    fallback used by the digest, not here."""
+    stem = os.path.splitext(os.path.basename(filename or ""))[0]
+    stem = _DEPT_PREFIX.sub("", stem)
+    stem = _DEPT_STRIP.sub("", stem)
+    return re.sub(r"[ _\-·]+", " ", stem).strip()
 
 
 def _minutes_files(st: ProjectState) -> list[tuple[str, str]]:
