@@ -1190,6 +1190,31 @@ async def transcribe_audio(eng: Engine, st: ProjectState, task: dict) -> None:
 _MAX_REQUEST_SHEETS = 12
 
 
+def _dr_key(l3: str, l4: str) -> str:
+    return f"{l3}||{l4}"
+
+
+def _apply_field_edits(by_l3: dict, edits: dict) -> dict:
+    """Apply accepted per-L4 indicator add/removes to the L3->L4->[indicators] map.
+
+    Pure: returns a new map, never mutates `by_l3`. Reads only `added`/`removed`
+    from each edit bucket (robust to a missing `rejected` key — that bucket is
+    populated by the review UI in a later task and ignored here).
+    """
+    out: dict = {}
+    for l3, l4s in by_l3.items():
+        out[l3] = {}
+        for l4, indicators in l4s.items():
+            e = edits.get(_dr_key(l3, l4), {}) if isinstance(edits, dict) else {}
+            removed = set(e.get("removed", []) or [])
+            cols = [i for i in indicators if i not in removed]
+            for add in e.get("added", []) or []:
+                if add and add not in cols:
+                    cols.append(add)
+            out[l3][l4] = cols
+    return out
+
+
 async def gen_data_request(eng: Engine, st: ProjectState, task: dict) -> None:
     """Lay out the data-request workbook: one template per L3, one sheet per L4.
 
@@ -1210,6 +1235,7 @@ async def gen_data_request(eng: Engine, st: ProjectState, task: dict) -> None:
         by_l3.setdefault(l3, {}).setdefault(l4, [])
         if r.indicator and r.indicator not in by_l3[l3][l4]:
             by_l3[l3][l4].append(r.indicator)
+    by_l3 = _apply_field_edits(by_l3, st.data_request_field_edits)
 
     index_rows = [[l3, str(len(l4s)), str(sum(len(i) for i in l4s.values()))]
                   for l3, l4s in by_l3.items()]
