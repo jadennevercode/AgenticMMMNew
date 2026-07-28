@@ -702,6 +702,28 @@ def _flatten_targets(targets: list[dict]) -> list[dict]:
     return flat
 
 
+_EXCEL_TAB_ILLEGAL = re.compile(r"[\[\]:*?/\\]")
+
+
+def _excel_safe_tab(name: str, used: set[str]) -> str:
+    """A workbook-safe sheet tab: strip Excel-illegal chars (`[]:*?/\\`), clamp to
+    the 31-char limit, and disambiguate collisions — including ones truncation
+    itself creates for long department names."""
+    base = _EXCEL_TAB_ILLEGAL.sub(" ", name).strip() or "Sheet"
+    tab = base[:31]
+    if tab not in used:
+        used.add(tab)
+        return tab
+    for i in range(2, 1000):
+        suffix = f" ({i})"
+        tab = base[:31 - len(suffix)].rstrip() + suffix
+        if tab not in used:
+            used.add(tab)
+            return tab
+    used.add(tab)
+    return tab
+
+
 def _interview_sheets(targets: list[dict]) -> dict:
     """Overview sheet + one sheet per target, with a banner (title + meta) above
     each per-target table — mirrors the Gatorade reference workbook."""
@@ -709,9 +731,10 @@ def _interview_sheets(targets: list[dict]) -> dict:
                       t["schedule"], str(t["durationMin"]), t["status"], str(len(t["questions"]))]
                      for t in targets]
     sheets: list[dict] = [{"name": "Overview", "columns": _OVERVIEW_COLUMNS, "rows": overview_rows}]
+    used_tabs: set[str] = {"Overview"}
     for t in targets:
         # Sheet tab name uses a tight `·` (Excel-friendly); the banner title is spaced.
-        tab = f"{t['layerZh']}·{t['team']}"
+        tab = _excel_safe_tab(f"{t['layerZh']}·{t['team']}", used_tabs)
         title = f"{t['layerZh']} · {t['team']}"
         meta = (f"Layer: {t['layer']}  |  Duration: {t['durationMin']} min  |  "
                 f"Status: {t['status']}  |  Participants: {t.get('participants') or '—'}")
@@ -740,8 +763,13 @@ _MINUTES_PER_FILE_CHARS = 12000   # single-file cap; real transcripts are 1–9k
 _MAX_INSIGHTS = 3                  # merged insight cap (was [:2] on one call)
 
 
-_DEPT_STRIP = re.compile(r"(访谈|纪要|minutes|interview|记录)", re.IGNORECASE)
-_DEPT_PREFIX = re.compile(r"^(layer\d+|第[0-9一二三四五六七八九十]+层)[ _-]+", re.IGNORECASE)
+_DEPT_PREFIX = re.compile(r"^(?:layer\d+|第[0-9一二三四五六七八九十]+层)[ _\-]+", re.IGNORECASE)
+# Only strip an interview/minutes marker when it TRAILS the name (with any
+# leading separators), anchored to the end — so a department NAME that contains
+# such a token mid-word ('记录部', 'Interviewer') is preserved. Longer combined
+# forms come first so they win the alternation.
+_DEPT_TRAILING = re.compile(
+    r"[ _\-·]*(?:会议纪要|会议记录|访谈|纪要|记录|minutes|interview)$", re.IGNORECASE)
 
 
 def _department_from_filename(filename: str) -> str:
@@ -750,7 +778,10 @@ def _department_from_filename(filename: str) -> str:
     fallback used by the digest, not here."""
     stem = os.path.splitext(os.path.basename(filename or ""))[0]
     stem = _DEPT_PREFIX.sub("", stem)
-    stem = _DEPT_STRIP.sub("", stem)
+    prev = None
+    while stem != prev:  # peel repeated trailing markers ('客户访谈纪要' → '客户')
+        prev = stem
+        stem = _DEPT_TRAILING.sub("", stem).rstrip(" _-·")
     return re.sub(r"[ _\-·]+", " ", stem).strip()
 
 

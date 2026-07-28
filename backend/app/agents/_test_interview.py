@@ -19,7 +19,30 @@ def test_department_from_filename():
     assert f("Layer3_电商部_纪要.txt") == "电商部", f("Layer3_电商部_纪要.txt")
     assert f("Sales Dept interview.md") == "Sales Dept", f("Sales Dept interview.md")
     assert f("   .txt") == "", f("   .txt")
+    # Only TRAILING markers are stripped — a department name that contains a
+    # marker token mid-word must be preserved (not over-stripped).
+    assert f("记录部访谈.docx") == "记录部", f("记录部访谈.docx")
+    assert f("Interviewer_Training.docx") == "Interviewer Training", f("Interviewer_Training.docx")
+    # Repeated trailing markers are all stripped.
+    assert f("客户访谈纪要.docx") == "客户", f("客户访谈纪要.docx")
+    assert f("销售部会议纪要.docx") == "销售部", f("销售部会议纪要.docx")
     print("OK department_from_filename")
+
+def test_interview_sheet_names_excel_safe():
+    # Excel sheet tabs must be ≤31 chars, free of []:*?/\, and unique within
+    # the workbook — even when long department names truncate to a collision.
+    long_a = "超长部门名称" * 6 + "A"          # >31 chars, unique tail A
+    long_b = "超长部门名称" * 6 + "B"          # >31 chars, same 31-char prefix as A
+    illegal = "市场[部]:x*?/\\y"               # contains every Excel-illegal char
+    targets = [B._make_real_target(d, "", []) for d in (long_a, long_b, illegal)]
+    sheets = B._interview_sheets(targets)
+    names = [s["name"] for s in sheets["sheets"]]
+    assert names[0] == "Overview", names
+    tab_names = names[1:]
+    assert all(len(n) <= 31 for n in tab_names), [(n, len(n)) for n in tab_names]
+    assert not any(ch in n for n in tab_names for ch in "[]:*?/\\"), tab_names
+    assert len(set(names)) == len(names), names   # all unique, incl. Overview
+    print("OK interview_sheet_names_excel_safe")
 
 def test_rebuild_targets():
     # outline: 3 business questions — q1 will be double-claimed (fill-first),
@@ -98,6 +121,7 @@ def main():
     test_rebuild_targets()
     test_merge_factor_side_keeps_changes()
     test_rebuild_targets_dedupes_duplicate_department()
+    test_interview_sheet_names_excel_safe()
 
 if __name__ == "__main__":
     main()
