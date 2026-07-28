@@ -608,8 +608,8 @@ _DATA_SUBQUESTIONS = [
     "数据口径是否已与业务现实对齐？是否存在已知缺口、口径调整或可比性问题？",
 ]
 
-_IV_COLUMNS = ["#", "Q Type", "Question", "Related Factor Path", "AI Pre-Answer",
-               "访谈回答", "回答来源", "Confidence", "Sources"]
+_IV_COLUMNS = ["#", "Q Type", "Question", "Related Factor Path", "Origin",
+               "访谈回答", "回答来源"]
 _OVERVIEW_COLUMNS = ["Target ID", "Layer", "Layer (中文)", "Team", "Participants",
                      "Proposed Schedule", "Duration (min)", "Status", "Question Count"]
 
@@ -662,8 +662,7 @@ def _data_questions(st: ProjectState) -> list[dict]:
         path_arrow = " › ".join(parts)
         for subq in _DATA_SUBQUESTIONS:
             out.append({"qType": "data", "question": f"[{path_arrow}] {subq}",
-                        "relatedFactorPath": path_slash, "preAnswer": "",
-                        "confidence": "low", "sources": []})
+                        "relatedFactorPath": path_slash, "origin": "提纲"})
     return out
 
 
@@ -685,8 +684,7 @@ def _build_targets(st: ProjectState) -> list[dict]:
                 grouped[key] = []
                 order.append(key)
             grouped[key].append({"qType": "business", "question": q.question.strip(),
-                                 "relatedFactorPath": "", "preAnswer": "",
-                                 "confidence": "low", "sources": []})
+                                 "relatedFactorPath": "", "origin": "提纲"})
     targets = [_make_target(layer, team, grouped[(layer, team)]) for (layer, team) in order]
     data_qs = _data_questions(st)
     if data_qs:
@@ -717,8 +715,7 @@ def _interview_sheets(targets: list[dict]) -> dict:
         meta = (f"Layer: {t['layer']}  |  Duration: {t['durationMin']} min  |  "
                 f"Status: {t['status']}  |  Participants: {t.get('participants') or '—'}")
         rows = [[str(i), q["qType"], q["question"], q.get("relatedFactorPath", ""),
-                 q.get("preAnswer", ""), q.get("finalAnswer", ""), q.get("answerSource", ""),
-                 q.get("confidence", ""), "; ".join(q.get("sources", []))]
+                 q.get("origin", "提纲"), q.get("finalAnswer", ""), q.get("answerSource", "")]
                 for i, q in enumerate(t["questions"], 1)]
         sheets.append({"name": tab, "preRows": [[title], [meta], []],
                        "columns": _IV_COLUMNS, "rows": rows})
