@@ -210,7 +210,7 @@ TASKS: list[TaskDef] = [
      "depends_on": ["1.21d"], "duration": 2, "produces": ["a-interview"]},
     {"id": "1.4a", "name": "Upload interview recordings", "agent": "business", "stage": "s1", "klass": "H",
      "summary": "Upload the interview recordings (audio) — or text minutes — for the AI to digest.",
-     "how": "You upload audio recordings (or text minutes); AI transcribes audio, then digests against its pre-answers.",
+     "how": "You upload audio recordings (or text minutes); AI transcribes audio, then digests each transcript into backfilled answers to the outline questions it covers plus any newly raised questions.",
      "basis_note": "分层访谈录音 / 纪要。", "work_note": "Waiting for the recordings.",
      "depends_on": ["1.3"], "duration": 1, "produces": [],
      "assignment": {"id": "in-1.4a", "kind": "upload", "title": "Upload interview recordings",

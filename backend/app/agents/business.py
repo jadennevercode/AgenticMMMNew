@@ -775,12 +775,24 @@ def _make_real_target(department: str, participants: str, questions: list[dict])
 def _rebuild_targets_from_real_minutes(biz, files, results) -> list[dict]:
     """One target per uploaded minutes file, keyed by its real department.
     Outline questions are backfilled fill-first by question number; unanswered
-    outline questions are dropped. New questions attach to the file that raised them."""
+    outline questions are dropped. New questions attach to the file that raised them.
+
+    Two files can resolve to the same department label (same declared department,
+    or the same filename-derived fallback) — each target's id/sheet-name is
+    derived from that label (`_target_id`, `_interview_sheets`), so a raw
+    collision would produce two targets with the same id and an illegal
+    duplicate xlsx sheet name. `seen_depts` disambiguates by suffixing a
+    counter on repeat: '市场部', '市场部 (2)', ...
+    """
     claimed: set[int] = set()
     targets: list[dict] = []
+    seen_depts: dict[str, int] = {}
     for (filename, _text), res in zip(files, results):
         res = res if isinstance(res, dict) else {}
         dept = str(res.get("department") or "").strip() or _department_from_filename(filename) or filename
+        seen_depts[dept] = seen_depts.get(dept, 0) + 1
+        if seen_depts[dept] > 1:
+            dept = f"{dept} ({seen_depts[dept]})"
         rows: list[dict] = []
         for a in res.get("answers", []) or []:
             if not isinstance(a, dict):
@@ -915,12 +927,12 @@ def confirm_interview_effect(st: ProjectState, option_id: str) -> None:
 
 async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
     files = _minutes_files(st)
-    targets = st.analysis.get("interview_targets", [])
+    outline_targets = st.analysis.get("interview_targets", [])
     # Collect references to the REAL business-question dicts (the flattened
     # interview_questions are copies). Data-team items are confirmed by the data
     # team, not covered by stakeholder minutes — skip them. Cap at 28.
     biz: list[tuple[dict, str]] = []
-    for t in targets:
+    for t in outline_targets:
         if t.get("layer") == "data":
             continue
         label = t.get("team") or t.get("layer", "")

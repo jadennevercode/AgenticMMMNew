@@ -120,10 +120,10 @@ export const TASKS: TaskBlueprint[] = [
   },
   {
     id: '1.4a', name: 'Upload interview minutes', agent: 'business', stage: 's1', class: 'H',
-    summary: 'Upload the conducted interview minutes (11 sessions) for the AI to digest against its pre-answers.',
-    how: 'You upload the minutes; AI compares them to its pre-answers, digests insights and proposes factor-tree changes.',
+    summary: 'Upload the conducted interview minutes (11 sessions) for the AI to digest into backfilled answers and newly raised questions.',
+    how: 'You upload the minutes; AI reads each transcript, backfills answers to the outline questions it covers, captures any new questions the interviewees raised, and proposes factor-tree changes.',
     basisNote: '分层访谈纪要（GM / 管理层 / 执行层共 11 场）。',
-    workNote: 'Waiting for the minutes. AI will reconcile them with its pre-answers and propose factor-tree adjustments.',
+    workNote: 'Waiting for the minutes. AI will backfill outline answers, capture newly raised questions, and propose factor-tree adjustments.',
     dependsOn: ['1.3'], duration: 1, produces: [],
     assignment: {
       id: 'in-1.4a', kind: 'upload', title: 'Upload interview minutes',

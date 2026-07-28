@@ -66,11 +66,38 @@ def test_merge_factor_side_keeps_changes():
     assert len(merged["factor_changes"]) == 1 and len(merged["insights"]) == 1
     print("OK merge_factor_side")
 
+def test_rebuild_targets_dedupes_duplicate_department():
+    # Two uploaded files both resolve to the SAME department label (e.g. both
+    # declare "市场部", or both fall back to the same filename-derived label).
+    # Without disambiguation this produces two targets with the same
+    # _target_id("field", dept) and the same _interview_sheets tab name — an
+    # illegal duplicate sheet name on xlsx export.
+    q1 = {"qType": "business", "question": "渠道占比?", "relatedFactorPath": "", "origin": "提纲"}
+    biz = [(q1, "Marketing")]
+    files = [("市场部访谈1.docx", "..."), ("市场部访谈2.docx", "...")]
+    results = [
+        {"department": "市场部", "participants": "张三",
+         "answers": [{"n": 1, "answer": "40%", "source": "市场部纪要1"}], "new_questions": []},
+        {"department": "市场部", "participants": "李四",
+         "answers": [], "new_questions": [{"question": "新品铺货率?", "answer": "60%",
+                                          "source": "市场部纪要2"}]},
+    ]
+    targets = B._rebuild_targets_from_real_minutes(biz, files, results)
+    assert len(targets) == 2, targets
+    t1, t2 = targets
+    assert t1["id"] != t2["id"], (t1["id"], t2["id"])
+    assert t1["layerZh"] != t2["layerZh"], (t1["layerZh"], t2["layerZh"])
+    assert t1["team"] != t2["team"], (t1["team"], t2["team"])
+    assert t1["layerZh"] == "市场部", t1["layerZh"]
+    assert t2["layerZh"] == "市场部 (2)", t2["layerZh"]
+    print("OK rebuild_targets_dedupes_duplicate_department")
+
 def main():
     test_columns_and_rows()
     test_department_from_filename()
     test_rebuild_targets()
     test_merge_factor_side_keeps_changes()
+    test_rebuild_targets_dedupes_duplicate_department()
 
 if __name__ == "__main__":
     main()
