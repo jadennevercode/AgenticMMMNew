@@ -13,7 +13,7 @@
 - **No mock data.** Every number/answer traces to a real uploaded transcript through the real path. Do not fabricate minutes to make a run pass. (Spec §Global.)
 - **Factor-tree writeback is out of scope and must not change** — `factor_changes` → `proposed` rows → `d-1.4` gate → data request stay byte-for-byte behavior-equivalent.
 - **`a-interview` is a generic `sheets` artifact — NO `frontend/src/lib/types.ts` change.** Column edits are backend-only.
-- **This project is NOT a git repository.** Ignore "commit" ceremony; each task instead ends by running its verification gate green. Do not run `git` commands.
+- **Git is initialized for this run** (feature branch `feature/interview-questions-only`). Each task ends by running its verification gate green **and committing** the task's changes (`git add` the touched files, then a descriptive commit ending with the `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` trailer).
 - **Tests are runnable scripts**, not pytest. Backend scripts run from `backend/` as `PYTHONPATH=. .venv/bin/python -m <module>` or `.venv/bin/python -m <module>`.
 - **Contract sync:** any blueprint task change in `app/domain/blueprint.py` must be mirrored in `frontend/src/lib/scenario.ts`.
 - Interview runtime state is plain dicts in `st.analysis["interview_targets"]`; a question dict has keys `qType, question, relatedFactorPath, preAnswer, confidence, sources` and gains `finalAnswer, answerSource` during writeback. A target dict has keys `id, layer, layerZh, team, participants, schedule, durationMin, status, questions`.

@@ -50,3 +50,6 @@ lightdash-main/
 restored/model-input-2.32/raw/
 restored/model-input-2.32/curated/long_table.csv
 restored/model-input-2.32/curated/long_table.xlsx
+
+# SDD scratch (subagent-driven-development workspace)
+.superpowers/
