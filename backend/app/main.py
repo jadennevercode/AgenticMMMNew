@@ -1031,6 +1031,40 @@ async def update_anomaly_review(project_id: str, body: AnomalyReview) -> dict:
     return body.model_dump(by_alias=True)
 
 
+class DataRequestReviewBody(BaseModel):
+    op: str            # "add" | "remove"
+    l3: str
+    l4: str
+    indicator: str
+    accept: bool
+
+
+@app.put("/api/projects/{project_id}/data-request/review")
+async def review_data_request(project_id: str, body: DataRequestReviewBody) -> dict:
+    """Accept/reject one interview-driven data-request field proposal. Accept records
+    the add/remove in data_request_field_edits and re-renders a-data-request; reject
+    is sticky too (recorded in the L4 key's `rejected` bucket) so a dismissed proposal
+    is never re-offered. Never touches the factor tree."""
+    st = _require_state(project_id)
+    if body.op in ("add", "remove") and body.indicator.strip():
+        key = f"{body.l3}||{body.l4}"
+        entry = st.data_request_field_edits.setdefault(key, {"added": [], "removed": [], "rejected": []})
+        entry.setdefault("rejected", [])
+        if body.accept:
+            bucket = "added" if body.op == "add" else "removed"
+            if body.indicator not in entry[bucket]:
+                entry[bucket].append(body.indicator)
+        else:  # sticky reject — record so _datareq_proposals never re-offers it
+            tag = f"{body.op}:{body.indicator}"
+            if tag not in entry["rejected"]:
+                entry["rejected"].append(tag)
+    # Re-render a-data-request if it already exists (same mechanism as factor-map/ignore → 2.1).
+    if st.artifact("a-data-request") is not None:
+        await _engine.handlers["1.5"](_engine, st, bp.TASK_MAP["1.5"])
+    get_store().save(project_id)
+    return {"dataRequestFieldEdits": st.data_request_field_edits}
+
+
 class SignoffBody(BaseModel):
     """One sign-off verdict. Supply `l4` + `indicator` for a single indicator,
     `pairs` (each `{"l4", "indicator"}`) for an explicit set — this is what a

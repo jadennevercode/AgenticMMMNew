@@ -1,5 +1,7 @@
 """Runnable checks for interview-driven data-request field edits (no LLM)."""
 from app.agents import business as B
+from app.domain.models import IndustryRef, ProjectMeta
+from app.store.state import ProjectState
 
 def test_apply_field_edits():
     by_l3 = {"品类": {"规模": ["市场规模", "增速"]}, "媒介": {"TV": ["TV花费"]}}
@@ -27,9 +29,24 @@ def test_datareq_review_sheet():
     print("OK datareq_review_sheet")
 
 
+def test_record_edit_then_rerender_applies():
+    # Simulate the endpoint's core: record an accepted 'add' then re-derive columns.
+    meta = ProjectMeta(id="t-datareq", name="t", brand="b",
+                       industry=IndustryRef(l1="beverage", l2="functional", l3="sports"),
+                       createdAt="2026-01-01T00:00:00+00:00")
+    st = ProjectState(project_id="t-datareq", meta=meta)
+    st.data_request_field_edits.setdefault("品类||规模", {"added": [], "removed": [], "rejected": []})
+    st.data_request_field_edits["品类||规模"]["added"].append("季节指数")
+    by_l3 = {"品类": {"规模": ["市场规模"]}}
+    applied = B._apply_field_edits(by_l3, st.data_request_field_edits)
+    assert applied["品类"]["规模"] == ["市场规模", "季节指数"]
+    print("OK record_edit_then_rerender_applies")
+
+
 def main():
     test_apply_field_edits()
     test_datareq_review_sheet()
+    test_record_edit_then_rerender_applies()
 
 if __name__ == "__main__":
     main()
