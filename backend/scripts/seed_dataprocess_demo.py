@@ -60,7 +60,7 @@ PROJECT_NAME = "Mizone Data-Process Demo"
 # depends on 1.7, but marking the whole chain done keeps the task list coherent.
 S1_TASK_IDS = [
     "1.0a", "1.0", "1.1a", "1.1", "1.21", "1.21d",
-    "1.3", "1.3b", "1.4a", "1.4b", "1.4", "1.4d", "1.5", "1.5d", "1.7",
+    "1.3", "1.4a", "1.4b", "1.4", "1.4d", "1.5", "1.5d", "1.7",
 ]
 
 _INT_COLS = ("year", "month")

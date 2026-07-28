@@ -109,7 +109,7 @@ export const TASKS: TaskBlueprint[] = [
       reworkTaskId: '1.21', reworkOptionId: 'rework',
     },
   },
-  // ── 3 · Interview (outline → AI pre-answers → minutes → writeback) ──
+  // ── 3 · Interview (outline → minutes → writeback) ──
   {
     id: '1.3', name: 'Draft interview outline', agent: 'business', stage: 's1', class: 'A',
     summary: 'Generate a structured interview outline by interviewee layer (GM / Mgmt / Operation) from the confirmed factor tree.',
@@ -119,20 +119,12 @@ export const TASKS: TaskBlueprint[] = [
     dependsOn: ['1.21d'], duration: 2, produces: ['a-interview'],
   },
   {
-    id: '1.3b', name: 'AI pre-answers the outline', agent: 'business', stage: 's1', class: 'C',
-    summary: 'Before the interviews, AI drafts a preliminary answer to each question from what it already knows.',
-    how: 'AI answers each outline question up front using the project profile, competitor / brand reports, industry knowledge and the factor tree — with a confidence and the source it leaned on — so interviews focus on gaps and disagreements.',
-    basisNote: '项目档案 + 竞品/品牌报告 + 行业知识 + 因子树。',
-    workNote: 'AI 预答已生成：每题给初步回答 + 置信度 + 依据；低置信题标记为访谈重点。',
-    dependsOn: ['1.3'], duration: 2, produces: [],
-  },
-  {
     id: '1.4a', name: 'Upload interview minutes', agent: 'business', stage: 's1', class: 'H',
     summary: 'Upload the conducted interview minutes (11 sessions) for the AI to digest against its pre-answers.',
     how: 'You upload the minutes; AI compares them to its pre-answers, digests insights and proposes factor-tree changes.',
     basisNote: '分层访谈纪要（GM / 管理层 / 执行层共 11 场）。',
     workNote: 'Waiting for the minutes. AI will reconcile them with its pre-answers and propose factor-tree adjustments.',
-    dependsOn: ['1.3b'], duration: 1, produces: [],
+    dependsOn: ['1.3'], duration: 1, produces: [],
     assignment: {
       id: 'in-1.4a', kind: 'upload', title: 'Upload interview minutes',
       prompt: '上传 11 场分层访谈纪要（GM / Mkt / Sales / Finance / Media / Activation / EC / KA / Trade / Execution / SIA）。',

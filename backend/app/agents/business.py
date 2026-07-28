@@ -725,14 +725,6 @@ def _interview_sheets(targets: list[dict]) -> dict:
     return {"sheets": sheets}
 
 
-def _source_labels(st: ProjectState) -> list[str]:
-    """Candidate grounding-source labels for pre-answer attribution (matches the
-    reference's `ai_recommendation:<label>` form)."""
-    labels = ["SOW summary"]
-    labels += [aid for aid in ("a-scope", "a-factor-tree") if st.artifact(aid)]
-    return labels
-
-
 async def draft_interview(eng: Engine, st: ProjectState, task: dict) -> None:
     targets = _build_targets(st)
     eng.set_analysis(st, "interview_targets", targets)
@@ -744,82 +736,6 @@ async def draft_interview(eng: Engine, st: ProjectState, task: dict) -> None:
     eng.emit(st, "business", "info",
              f"Interview outline drafted: {len(targets)} targets across 4 layers · {total} questions "
              f"({data_n} data-availability items from the factor tree)", task["id"])
-
-
-def _norm_confidence(value: str) -> str:
-    conf = str(value or "low").lower()
-    return conf if conf in ("low", "medium", "high") else "low"
-
-
-async def _fill_business_preanswers(target: dict, materials: str, src_labels: list[str]) -> None:
-    """Inline preliminary answers for one business target's questions (one LLM call)."""
-    qs = target["questions"]
-    if not qs:
-        return
-    qlist = "\n".join(f"{i + 1}. {q['question']}" for i, q in enumerate(qs))
-    cand = ", ".join(src_labels)
-    try:
-        obj = await get_llm().json(
-            system=SYS,
-            user=(
-                "Before the interviews, draft a PRELIMINARY answer to each question below — explicitly a "
-                "hypothesis to validate, not fact. If the provided context lacks the information needed, "
-                "you MUST begin that answer with the exact prefix 【暂无足够信息】 and state what is missing. "
-                "Keep each answer to 1-3 sentences. For each question return: n (1-based), answer, "
-                "confidence (low|medium|high), and sources — a list chosen from these candidate labels: "
-                f"[{cand}]. Return JSON: "
-                "{\"answers\":[{\"n\":int,\"answer\":str,\"confidence\":str,\"sources\":[str]}]}\n\n"
-                f"CONTEXT:\n{materials[:5000]}\n\nQUESTIONS:\n{qlist}"
-            ),
-            max_tokens=3000,
-        )
-    except Exception:  # noqa: BLE001
-        obj = {}
-    by_n = {int(a.get("n", 0)): a for a in obj.get("answers", []) if isinstance(a, dict)} if isinstance(obj, dict) else {}
-    for i, q in enumerate(qs):
-        a = by_n.get(i + 1, {})
-        ans = str(a.get("answer", "")).strip() or "【暂无足够信息】现有材料不足以预判该问题，待访谈确认。"
-        srcs = a.get("sources") if isinstance(a.get("sources"), list) else None
-        srcs = srcs or src_labels[:2]
-        q["preAnswer"] = ans
-        q["confidence"] = _norm_confidence(a.get("confidence"))
-        q["sources"] = [f"ai_recommendation:{s}" for s in srcs]
-
-
-def _fill_data_preanswers(target: dict, src_labels: list[str]) -> None:
-    """Templated preliminary answers for the (large) Data-Team target — avoids one
-    LLM call per factor leaf. Data specs are confirmed by the data team in-interview."""
-    base = src_labels[:2] or ["SOW summary"]
-    for q in target["questions"]:
-        q["preAnswer"] = ("【暂无足够信息】该数据点的可获得性、来源、颗粒度与口径需由数据团队在访谈中确认；"
-                          "现有材料尚未覆盖该因子的完整数据规格。")
-        q["confidence"] = "low"
-        q["sources"] = [f"ai_recommendation:{s}" for s in base]
-
-
-async def pre_answer(eng: Engine, st: ProjectState, task: dict) -> None:
-    targets = st.analysis.get("interview_targets", [])
-    if not targets:
-        return
-    # Context for preliminary answers: the uploaded materials plus the project's
-    # own framed artifacts (both derived from the user's input — no reference).
-    materials = (sources.category_text(st.project_id, "industry_reference", max_chars=4000)
-                 + "\n\n" + artifact_text(st, ["a-scope", "a-factor-tree"]))
-    src_labels = _source_labels(st)
-    # Business targets each need one grounded LLM call — run them CONCURRENTLY so
-    # wall-time is ~one call, not the sum of a dozen. The (large) Data-Team target
-    # is templated (no LLM). Each call is internally fault-tolerant (falls back to
-    # 【暂无足够信息】 on failure), so one bad target can't sink the task.
-    business = [t for t in targets if t["layer"] != "data"]
-    await asyncio.gather(*(_fill_business_preanswers(t, materials, src_labels) for t in business))
-    for t in targets:
-        if t["layer"] == "data":
-            _fill_data_preanswers(t, src_labels)
-    eng.set_analysis(st, "interview_targets", targets)
-    eng.set_analysis(st, "interview_questions", _flatten_targets(targets))
-    eng.produce(st, "a-interview", body=_interview_sheets(targets), state="draft", agent="business")
-    eng.emit(st, "business", "artifact",
-             "AI pre-answers added inline (knowledge for reference, to validate in interviews)", task["id"])
 
 
 _MINUTES_PER_FILE_CHARS = 12000   # single-file cap; real transcripts are 1–9k

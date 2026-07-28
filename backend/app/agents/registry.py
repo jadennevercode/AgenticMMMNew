@@ -14,7 +14,6 @@ def build_engine() -> Engine:
     eng.register("1.1", business.assemble_knowledge)
     eng.register("1.21", business.derive_factor_tree)
     eng.register("1.3", business.draft_interview)
-    eng.register("1.3b", business.pre_answer)
     eng.register("1.4b", business.transcribe_audio)
     eng.register("1.4", business.writeback_minutes)
     eng.register("1.5", business.gen_data_request)
