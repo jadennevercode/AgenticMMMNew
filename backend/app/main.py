@@ -1046,16 +1046,17 @@ async def review_data_request(project_id: str, body: DataRequestReviewBody) -> d
     is sticky too (recorded in the L4 key's `rejected` bucket) so a dismissed proposal
     is never re-offered. Never touches the factor tree."""
     st = _require_state(project_id)
-    if body.op in ("add", "remove") and body.indicator.strip():
+    ind = body.indicator.strip()
+    if body.op in ("add", "remove") and ind:
         key = f"{body.l3}||{body.l4}"
         entry = st.data_request_field_edits.setdefault(key, {"added": [], "removed": [], "rejected": []})
         entry.setdefault("rejected", [])
         if body.accept:
             bucket = "added" if body.op == "add" else "removed"
-            if body.indicator not in entry[bucket]:
-                entry[bucket].append(body.indicator)
+            if ind not in entry[bucket]:
+                entry[bucket].append(ind)
         else:  # sticky reject — record so _datareq_proposals never re-offers it
-            tag = f"{body.op}:{body.indicator}"
+            tag = f"{body.op}:{ind}"
             if tag not in entry["rejected"]:
                 entry["rejected"].append(tag)
     # Re-render a-data-request if it already exists (same mechanism as factor-map/ignore → 2.1).

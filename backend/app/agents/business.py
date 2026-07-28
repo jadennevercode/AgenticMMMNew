@@ -1229,13 +1229,36 @@ def _datareq_review_sheet(proposals: list[dict]) -> dict | None:
     return {"name": "Interview-driven changes (proposed)", "columns": _DR_REVIEW_COLUMNS, "rows": rows}
 
 
+def _filter_proposals(raw: list, edits: dict) -> list[dict]:
+    """Pure filter: raw LLM proposal list -> cleaned/kept proposals.
+
+    Drops non-dict entries and entries whose `op` is not "add"/"remove"; skips an
+    indicator already recorded in `st.data_request_field_edits` — accepted (indicator
+    present in the L4 key's `added`/`removed`) or rejected (`"{op}:{indicator}"` in
+    `rejected`) — so re-runs never re-offer a decided proposal.
+    """
+    out: list[dict] = []
+    for p in raw:
+        if not isinstance(p, dict) or str(p.get("op", "")) not in ("add", "remove"):
+            continue
+        key = _dr_key(str(p.get("l3", "")), str(p.get("l4", "")))
+        ind = str(p.get("indicator", "")).strip()
+        acc = edits.get(key, {}) if isinstance(edits, dict) else {}
+        if ind in (acc.get("added", []) or []) or ind in (acc.get("removed", []) or []):
+            continue   # already accepted
+        if f"{p['op']}:{ind}" in (acc.get("rejected", []) or []):
+            continue   # already rejected -- don't re-offer (sticky reject)
+        out.append({"op": str(p["op"]), "l3": str(p.get("l3", "")), "l4": str(p.get("l4", "")),
+                    "indicator": ind, "rationale": str(p.get("rationale", "")), "quote": str(p.get("quote", ""))})
+    return out
+
+
 async def _datareq_proposals(st: ProjectState, by_l3: dict) -> list[dict]:
     """From the interview minutes, propose per-L4 data-request indicator add/removes.
 
     Empty when no minutes are uploaded or the LLM yields nothing. Filters out any
-    proposal already recorded in `st.data_request_field_edits` — accepted (indicator
-    present in the L4 key's `added`/`removed`) or rejected (`"{op}:{indicator}"` in
-    `rejected`) — so re-runs never re-offer a decided proposal.
+    proposal already recorded in `st.data_request_field_edits` via `_filter_proposals`
+    (accepted or rejected) — so re-runs never re-offer a decided proposal.
     """
     files = _minutes_files(st)
     if not files:
@@ -1261,21 +1284,7 @@ async def _datareq_proposals(st: ProjectState, by_l3: dict) -> list[dict]:
     except Exception:  # noqa: BLE001
         obj = {}
     raw = obj.get("proposals", []) if isinstance(obj, dict) else []
-    edits = st.data_request_field_edits
-    out: list[dict] = []
-    for p in raw:
-        if not isinstance(p, dict) or str(p.get("op", "")) not in ("add", "remove"):
-            continue
-        key = _dr_key(str(p.get("l3", "")), str(p.get("l4", "")))
-        ind = str(p.get("indicator", "")).strip()
-        acc = edits.get(key, {}) if isinstance(edits, dict) else {}
-        if ind in (acc.get("added", []) or []) or ind in (acc.get("removed", []) or []):
-            continue   # already accepted
-        if f"{p['op']}:{ind}" in (acc.get("rejected", []) or []):
-            continue   # already rejected -- don't re-offer (sticky reject)
-        out.append({"op": str(p["op"]), "l3": str(p.get("l3", "")), "l4": str(p.get("l4", "")),
-                    "indicator": ind, "rationale": str(p.get("rationale", "")), "quote": str(p.get("quote", ""))})
-    return out
+    return _filter_proposals(raw, st.data_request_field_edits)
 
 
 async def gen_data_request(eng: Engine, st: ProjectState, task: dict) -> None:

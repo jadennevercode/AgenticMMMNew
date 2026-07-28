@@ -43,10 +43,47 @@ def test_record_edit_then_rerender_applies():
     print("OK record_edit_then_rerender_applies")
 
 
+def test_filter_proposals():
+    edits = {
+        "品类||规模": {"added": ["季节指数"], "removed": [], "rejected": ["remove:增速"]},
+    }
+    raw = [
+        # (a) already accepted-add -> dropped
+        {"op": "add", "l3": "品类", "l4": "规模", "indicator": "季节指数",
+         "rationale": "已采纳", "quote": "q1"},
+        # (b) rejected -> dropped
+        {"op": "remove", "l3": "品类", "l4": "规模", "indicator": "增速",
+         "rationale": "已拒绝", "quote": "q2"},
+        # (c) malformed: missing op
+        {"l3": "品类", "l4": "规模", "indicator": "缺op", "rationale": "r", "quote": "q3"},
+        # (c) malformed: blank op
+        {"op": "", "l3": "品类", "l4": "规模", "indicator": "空op", "rationale": "r", "quote": "q4"},
+        # (c) malformed: op not add/remove
+        {"op": "update", "l3": "品类", "l4": "规模", "indicator": "非法op", "rationale": "r", "quote": "q5"},
+        # (c) malformed: non-dict entry
+        "not-a-dict",
+        # (d) undecided valid proposal -> kept
+        {"op": "add", "l3": "媒介", "l4": "TV", "indicator": "TV花费",
+         "rationale": "访谈提到", "quote": "q6"},
+    ]
+    out = B._filter_proposals(raw, edits)
+    assert len(out) == 1, out
+    kept = out[0]
+    assert kept["op"] == "add"
+    assert kept["l3"] == "媒介"
+    assert kept["l4"] == "TV"
+    assert kept["indicator"] == "TV花费"
+    assert kept["rationale"] == "访谈提到"
+    assert kept["quote"] == "q6"
+    assert set(kept.keys()) == {"op", "l3", "l4", "indicator", "rationale", "quote"}
+    print("OK filter_proposals")
+
+
 def main():
     test_apply_field_edits()
     test_datareq_review_sheet()
     test_record_edit_then_rerender_applies()
+    test_filter_proposals()
 
 if __name__ == "__main__":
     main()
