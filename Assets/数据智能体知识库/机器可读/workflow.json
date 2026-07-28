@@ -1,0 +1,48 @@
+{
+  "agent": "data-agent",
+  "stage": "S2",
+  "title": "数据智能体 Data Agent",
+  "description": "把异构原始数据源汇成统一宽表(Model Input)，并设三道质量闸门",
+  "source": "reference/02.数据智能体",
+  "dataContract": "wide-table-schema.json",
+  "substages": [
+    {
+      "id": "2.1",
+      "name": "Data Validation 数据校验",
+      "gate": "质量闸1：原始数据能否验收",
+      "steps": [
+        { "id": "2.11", "io": "input", "title": "数据通用校验标准 + 打分规则", "ref": "validation-scoring.json" },
+        { "id": "2.12", "io": "output", "title": "数据质量评分", "produces": "perMetricScorecard" }
+      ]
+    },
+    {
+      "id": "2.2",
+      "name": "Data Process 数据处理",
+      "gate": "ETL：打平到统一宽表",
+      "steps": [
+        { "id": "2.21", "io": "input", "title": "宽表数据集维度", "ref": "wide-table-schema.json" },
+        { "id": "2.22", "io": "input", "title": "数据处理(人交互确认逻辑) + TaskLog", "humanInLoop": true },
+        { "id": "2.23", "io": "io", "title": "数据字典(血缘/ETL逻辑)" },
+        { "id": "2.24", "io": "output", "title": "数据集(统一维度集成全集)", "produces": "modelDataset" }
+      ]
+    },
+    {
+      "id": "2.3",
+      "name": "Cross-Validation 数据交叉校验",
+      "gate": "闸2业务 + 闸3技术 + 指标筛选",
+      "steps": [
+        { "id": "2.31", "io": "input", "title": "指标业务校验规则", "ref": "factor-ranges.json", "produces": "clientDataQuestions" },
+        { "id": "2.32", "io": "output", "title": "数据展示(Charting+趋势解读+待确认问题)" },
+        { "id": "2.33", "io": "input", "title": "指标技术校验规则(CV/Pearson/VIF)", "ref": "statistical-scoring.json" },
+        { "id": "2.34", "io": "io", "title": "指标筛选(OLS快速验证, 选符合Contribution/ROI区间的指标)" },
+        { "id": "2.35", "io": "output", "title": "Model Input(选定指标的最终建模输入)", "produces": "modelInput", "ref": "wide-table-schema.json" }
+      ]
+    }
+  ],
+  "gates": [
+    { "id": "gate1", "at": "2.12", "measures": "数据本身质量", "dims": ["consistency", "accuracy", "comprehensiveness", "granularity"], "disposition": { "1": "accept", "0": "reject+warn", "0.5": "humanDecision" } },
+    { "id": "gate2", "at": "2.32", "measures": "业务可解释性", "method": "六步业务分析 + ROI/Contribution区间对照", "disposition": "产出待客户确认问题" },
+    { "id": "gate3", "at": "2.33", "measures": "建模适用性", "dims": ["cv", "pearson", "vif"], "disposition": { "Good>=3": "keep", "1.5-3": "acceptable", "<1.5": "drop" }, "rule": "因子全部候选指标不达标→预警" }
+  ],
+  "funnel": "源文件 → (2.1验收) → (2.21宽表+2.23字典→2.24全集) → (2.31业务/2.33技术→2.34 OLS选指标) → 2.35 Model Input"
+}

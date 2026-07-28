@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+# Runtime state, secrets (model_service.json), and real client uploads — never commit
+data/
+.pytest_cache/
+.ruff_cache/
+.DS_Store

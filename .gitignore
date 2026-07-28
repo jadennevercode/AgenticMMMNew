@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Backend runtime data (generated project state + model-service secrets)
+backend/data/
+data/model_service.json
+
+# Build output
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+desktop.ini
+.idea/
+.vscode/
+
+# Local reference materials (cloud-synced, large binaries)
+reference/
+
+# Env
+.env
+.env.local
+.env.*.local
+.env.bak
+
+# Local run state (start.sh / stop.sh)
+.run/
+
+# Run materials kit — real client data, do not commit
+run-materials/
+
+# Local reference-only checkouts (large, do not commit)
+dbt-core-main/
+dagster-master/
+cube-master/
+lightdash-main/
+
+# Regenerable restore artifacts (docs/superpowers/plans/2026-07-22-restore-model-input-2.32.md)
+restored/model-input-2.32/raw/
+restored/model-input-2.32/curated/long_table.csv
+restored/model-input-2.32/curated/long_table.xlsx

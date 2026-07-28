@@ -1,0 +1,19 @@
+== test_schema
+PASS test_schema
+== test_raw_is_lossless
+  raw/ VALUE max relative deviation from xlsx round-trip: 4.590e-16
+PASS test_raw_is_lossless
+== test_curated_is_lossless
+PASS test_curated_is_lossless
+== test_ols_runs
+  EC         Y=Volume (Volume) n_obs=34 drivers=7 R2=0.7956 adjR2=0.7405
+  O2O        Y=箱数 (volume) n_obs=34 drivers=5 R2=0.9589 adjR2=0.9516
+  MT         Y=谈判点出货箱数 (箱数) n_obs=34 drivers=12 R2=0.8689 adjR2=0.7940
+  TT         Y=Compass完成箱数 (箱数) n_obs=34 drivers=10 R2=0.8727 adjR2=0.8173
+  AFH        Y=Compass完成箱数 (箱数) n_obs=34 drivers=10 R2=0.9075 adjR2=0.8673
+  社区团购       Y=箱数 (Volume) n_obs=34 drivers=2 R2=0.2184 adjR2=0.1680
+  WS         Y=Compass完成箱数 (箱数) n_obs=34 drivers=9 R2=0.6960 adjR2=0.5820
+  fitted 7/7 model objects
+PASS test_ols_runs
+
+4/4 passed

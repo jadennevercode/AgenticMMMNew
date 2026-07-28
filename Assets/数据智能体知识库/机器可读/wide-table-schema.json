@@ -1,0 +1,32 @@
+{
+  "id": "2.21-2.24-2.35",
+  "title": "统一宽表 / Model Data / Model Input Schema",
+  "format": "long",
+  "principle": "每行=一个(维度组合, 指标, 值)；维度对不齐填NA；主数据表(Product/Geo/Channel/Time)负责清洗统一名称",
+  "wideTableColumns": [
+    { "name": "数据源", "role": "source" },
+    { "name": "品牌", "role": "modelGranularity", "master": "Product" },
+    { "name": "品类", "role": "modelGranularity", "master": "Product" },
+    { "name": "产品", "role": "modelGranularity", "master": "Product" },
+    { "name": "省份组别", "role": "modelGranularity", "master": "Geo" },
+    { "name": "省份", "role": "modelGranularity", "master": "Geo" },
+    { "name": "渠道类型", "role": "modelGranularity", "master": "Channel" },
+    { "name": "渠道", "role": "modelGranularity", "master": "Channel" },
+    { "name": "年", "role": "timeGranularity", "master": "Time" },
+    { "name": "月", "role": "timeGranularity", "master": "Time" },
+    { "name": "数据类型Level1", "role": "factor", "maps": "因子树L1" },
+    { "name": "数据类型Level2", "role": "factor", "maps": "因子树L2" },
+    { "name": "数据类型Level3", "role": "factor", "maps": "因子树L3" },
+    { "name": "数据类型Level4", "role": "factor", "maps": "因子树L4" },
+    { "name": "数据类型Level5", "role": "drilldown", "maps": "L4下钻维度, 无则NA" },
+    { "name": "数据类型Level6", "role": "drilldown" },
+    { "name": "数据类型Level7", "role": "drilldown" },
+    { "name": "数据类型Level8", "role": "drilldown" },
+    { "name": "METRICS类型", "role": "metric" },
+    { "name": "Unit", "role": "unit", "examples": ["percentage", "Unit", "Volume K", "RMB"] },
+    { "name": "VALUE", "role": "value" }
+  ],
+  "modelDataColumns": ["TASKNAME", "品牌", "省份组别", "省份", "渠道类型", "渠道", "年", "月", "数据源", "数据类型Level1", "数据类型Level2", "数据类型Level3", "数据类型Level4", "数据类型Level5", "数据类型Level6", "数据类型Level7", "数据类型Level8", "METRICS类型", "METRICS", "VALUE", "Variable no.", "Metric no."],
+  "modelInputColumns": "= modelDataColumns 的选定指标子集(经2.33技术检验+2.34 OLS筛选), 每个L4因子选一最优指标, 带Variable/Metric编号",
+  "tableNaming": { "ods": "ods_<domain>_<grain>", "view": "vw_all_dataset_model_data_yyyymm" }
+}
