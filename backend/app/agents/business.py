@@ -800,6 +800,76 @@ def _merge_minutes_digests(results: list[dict]) -> dict:
     return {"answers": answers, "factor_changes": changes, "insights": insights}
 
 
+def _make_real_target(department: str, participants: str, questions: list[dict]) -> dict:
+    return {
+        "id": _target_id("field", department), "layer": "field", "layerZh": department,
+        "team": department, "participants": participants or "", "schedule": "",
+        "durationMin": 0, "status": "completed", "questions": questions,
+    }
+
+
+def _rebuild_targets_from_real_minutes(biz, files, results) -> list[dict]:
+    """One target per uploaded minutes file, keyed by its real department.
+    Outline questions are backfilled fill-first by question number; unanswered
+    outline questions are dropped. New questions attach to the file that raised them."""
+    claimed: set[int] = set()
+    targets: list[dict] = []
+    for (filename, _text), res in zip(files, results):
+        res = res if isinstance(res, dict) else {}
+        dept = str(res.get("department") or "").strip() or _department_from_filename(filename) or filename
+        rows: list[dict] = []
+        for a in res.get("answers", []) or []:
+            if not isinstance(a, dict):
+                continue
+            try:
+                n = int(a.get("n", 0))
+            except (TypeError, ValueError):
+                continue
+            if n < 1 or n > len(biz) or n in claimed:
+                continue
+            ans = str(a.get("answer", "")).strip()
+            if not ans:
+                continue
+            claimed.add(n)
+            q0 = biz[n - 1][0]
+            rows.append({**{k: q0.get(k, "") for k in ("qType", "question", "relatedFactorPath")},
+                         "origin": "提纲", "finalAnswer": ans,
+                         "answerSource": str(a.get("source", "")).strip()})
+        for nq in res.get("new_questions", []) or []:
+            if not isinstance(nq, dict) or not str(nq.get("question", "")).strip():
+                continue
+            rows.append({"qType": "business", "question": str(nq["question"]).strip(),
+                         "relatedFactorPath": "", "origin": "新问题",
+                         "finalAnswer": str(nq.get("answer", "")).strip(),
+                         "answerSource": str(nq.get("source", "")).strip()})
+        targets.append(_make_real_target(dept, str(res.get("participants") or ""), rows))
+    return targets
+
+
+def _merge_factor_side(results: list[dict]) -> dict:
+    """Merge per-transcript factor_changes/insights only (no answers) — same
+    dedup key and insight cap as `_merge_minutes_digests`."""
+    changes: list[dict] = []
+    change_keys: set[tuple] = set()
+    insights: list[dict] = []
+    for res in results:
+        if not isinstance(res, dict):
+            continue
+        for ch in res.get("factor_changes", []) or []:
+            if not isinstance(ch, dict):
+                continue
+            key = (str(ch.get("op", "add")), str(ch.get("l1", "")), str(ch.get("l2", "")),
+                   str(ch.get("l3", "")), str(ch.get("l4", "")), str(ch.get("indicator", "")))
+            if key in change_keys:
+                continue
+            change_keys.add(key)
+            changes.append(ch)
+        for ins in res.get("insights", []) or []:
+            if isinstance(ins, dict) and len(insights) < _MAX_INSIGHTS:
+                insights.append(ins)
+    return {"factor_changes": changes, "insights": insights}
+
+
 async def _digest_transcript(filename: str, text: str, qlist: str,
                              st: ProjectState) -> dict:
     """One combined LLM call over ONE transcript → {answers, factor_changes, insights}.
@@ -815,26 +885,33 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
             system=agent_system("business", st),
             user=(
                 "You are given ONE interview transcript and the full outline of questions. "
-                "Using ONLY this transcript, do BOTH tasks:\n"
+                "Using ONLY this transcript, do ALL of the following tasks:\n"
+                "(0) CONTEXT — state the department/team this transcript is for and its "
+                "participants.\n"
                 "(1) ANSWERS — for each outline question this transcript actually addresses, "
                 "write the final answer with its source. Skip questions it does not cover.\n"
                 "(2) FACTOR CHANGES — propose the factor-tree changes this transcript implies "
                 "(add a new factor, or modify an existing factor's indicator / granularity / "
                 "channel caliber), each traced to a verbatim quote; plus up to 2 cross-source "
                 "insights.\n"
+                "(3) NEW QUESTIONS — list questions the interviewees themselves raised that are "
+                "NOT in the outline, each with the answer given and its source. Skip if none.\n"
                 "Each of l1/l2/l3/l4 and indicator must be a SINGLE atomic value — never combine "
                 "several (no 'TV/OTV/OOH', no 'A、B'); emit a separate change per combination. "
                 "Every emitted value must have BALANCED punctuation — any bracket or quote （）()「」\"\" "
                 "opened must also be closed; never leave a dangling '（' or '）'. When several sub-items "
                 "share a prefix, write 'PREFIX（a/b/c）' — the system expands that into one COMPLETE "
                 "value per item — or emit each as its own complete value. "
-                "Return JSON: {\"answers\":[{\"n\":int,\"answer\":str,\"source\":str}],"
+                "Return JSON: {\"department\":str,\"participants\":str,"
+                "\"answers\":[{\"n\":int,\"answer\":str,\"source\":str}],"
+                "\"new_questions\":[{\"question\":str,\"answer\":str,\"source\":str}],"
                 "\"factor_changes\":[{\"op\":\"add|modify\",\"l1\":str,\"l2\":str,\"l3\":str,"
                 "\"l4\":str,\"indicator\":str,\"granularity\":str,\"rationale\":str,\"quote\":str}],"
                 "\"insights\":[{\"kind\":\"connection|gap|conflict|reference\",\"title\":str,"
                 "\"finding\":str,\"confidence\":0-1}]}\n\n"
                 f"OUTLINE:\n{qlist}\n\nTRANSCRIPT ({filename}):\n{text}"
             ),
+            max_tokens=4000,
             timeout=_MINUTES_LLM_TIMEOUT,
         )
         return obj if isinstance(obj, dict) else {}
