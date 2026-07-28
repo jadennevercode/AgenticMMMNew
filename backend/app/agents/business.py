@@ -236,6 +236,27 @@ def _baseline_rows_from_template(st: ProjectState) -> list[FactorRow]:
     return rows
 
 
+def _apply_reconcile_verdicts(template_rows: list[FactorRow],
+                              verdicts: dict[int, dict]) -> list[FactorRow]:
+    """Apply per-row keep/rename/downgrade verdicts to the template baseline.
+    Verdicts are keyed by 1-based row index; an absent/invalid verdict = keep."""
+    out: list[FactorRow] = []
+    for i, r in enumerate(template_rows, 1):
+        v = verdicts.get(i) if isinstance(verdicts, dict) else None
+        decision = str(v.get("decision", "keep")).lower() if isinstance(v, dict) else "keep"
+        if decision == "rename" and isinstance(v, dict) and str(v.get("indicator", "")).strip():
+            out.append(r.model_copy(update={
+                "indicator": str(v["indicator"]).strip(), "status": "baseline",
+                "rationale": "命名对齐材料", "evidence": "materials reconciliation"}))
+        elif decision == "downgrade":
+            out.append(r.model_copy(update={
+                "status": "proposed", "rationale": "待确认：材料未提及/矛盾",
+                "evidence": "materials reconciliation"}))
+        else:  # keep (default)
+            out.append(r)
+    return out
+
+
 def _uploaded_factor_rows(st: ProjectState) -> list[FactorRow]:
     """Parse the user's own factor-tree workbook(s) from the `factor_tree`
     Project-Folder category into baseline FactorRows (source='upload')."""
