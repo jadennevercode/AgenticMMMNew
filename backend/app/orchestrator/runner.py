@@ -13,7 +13,58 @@ from app.agents.common import agent_system, artifact_text, llm_recommendation
 from app.domain import blueprint as bp
 from app.orchestrator.engine import Engine, _default_choice
 from app.store.files import get_files
+from app.domain.models import TaskFinding
 from app.store.state import ProjectState
+
+
+# Which scorecard each verdict gate closes, and what "keep" means on it.
+_SETTLE: dict[str, tuple[str, str, str, str]] = {
+    "d-2.2": ("quality", "quality_scorecard", "flag", "accept"),
+    "d-2.4": ("statistical", "stat_scorecard", "review", "include"),
+}
+
+
+def _settle_provisional(eng, st: ProjectState, decision_id: str) -> None:
+    """Turn the AI's provisional rows into real verdicts before closing a gate.
+
+    A human resolves these one by one; autopilot has no judgement to apply, so it
+    keeps them — the conservative direction, since dropping an indicator is what
+    removes it from the model. What it must not do is leave them provisional: the
+    gate now refuses to close on "needs review", precisely so an unreviewed
+    indicator cannot travel onward as though it had been approved.
+    """
+    if decision_id == "d-2.5":
+        # 2.5's sheet cannot be provisional — its verdicts are binary and seeded
+        # from the AI. There is still something to say: autopilot is about to lock
+        # a selection nobody reviewed, and the rejections it carries are the AI's.
+        from app.agents.ols_scorecard import summary as _range_summary
+
+        card = _range_summary(st)
+        if card["total"] and not card["byHuman"]:
+            eng.add_findings(st, "2.5d", [TaskFinding(
+                text=f"Autopilot confirmed the OLS range verdicts unreviewed: "
+                     f"{card['accepted']} factor(s) accepted and {card['rejected']} "
+                     f"rejected on the AI's recommendation alone.",
+                tone="flag")])
+        return
+
+    spec = _SETTLE.get(decision_id)
+    if spec is None:
+        return
+    _layer, attr, provisional, keep = spec
+    card = getattr(st, attr, None)
+    settled = [r for r in (getattr(card, "rows", None) or [])
+               if getattr(r, "disposition", "") == provisional]
+    for row in settled:
+        row.disposition = keep
+    if settled:
+        names = ", ".join(
+            str(getattr(r, "indicator", "") or getattr(r, "metric", "")) for r in settled[:6])
+        eng.add_findings(st, decision_id.replace("d-", ""), [TaskFinding(
+            text=f"Autopilot kept {len(settled)} indicator(s) that were awaiting review, "
+                 f"without a human verdict: {names}"
+                 f"{' …' if len(settled) > 6 else ''}.",
+            tone="flag")])
 
 
 def _recommended_option(task_def: dict) -> str:
@@ -105,6 +156,7 @@ async def run_until_blocked(eng: Engine, st: ProjectState, *, autopilot: bool, m
             # 3) auto-resolve open decisions with the recommended option
             for t in bp.TASKS:
                 if "decision" in t and st.decisions[t["decision"]["id"]].status == "open":
+                    _settle_provisional(eng, st, t["decision"]["id"])
                     eng.resolve_decision(st, t["decision"]["id"], _recommended_option(t),
                                          note="auto: recommended")
                     acted = True

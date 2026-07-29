@@ -304,7 +304,7 @@ TASKS: list[TaskDef] = [
                   "rework_task_id": "2.1", "rework_option_id": "continue-data-engine"}},
     {"id": "2.2", "name": "Data Quality Score", "agent": "data", "stage": "s2", "klass": "A",
      "summary": "Every L1×L2×L3×L4×metric is scored on the four 2.11 dimensions (consistency / completeness / granularity / accuracy, each 0 / 0.5 / 1). A deterministic subcheck scorer computes the 10 subchecks from the real data; the AI reviews the four dimension scores and writes a note per dimension.",
-     "how": "The subcheck scorer derives each dimension from the computed evidence; the AI confirms/adjusts the four dimension scores against the rubric. Total = product of the four dimensions (Excel 2.12); the verdict is reviewed by a human next.",
+     "how": "The subcheck scorer derives each dimension from the computed evidence, read off the assembled data exactly as it was published — nothing is aggregated first, so the granularity, caliber and completeness checks see the real region, channel and source spread rather than a rolled-up series that made four of the ten subchecks unable to fail. The AI then confirms/adjusts the four dimension scores against the rubric. Total = product of the four dimensions (Excel 2.12); the verdict is reviewed by a human next, and applies to the indicator everywhere it is used.",
      "basis_note": "校验标准 + 数据资产证据。", "work_note": "AI 逐指标四维评分；Total = 最弱维度。",
      "depends_on": ["2.1d"], "duration": 3, "produces": ["a-quality-scorecard"]},
     {"id": "2.2d", "name": "Review data quality verdicts", "agent": "data", "stage": "s2", "klass": "H",
@@ -349,8 +349,8 @@ TASKS: list[TaskDef] = [
     # per anomaly whose handling actually reaches the fit.
     {"id": "2.4", "name": "Statistical Score", "agent": "data", "stage": "s2", "klass": "A",
      "summary": "Variability, correlation and collinearity tests per indicator (CV / Pearson / VIF); the combined score decides model entry. Indicators already rejected at 2.2 or 2.3 are not scored — that call is settled.",
-     "how": "CV, Pearson and VIF are computed per indicator still in play and combined into an entry score; the AI then writes the case for or against each borderline indicator. Excluding the already-rejected ones is not bookkeeping — VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.",
-     "basis_note": "统计筛选规则 + 上游裁决（2.2 质量 / 2.3 签核）。", "work_note": "CV / Pearson / VIF computed on the indicators still in play.",
+     "how": "CV, Pearson and VIF are computed per indicator still in play and combined into an entry score; the AI then writes the case for or against each borderline indicator. The tests run on a panel — one row per (model object, month) — so an indicator is measured across every channel x product the model will be fitted on, instead of on a single aggregated series. Excluding the already-rejected ones is not bookkeeping: VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.",
+     "basis_note": "统计筛选规则 + 上游裁决（2.2 质量 / 2.3 签核）。", "work_note": "CV / Pearson / VIF computed over the channel x product panel.",
      "depends_on": ["2.3s"], "duration": 2, "produces": ["a-stat-tests"]},
     {"id": "2.4d", "name": "Review statistical verdicts", "agent": "data", "stage": "s2", "klass": "H",
      "panel": "stat-review",
@@ -366,32 +366,47 @@ TASKS: list[TaskDef] = [
                       {"id": "keep", "label": "Keep acceptable metrics", "detail": "Enter with the Good-band metrics", "consequence": "The OLS test checks their contribution range", "recommended": True},
                       {"id": "drop", "label": "Drop the weakest", "detail": "Keep only Good-band metrics", "consequence": "Leaner model; some factors lose a metric"},
                       {"id": "review", "label": "Review case-by-case", "detail": "Open the scorecard to decide per metric", "consequence": "Manual selection before the OLS test"}]}},
-    # ── 2.5 OLS indicator search — a single automated multi-fit search (寻优),
-    #    replacing the former five-step manual config (propose → Y → X → params →
-    #    fit). The AI searches each L4's candidate indicators over repeated OLS
-    #    fits, keeping the choice that lands the factor in its Knowledge range;
-    #    the human reviews the chosen selection at the d-2.5 gate (and can switch
-    #    a factor's indicator + re-fit via the OLS panel). The single Y comes from
-    #    the 2.1 Metrics Type; params scale to the series length automatically.
-    {"id": "2.5", "name": "OLS indicator search", "agent": "data", "stage": "s2", "klass": "M",
-     "summary": "Search each L4 factor's candidate indicators over repeated OLS fits for the model that lands the most factors inside their industry ROI / Contribution ranges — an automated selection, not a manual variable pick.",
-     "how": "Six steps, each traced in the Build process: (1) aggregate the long table to one national total model; (2) enumerate every candidate indicator that survived mapping, quality, sign-off and statistical screening, grouped by factor; (3) search — for each factor try its candidates across repeated regressions, keeping the assignment that lands the most factors inside their Knowledge ROI / Contribution range, then the most paid drivers carrying the right sign, then the best R²; (4) refit the winning setup and record every trial's coefficient, significance, ROI and contribution; (5) the AI reads each fitted factor against its Knowledge band and says whether the result is credible, not just whether it is inside; (6) summarise what was adopted and what is flagged. The single response (Y) is the one you tagged at 2.1 Metrics Type; transforms and controls scale to the series length. You review the chosen selection at the gate — switch any factor's indicator and re-fit if you disagree.",
-     "basis_note": "行业经验 ROI / 贡献区间（知识库）+ 2.4 统计得分 + 数据可用性。", "work_note": "OLS search complete; per-factor indicators chosen and fitted.",
-     "depends_on": ["2.4d"], "duration": 3, "produces": ["a-ols-test"],
+    # ── 2.5 OLS regression — one fit per (channel × product) model object, each
+    #    taking that object's whole surviving driver universe at once. The per-L4
+    #    indicator search (寻优) that used to pick one indicator per factor across
+    #    repeated trial fits is gone (2026-07-27): a Knowledge band is something a
+    #    result is compared against, never something the variable set is tuned
+    #    towards. The human reviews at the d-2.5 gate and can untick + re-fit. The
+    #    Y comes from the 2.1 Metrics Type; params scale to the series length.
+    {"id": "2.5", "name": "OLS regression per channel × product", "agent": "data", "stage": "s2", "klass": "M",
+     "summary": "Fit one OLS per channel × product with every surviving variable in it at once, then compare each factor's ROI / Contribution against its industry range — a reported result, not a tuned selection.",
+     "how": "Five steps, each traced in the Build process: (1) read the assembled long table and enumerate its model objects — one per channel × product that carries both a response and drivers, so N channels and M products give N×M models; (2) enumerate every candidate indicator that survived mapping, quality, sign-off and statistical screening — all of them enter their model, with no search and no pre-selection, so each coefficient is what that variable did alongside all the others; (3) fit every model object, one regression each, and record each variable's coefficient, significance, ROI and contribution (a cell with too few months to identify its variables reports its own error and the rest carry on); (4) the AI reads each fitted factor against its Knowledge band and says whether the result is credible, not just whether it is inside, then summarises each model — the indicators that carry it and what qualifies it; (5) summarise what was adopted and what is flagged. The response (Y) is the one you tagged at 2.1 Metrics Type; transforms and controls scale to the series length. Review at the gate — untick any variable and re-fit if you disagree.",
+     "basis_note": "行业经验 ROI / 贡献区间（知识库）+ 2.4 统计得分 + 数据可用性。", "work_note": "One OLS fitted per channel × product; every surviving variable in the model.",
+     "depends_on": ["2.4d"], "duration": 3, "produces": ["a-ols-test"]},
+    # 2.5d completes S2's one missing triple. Every other artifact here is
+    # AI-proposes → human-reviews → gate; 2.5 alone ran a mechanical fit and went
+    # straight to its gate, so the only lever over a factor's fate was the gate's
+    # all-or-nothing "drop the flagged ones". The per-factor verdicts now live on
+    # `st.ols_scorecard` and are reviewed here, which is also what let d-2.5 stop
+    # freezing its drops onto its own resolution (see `agents/ols_scorecard.py`).
+    {"id": "2.5d", "name": "Review the OLS range verdicts", "agent": "data", "stage": "s2", "klass": "H",
+     "panel": "ols-factor-tree",
+     "summary": "Human reviews the OLS's per-factor accept/reject proposal against the industry ROI / contribution bands, adjusts any of it, then confirms the selection.",
+     "how": "The factor tree comes back with a verdict on every fitted factor: accept when ROI and contribution sit inside their Knowledge band, reject when they do not or when the benchmark review judged the result implausible. You change any row you disagree with — a rejection removes that variable and re-fits, so the coefficients you confirm are the ones the master table is built from. There is no middle state: every factor leaves here accepted or rejected, and the earlier layers are frozen once you sign off.",
+     "basis_note": "行业 ROI / 贡献区间（知识库）+ AI 逐因子采纳建议。", "work_note": "Awaiting human review of the per-factor range verdicts.",
+     "depends_on": ["2.5"], "duration": 1, "produces": [],
      "decision": {"id": "d-2.5", "kind": "choice", "title": "Confirm indicator selection",
-                  "question": "The OLS test checked each factor's ROI / contribution against its knowledge-base range. Confirm the selection, drop the flagged indicators, or revisit the business hypotheses?",
+                  "question": "Every fitted factor now carries an accept or reject verdict in the tree above. Confirm them and assemble the master table, or send the out-of-range factors back to the business hypotheses?",
                   "evidence": [{"artifactId": "a-ols-test", "note": "Per-factor ROI / contribution vs knowledge ranges"}, {"artifactId": "a-business-validation", "note": "Business hypotheses"}],
-                  "recommendation": "Selected indicators fall within their expected ranges — confirm and assemble the master table.",
+                  "recommendation": "Confirm the verdicts above — they are what the master table is assembled from.",
+                  # There is no "drop the flagged ones" option any more: dropping is a
+                  # per-factor verdict in the tree, not a bulk answer to the gate. It
+                  # survives on already-resolved projects through the legacy fallback
+                  # in `ledger.range_drop_pairs_by_object`.
                   "options": [
-                      {"id": "confirm", "label": "Confirm selection", "detail": "Selected indicators enter the master table", "consequence": "Master data is assembled for modeling", "recommended": True},
-                      {"id": "drop", "label": "Drop flagged indicators", "detail": "Remove the out-of-range indicators", "consequence": "Master data is assembled without them"},
+                      {"id": "confirm", "label": "Confirm the verdicts", "detail": "The accepted factors enter the master table", "consequence": "Master data is assembled from exactly these factors", "recommended": True},
                       {"id": "rework", "label": "Revisit hypotheses", "detail": "Out-of-range factors need rethinking", "consequence": "Business validation is revisited"}],
                   "rework_task_id": "2.3", "rework_option_id": "rework"}},
     {"id": "2.6", "name": "Assemble master data", "agent": "data", "stage": "s2", "klass": "M",
      "summary": "Assemble the indicators that survived every filter layer into the master feature wide table modeling consumes — sliceable by product × channel × region.",
-     "how": "The pipeline pivots the adopted indicators — the response tagged at 2.1 and the per-factor indicators the 2.5 search chose — into one feature wide table per model object. Every rejected indicator keeps the chain of verdicts that removed it, so the funnel is auditable end to end.",
+     "how": "The pipeline pivots the adopted indicators — the response tagged at 2.1 and the variables fitted at 2.5 — into one feature wide table per model object (channel × product). Every rejected indicator keeps the chain of verdicts that removed it, so the funnel is auditable end to end.",
      "basis_note": "指标生命周期账本：映射/质量/业务签核/统计/选择/区间六层裁决。", "work_note": "Master feature table assembled from the adopted indicators.",
-     "depends_on": ["2.5"], "duration": 2, "produces": ["a-master-data"]},
+     "depends_on": ["2.5d"], "duration": 2, "produces": ["a-master-data"]},
     {"id": "2.6d", "name": "Lock master data", "agent": "data", "stage": "s2", "klass": "H",
      "summary": "Review the assembled feature table and the filter funnel behind it, then lock it as the modeling input.",
      "how": "You slice the table by product × channel × region, check the funnel accounts for every dropped indicator, and lock it. Locking is a human act — modeling should never start on a table nobody looked at.",

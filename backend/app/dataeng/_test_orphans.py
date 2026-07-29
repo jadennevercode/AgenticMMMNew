@@ -67,9 +67,46 @@ def test_dismiss_refuses_a_claimed_coverage() -> None:
         "dismissing a supplying coverage would silently unmap its factor"
 
 
+def _with_response(st: ProjectState) -> ProjectState:
+    st.indicator_coverage.append(IndicatorCoverage(
+        id="c-y", tree_row_id="", asset_id="a2", asset_name="Sales",
+        metric="本品销量箱数", metric_type="Y", l1="KPI", l2="KPI", l3="KPI",
+        l4="本品销量", coverage_start="202201", coverage_end="202212", rows=12))
+    return st
+
+
+def test_the_response_is_not_an_orphan() -> None:
+    """No industry factor tree declares sales — factors are what explain it.
+
+    Before this, the response matched no row and was listed as "data nobody asked
+    for", i.e. the one series the model is built on was offered for adoption.
+    """
+    from app.dataeng.indicators import orphan_indicators, response_coverages
+    st = _with_response(_st())
+
+    assert [c.metric for c in response_coverages(st)] == ["本品销量箱数"]
+    orphans = {i.metric for i in orphan_indicators(st)}
+    assert "本品销量箱数" not in orphans, orphans
+    assert "仓库库存" in orphans, "a genuine orphan must still be offered"
+
+
+def test_adopting_the_response_is_refused() -> None:
+    """Adopting Y would make the dependent variable one of its own drivers."""
+    from app.dataeng import orphans
+    st = _with_response(_st())
+    try:
+        orphans.adopt(st, "c-y")
+    except ValueError as exc:
+        assert "response" in str(exc).lower(), exc
+    else:
+        raise AssertionError("adopting the response should be refused")
+
+
 def main() -> int:
     for fn in (test_adopt_creates_an_accepted_row_and_claims_it,
                test_adopt_is_idempotent,
+               test_the_response_is_not_an_orphan,
+               test_adopting_the_response_is_refused,
                test_dismiss_removes_the_orphan,
                test_dismiss_refuses_a_claimed_coverage):
         fn()

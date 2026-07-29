@@ -185,7 +185,7 @@ def test_2_5_locks_upstream_rejections_instead_of_hiding_them() -> None:
     victim = st.quality_scorecard.rows[0]
     victim.disposition = "drop"
     _run(data_agent.stat_screening, st, "2.4")
-    _run(data_agent.ols_search_and_fit, st, "2.5")
+    _run(data_agent.fit_models, st, "2.5")
 
     cfg = st.ols_config
     assert cfg is not None and cfg.x_candidates
@@ -214,7 +214,7 @@ def test_2_6_master_data_carries_only_adopted_indicators() -> None:
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     _run(data_agent.stat_screening, st, "2.4")
-    _run(data_agent.ols_search_and_fit, st, "2.5")
+    _run(data_agent.fit_models, st, "2.5")
     _run(data_agent.assemble_master_data, st, "2.6")
 
     art = st.artifact("a-master-data")
@@ -256,7 +256,7 @@ def test_2_6_honours_the_2_5x_variable_selection() -> None:
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     _run(data_agent.stat_screening, st, "2.4")
-    _run(data_agent.ols_search_and_fit, st, "2.5")
+    _run(data_agent.fit_models, st, "2.5")
 
     cfg = st.ols_config
     ticked = [c for c in cfg.x_candidates if c.selected]
@@ -307,7 +307,7 @@ def test_s4_training_fits_the_same_selection_s2_locked() -> None:
     st = _fresh()
     _run(data_agent.score_data, st, "2.2")
     _run(data_agent.stat_screening, st, "2.4")
-    _run(data_agent.ols_search_and_fit, st, "2.5")
+    _run(data_agent.fit_models, st, "2.5")
 
     cfg = st.ols_config
     ticked = [c for c in cfg.x_candidates if c.selected]

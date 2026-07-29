@@ -4,7 +4,7 @@ Everything is computed from the input data; nothing is hardcoded.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -13,7 +13,7 @@ import pandas as pd
 if TYPE_CHECKING:  # avoid a runtime import cycle (domain.models is not an mmm dep)
     from app.domain.models import OlsParams
 
-from app.mmm.ols import OLSResult, fit_ols
+from app.mmm.ols import OLSResult, fit_ols, variance_inflation_factors
 from app.mmm.pivot import ModelFrame, build_model_frame
 from app.mmm.transforms import adstock_geometric, hill_saturation
 
@@ -157,25 +157,110 @@ def _build_controls(mf: ModelFrame, params: "OlsParams | None") -> pd.DataFrame:
     return ctrl[keep]
 
 
+# A variable whose VIF is this high is explained by the others to R² > 0.99: the
+# normal equations are numerically singular in its direction, so its coefficient
+# is arithmetic noise rather than an estimate. Well above the VIF > 10 rule of
+# thumb on purpose — ordinary collinearity is a judgement for the reviewer at
+# 2.4/2.5, and only outright non-identifiability is decided here.
+MAX_DESIGN_VIF = 100.0
+
+
+def _drop_singular_drivers(
+    X: pd.DataFrame, mf: ModelFrame, control_cols: list[str]
+) -> tuple[pd.DataFrame, list[dict]]:
+    """Hold out drivers the design cannot separate, worst first.
+
+    This is the same class of rule as the degrees-of-freedom guard above, not a
+    screening verdict: with p > n OLS has no unique solution, and with a driver at
+    VIF 278 it has one only in the sense that floating point returns something.
+    On the reference case 竞品ND (278), 本品标价 (113) and the trend control (70)
+    were three slow-moving series over 34 months; the fit gave them coefficients of
+    ±10⁷ that cancelled, and the decomposition dutifully reported −1907 % and
+    +1415 % shares of a real business.
+
+    Controls are never dropped — they are the engine's own columns, and removing
+    the trend would change what "baseline" means. Drivers go one at a time,
+    recomputing after each, so removing the worst offender can rescue the rest.
+    """
+    dropped: list[dict] = []
+    drivers = [c for c in X.columns if c not in set(control_cols)]
+    while len(drivers) > 1:
+        vifs = variance_inflation_factors(X)
+        worst, worst_vif = "", 0.0
+        for c in drivers:
+            v = float(vifs.get(c, 0.0) or 0.0)
+            if v > worst_vif:
+                worst, worst_vif = c, v
+        if not worst or worst_vif <= MAX_DESIGN_VIF:
+            break
+        meta = mf.meta.get(worst, {})
+        dropped.append({"driver": worst, "vif": round(worst_vif, 1),
+                        "l4": str(meta.get("l4", "")), "metric": str(meta.get("metric", worst))})
+        X = X.drop(columns=[worst])
+        drivers.remove(worst)
+    return X, dropped
+
+
+def _reference_level(mf: ModelFrame, X: pd.DataFrame, col: str) -> tuple[float, str]:
+    """The level a driver is decomposed *against*, and the word for it.
+
+    A contribution answers "how much of Y did this driver bring?", which only
+    means something once you say **compared to what**. Spend answers it against
+    zero: no campaign, no incremental sales. A price of 3.5 RMB, a distribution
+    rate of 600 or a temperature of 21°C never go to zero, so measuring them
+    against zero attributes their entire standing level to "contribution" — which
+    is how this produced 竞品ND at −1907% and 本品标价 at +1415%, two meaningless
+    numbers that only cancelled because the intercept absorbed the difference.
+
+    Non-spend drivers are therefore decomposed against their **in-window minimum**:
+    the always-present part of a level belongs to the baseline, and what varies
+    above the floor is what the model can attribute. Every factor still gets its
+    own contribution — merging them into the baseline would make the decomposition
+    depend on a hand-maintained list of "control" factors, and the next project's
+    factor tree has different ones.
+    """
+    if col in mf.spend_cols:
+        return 0.0, "zero"
+    lo = float(np.min(X[col].to_numpy(dtype=float)))
+    # A driver that does reach zero is already incremental on its own scale.
+    return (0.0, "zero") if lo <= 0.0 else (lo, "min")
+
+
 def _decomposition(
     mf: ModelFrame, X: pd.DataFrame, res: OLSResult, control_cols: list[str] | None = None
-) -> tuple[float, dict[str, float]]:
+) -> tuple[float, dict[str, float], dict[str, dict]]:
     """Contribution share per driver + baseline, as a share of ACTUAL Y.
 
-    contribution_c = Σ_t(coef_c · transformed_x_c[t]) / Σ_t(actual Y[t])
-                   — the standard "share of sales" decomposition. Normalising by
-    actual Y (rather than by ``intercept + Σcomponents``) keeps the shares on a
-    stable, positive denominator.
+    contribution_c = Σ_t(coef_c · (transformed_x_c[t] − ref_c)) / Σ_t(actual Y[t])
 
-    Trend/seasonality controls are NOT drivers: their components fold into the
-    baseline, so only real marketing/commercial factors carry a contribution.
+    where ``ref_c`` is the level the driver is measured against (see
+    :func:`_reference_level`). Whatever sits below the reference is not lost — it
+    moves into the baseline, so the identity
+
+        baseline_pct + Σ contribution_pct  ==  100 %
+
+    still holds exactly. Normalising by actual Y (rather than by
+    ``intercept + Σcomponents``) keeps the shares on a stable, positive denominator.
+
+    Trend/seasonality controls are NOT factor-tree drivers: the engine adds them
+    itself, so their whole component folds into the baseline.
     """
     controls = set(control_cols or [])
     components: dict[str, float] = {}
-    for c in mf.x_cols:
-        components[c] = float(res.coef[c] * X[c].to_numpy(dtype=float).mean())
-
+    basis: dict[str, dict] = {}
     baseline = float(res.intercept)
+
+    for c in mf.x_cols:
+        coef = float(res.coef[c])
+        col = X[c].to_numpy(dtype=float)
+        ref, kind = _reference_level(mf, X, c)
+        components[c] = coef * (float(col.mean()) - ref)
+        # The driver's standing level is part of "business as usual", not of what
+        # the driver moved — so it belongs to the baseline.
+        baseline += coef * ref
+        basis[c] = {"reference": round(ref, 6), "referenceKind": kind,
+                    "mean": round(float(col.mean()), 6)}
+
     for c in controls:
         if c in res.coef and c in X.columns:
             baseline += float(res.coef[c] * X[c].to_numpy(dtype=float).mean())
@@ -186,7 +271,7 @@ def _decomposition(
         total = sum(abs(v) for v in components.values()) + abs(baseline) or 1.0
     baseline_pct = 100.0 * baseline / total
     contribution = {c: 100.0 * v / total for c, v in components.items()}
-    return baseline_pct, contribution
+    return baseline_pct, contribution, basis
 
 
 def _roi(
@@ -417,8 +502,17 @@ def run_mmm(
             "Select fewer model variables or simpler controls."
         )
 
+    X, dropped_collinear = _drop_singular_drivers(X, mf, control_cols)
+    if dropped_collinear:
+        # Everything downstream reads the frame's driver list, so narrow it here
+        # rather than leaving each consumer to notice a coefficient is missing.
+        gone = {d["driver"] for d in dropped_collinear}
+        mf = replace(mf,
+                     x_cols=[c for c in mf.x_cols if c not in gone],
+                     spend_cols=[c for c in mf.spend_cols if c not in gone])
+
     res = fit_ols(X, y)
-    baseline_pct, contribution = _decomposition(mf, X, res, control_cols)
+    baseline_pct, contribution, contribution_basis = _decomposition(mf, X, res, control_cols)
     price = getattr(params, "price_per_unit", None) if params is not None else None
     roi, roi_unit, roi_basis = _roi(mf, X, res, price)
     curves = _response_curves(mf, res, adstock, halves)
@@ -454,6 +548,12 @@ def run_mmm(
             "y_is_money": mf.y_is_money,
             "roi_unit": roi_unit,
             "roi_basis": roi_basis,
+            # What each contribution was measured against, so the UI can say
+            # "vs zero spend" or "vs the lowest month" instead of a bare number.
+            "contribution_basis": contribution_basis,
+            # Drivers the design could not separate. Reported, never silent — a
+            # variable that vanishes without a reason reads as a modelling choice.
+            "dropped_collinear": dropped_collinear,
             "drivers_meta": mf.meta,
             "spend_cols": mf.spend_cols,
             "control_cols": control_cols,

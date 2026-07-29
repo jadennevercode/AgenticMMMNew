@@ -1,4 +1,5 @@
 import { AnomalyReviewPanel } from './AnomalyReviewPanel'
+import { OlsFactorTreePanel } from '../ols/OlsFactorTreePanel'
 import { OlsStepPanel } from '../ols/OlsStepPanel'
 import { QualityCanvas } from '../canvas/QualityCanvas'
 import { StatCanvas } from '../canvas/StatCanvas'
@@ -24,6 +25,8 @@ export function TaskStepPanel({ kind }: { kind: TaskPanelKind }) {
     case 'ols-x':
     case 'ols-params':
       return <OlsStepPanel kind={kind} />
+    case 'ols-factor-tree':
+      return <OlsFactorTreePanel />  // brings its own frame + save action
     case 'quality-review':
       return (
         <PanelFrame

@@ -1,5 +1,5 @@
-"""Phase 2 — per-Channel-Type screening, verified end-to-end on the REAL
-Danone reference dataset (23,790 rows, 7 channel_types).
+"""Per-model-object screening, verified end-to-end on the REAL Danone reference
+dataset (23,790 rows, 7 channel_types × 1 modelable product).
 
 Read-only: builds an in-memory bound state under a throwaway project id and
 never touches stored project JSON, never starts a server, never calls the LLM.
@@ -19,7 +19,11 @@ PID = "t-real-pc"
 # The 7 real channel_types in the reference dataset (see test_data_derived_channels
 # for how this is independently re-derived from the raw frame, not hardcoded here
 # for correctness — this constant is only the expected-value fixture for that check).
+# Only MIZONE carries both a response and drivers, so the 7 channels yield 7 model
+# objects; the competitor brands' sell-out rows cannot be modeled and are reported
+# by `skipped_objects` instead.
 EXPECTED_CHANNELS = {"AFH", "EC", "MT", "O2O", "TT", "WS", "社区团购"}
+EXPECTED_PRODUCT = "MIZONE"
 
 
 def make_real_state():
@@ -46,15 +50,21 @@ def test_data_derived_channels() -> None:
     by coincidence with a stale ordering."""
     from app.ingest import load_model_dataset
 
+    from app.agents.model_objects import make_object, skipped_objects, split_object
+
     st = make_real_state()
     objs = model_objects(st)
-    assert set(objs) == EXPECTED_CHANNELS, set(objs)
+    assert {split_object(o)[0] for o in objs} == EXPECTED_CHANNELS, objs
+    assert {split_object(o)[1] for o in objs} == {EXPECTED_PRODUCT}, objs
 
     raw = load_model_dataset()
-    ct = raw["channel_type"].astype("string").str.strip()
-    expected_order = [str(k) for k in ct[ct.ne("") & ct.ne("nan")].value_counts().index]
-    assert objs == expected_order, (objs, expected_order)
-    print(f"  7 channels, busiest-first: {objs}")
+    expected = {make_object(c, EXPECTED_PRODUCT) for c in EXPECTED_CHANNELS}
+    assert set(objs) == expected, (set(objs), expected)
+    # The competitor brands carry sell-out but no drivers — reported, never modeled.
+    skipped = skipped_objects(raw)
+    assert skipped and all(split_object(o)[1] != EXPECTED_PRODUCT for o in skipped), skipped
+    print(f"  {len(objs)} model objects (channel x product): {objs}")
+    print(f"  cells with a response but no drivers, reported not modeled: {skipped}")
 
 
 def test_ledger_covers_all_channels() -> None:
@@ -64,8 +74,9 @@ def test_ledger_covers_all_channels() -> None:
 
     st = make_real_state()
     rows = ledger.indicator_ledger(st)
+    from app.agents.model_objects import split_object
     per_channel_objs = {r.object for r in rows if r.object != ledger.OBJECT_ANY}
-    assert per_channel_objs == EXPECTED_CHANNELS, per_channel_objs
+    assert {split_object(o)[0] for o in per_channel_objs} == EXPECTED_CHANNELS, per_channel_objs
 
     distinct_keys = {r.key for r in rows}
     assert len(distinct_keys) > 20, len(distinct_keys)
@@ -73,18 +84,18 @@ def test_ledger_covers_all_channels() -> None:
           f"all 7 channels represented")
 
 
-def _pick_divergence_indicator(st, card):
-    """An indicator scored (present) in >= 2 channels on the real scorecard AND
-    present in the ledger's own driver universe, deterministically chosen (most
-    channels first, then key order) so a rerun always picks the same one.
+def _pick_divergence_indicator(st, cfg):
+    """An indicator offered as a model variable in >= 2 model objects AND present
+    in the ledger's own driver universe, deterministically chosen (most objects
+    first, then key order) so a rerun always picks the same one.
 
-    The statistical scorecard (2.4) scores every indicator that survived
-    upstream layers, but the ledger's universe (`driver_candidates_by_l4`, 2.1's
-    key space) is narrower — e.g. price-type factors such as RSP are scored by
-    2.4 but never enter the driver universe, so they can never appear in
-    `indicator_ledger`. Restricting to keys the ledger actually carries is what
-    makes the downstream ledger/model_selection/master_table assertions land on
-    a real, non-empty row instead of silently matching nothing.
+    The divergence is forced at **2.5x** (the human's model-variable tick), which
+    is per model object. It used to be forced at 2.4: since 2026-07-27 the
+    statistical screening scores each indicator once over a panel stacked across
+    every object and records one global verdict, so it can no longer express "kept
+    here, dropped there" — nor should it, that was a property of the slice rather
+    than of the indicator. The layers that still rule per object are the selection
+    tick and the d-2.5 range gate.
     """
     from collections import defaultdict
 
@@ -92,51 +103,52 @@ def _pick_divergence_indicator(st, card):
 
     universe = ledger._universe(st)
     by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for r in card.rows:
-        if ledger._norm_pair(r.l4, r.indicator) in universe:
-            by_key[(r.l4, r.indicator)].add(r.object)
+    for c in cfg.x_candidates:
+        if c.locked:
+            continue
+        if ledger._norm_pair(c.l4, c.metric) in universe:
+            by_key[(c.l4, c.metric)].add(c.object)
     candidates = [(k, sorted(v)) for k, v in by_key.items() if len(v) >= 2]
-    assert candidates, ("no ledger-universe indicator is scored in >=2 real channels "
+    assert candidates, ("no ledger-universe indicator is offered in >=2 model objects "
                         "— cannot demonstrate divergence")
     candidates.sort(key=lambda kv: (-len(kv[1]), kv[0]))
     return candidates[0]
 
 
-def test_per_channel_statistical_divergence() -> None:
-    """Criterion 3 (the core proof): pick a real indicator scored in >= 2 real
-    channels, force its disposition to "drop" in exactly one channel and
-    "include" in the rest, rebuild the ledger, and assert the drop applies
-    ONLY to the forced channel — the same indicator is rejected in one channel
-    and adopted in another, on the real 7-channel universe."""
+def test_per_object_selection_divergence() -> None:
+    """The core proof: pick a real indicator offered in >= 2 real model objects,
+    untick it in exactly one and keep it ticked in the rest, rebuild the ledger,
+    and assert the rejection applies ONLY to that object — the same indicator is
+    out of one channel x product model and in another, on the real universe."""
     from app.agents import ledger
-    from app.agents.stat_scoring import build_stat_scorecard
+    from app.agents.ols_review import build_ols_proposal
 
     st = make_real_state()
-    card = build_stat_scorecard(st)
-    (l4, indicator), channels = _pick_divergence_indicator(st, card)
-    dropped, kept = channels[0], channels[1:]
+    cfg = build_ols_proposal(st)
+    (l4, indicator), objects = _pick_divergence_indicator(st, cfg)
+    dropped, kept = objects[0], objects[1:]
 
-    forced_rows = []
-    for r in card.rows:
-        if r.l4 == l4 and r.indicator == indicator and r.object in channels:
-            disposition = "drop" if r.object == dropped else "include"
-            forced_rows.append(r.model_copy(update={"disposition": disposition}))
+    forced = []
+    for c in cfg.x_candidates:
+        if c.l4 == l4 and c.metric == indicator and c.object in objects:
+            forced.append(c.model_copy(update={"selected": c.object != dropped}))
         else:
-            forced_rows.append(r)
-    st.stat_scorecard = card.model_copy(update={"rows": forced_rows})
+            forced.append(c)
+    st.ols_config = cfg.model_copy(update={"x_candidates": forced})
 
     rows = ledger.indicator_ledger(st)
-    dropped_row = next(r for r in rows if r.object == dropped and r.l4 == l4 and r.indicator == indicator)
+    dropped_row = next(r for r in rows
+                       if r.object == dropped and r.l4 == l4 and r.indicator == indicator)
     assert not dropped_row.adopted, dropped_row
-    assert dropped_row.rejected_at == "statistical", dropped_row.rejected_at
+    assert dropped_row.rejected_at == "selection", dropped_row.rejected_at
 
     kept_adopted = [r for r in rows
                     if r.object in kept and r.l4 == l4 and r.indicator == indicator and r.adopted]
     assert kept_adopted, f"expected at least one of {kept} to keep {(l4, indicator)} adopted"
 
     print(f"  divergence indicator: {l4} / {indicator}")
-    print(f"  scored in channels: {channels}")
-    print(f"  dropped (forced) in: {dropped} -> rejected_at=statistical, adopted=False")
+    print(f"  offered in objects: {objects}")
+    print(f"  unticked (forced) in: {dropped} -> rejected_at=selection, adopted=False")
     print(f"  adopted in: {[r.object for r in kept_adopted]}")
 
     # Stash for the downstream tests (model_selection, master_table) so they
@@ -150,12 +162,12 @@ _DIVERGENCE: dict = {}
 
 
 def test_model_selection_per_object() -> None:
-    """Criterion 4: `model_selection(st).exclude_for(channel)` reflects the
-    forced per-channel drop from the previous test — excluded in the dropped
-    channel, not in a kept one."""
+    """`model_selection(st).exclude_for(object)` reflects the forced per-object
+    drop from the previous test — excluded in the dropped model, not in a kept
+    one."""
     from app.agents.ledger import _norm_pair, model_selection
 
-    assert _DIVERGENCE, "test_per_channel_statistical_divergence must run first"
+    assert _DIVERGENCE, "test_per_object_selection_divergence must run first"
     st, l4, indicator = _DIVERGENCE["st"], _DIVERGENCE["l4"], _DIVERGENCE["indicator"]
     dropped, kept = _DIVERGENCE["dropped"], _DIVERGENCE["kept"]
 
@@ -169,17 +181,20 @@ def test_model_selection_per_object() -> None:
 
 
 def test_master_table_columns_differ_by_channel() -> None:
-    """Criterion 6: the same forced divergence surfaces in the master data
-    wide table — the dropped indicator's metric is a column when sliced to a
-    kept channel, absent when sliced to the dropped channel."""
+    """The same forced divergence surfaces in the master data wide table — the
+    dropped indicator's metric is a column when sliced to a kept model object,
+    absent when sliced to the dropped one."""
     from app.agents.master_data import master_table
 
-    assert _DIVERGENCE, "test_per_channel_statistical_divergence must run first"
+    assert _DIVERGENCE, "test_per_object_selection_divergence must run first"
     st, indicator = _DIVERGENCE["st"], _DIVERGENCE["indicator"]
     dropped, kept = _DIVERGENCE["dropped"], _DIVERGENCE["kept"]
 
-    dropped_tbl = master_table(st, channel_type=[dropped])
-    kept_tbl = master_table(st, channel_type=[kept])
+    from app.agents.model_objects import split_object
+    dropped_tbl = master_table(st, channel_type=[split_object(dropped)[0]],
+                               brand=[split_object(dropped)[1]])
+    kept_tbl = master_table(st, channel_type=[split_object(kept)[0]],
+                            brand=[split_object(kept)[1]])
 
     assert indicator in kept_tbl["columns"], (indicator, kept_tbl["columns"])
     assert indicator not in dropped_tbl["columns"], (indicator, dropped_tbl["columns"])
@@ -196,7 +211,7 @@ if __name__ == "__main__":
     fns = [
         test_data_derived_channels,
         test_ledger_covers_all_channels,
-        test_per_channel_statistical_divergence,
+        test_per_object_selection_divergence,
         test_model_selection_per_object,
         test_master_table_columns_differ_by_channel,
     ]

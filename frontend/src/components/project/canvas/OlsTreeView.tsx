@@ -1,12 +1,11 @@
 import { useMemo, useState } from 'react'
 import { asOlsTree } from '../../../lib/artifact-format'
+import { OlsFactorTreePanel } from '../ols/OlsFactorTreePanel'
 import { cn } from '../../../lib/cn'
 import type {
   ArtifactInstance,
   OlsObjectSummary,
   OlsRowStatus,
-  OlsSearchTrace,
-  OlsSearchTrial,
   OlsTreeRow,
   OlsTreeSummary,
 } from '../../../lib/types'
@@ -39,20 +38,35 @@ function metricHint(value: number | null, lo: number, hi: number): string {
   return value >= lo && value <= hi ? 'text-emerald-600' : 'text-amber-600'
 }
 
-function ObjectCard({ o }: { o: OlsObjectSummary }) {
+interface ObjectCardProps {
+  o: OlsObjectSummary
+  selected?: boolean
+  onSelect?: () => void
+}
+
+function ObjectCard({ o, selected = false, onSelect }: ObjectCardProps) {
   if (o.error) {
     return (
-      <div className="min-w-[210px] shrink-0 rounded-xl border border-rose-500/30 bg-rose-500/5 p-3">
-        <div className="text-[13px] font-semibold text-rose-600">{o.object}</div>
+      <div className="min-w-[210px] shrink-0 rounded-xl border border-rose-500/30 bg-rose-500/5 p-3 text-left">
+        <div className="text-[13px] font-semibold text-rose-600">{o.label || o.object}</div>
         <p className="mt-1 text-[11px] leading-snug text-rose-500/80">{o.error}</p>
       </div>
     )
   }
   const flagged = o.redFlags.length > 0
   return (
-    <div className="min-w-[210px] shrink-0 rounded-xl border border-border bg-card p-3 shadow-sm">
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      title={selected ? 'Showing this model — click to show every model' : 'Show only this model’s verdicts'}
+      className={cn(
+        'min-w-[210px] shrink-0 rounded-xl border bg-card p-3 text-left shadow-sm transition-colors',
+        selected ? 'border-primary ring-1 ring-primary/40' : 'border-border hover:border-primary/40',
+      )}
+    >
       <div className="flex items-center justify-between">
-        <span className="text-[13px] font-semibold">{o.object}</span>
+        <span className="text-[13px] font-semibold">{o.label || o.object}</span>
         <span
           className={cn(
             'rounded px-1.5 py-0.5 text-[10px] font-medium',
@@ -95,7 +109,7 @@ function ObjectCard({ o }: { o: OlsObjectSummary }) {
           {o.controls?.length ? <span> · {o.controls.length} controls</span> : null}
         </p>
       )}
-    </div>
+    </button>
   )
 }
 
@@ -171,7 +185,14 @@ function IndicatorRow({ laid, channel }: { laid: Laid; channel: string }) {
           </span>
         )}
       </td>
-      <td className="px-2 py-1.5 align-top"><RangeCell value={contribution} band={row.contributionRange} status={channel ? '' : row.contributionStatus} isPct /></td>
+      <td className="px-2 py-1.5 align-top">
+        <RangeCell value={contribution} band={row.contributionRange} status={channel ? '' : row.contributionStatus} isPct />
+        {contribution != null && row.contributionBasis && (
+          <span className="mt-0.5 block max-w-[180px] truncate text-[9px] leading-snug text-muted-foreground" title={row.contributionBasis}>
+            {row.contributionBasis}
+          </span>
+        )}
+      </td>
       <td className="px-2 py-1.5 align-top">
         <span className={cn('inline-flex w-fit items-center rounded px-1.5 py-0.5 text-[11px] font-medium', meta.chip)}>
           {meta.label}
@@ -207,25 +228,19 @@ const AI_VERDICT_CHIP: Record<string, string> = {
   noBenchmark: 'bg-muted text-muted-foreground',
 }
 
-/**
- * What the per-L4 indicator search tried, and why the winner won.
- *
- * The search fits the model many times over — one assignment of indicators to
- * factors per fit — and every one of those fits produced a coefficient, a
- * significance and a range verdict for the factor it was testing. Those are
- * exactly the numbers a reviewer wants when asking "why this indicator and not
- * that one", so they are kept rather than discarded with the losing trial.
+/* ── how each model reads ──────────────────────────────
+ * One panel per model object: the indicators that carry it, and the AI's account
+ * of what the fit says and what qualifies it. The key-driver list is computed
+ * (significant drivers ranked by contribution) — the language explains that list,
+ * it does not choose it, and every number it cites comes from the fit.
  */
-function SearchTrace({ trace }: { trace: OlsSearchTrace }) {
-  const [open, setOpen] = useState(false)
-  const byFactor = new Map<string, OlsSearchTrial[]>()
-  for (const t of trace.trials) {
-    const k = t.l4 || '—'
-    byFactor.set(k, [...(byFactor.get(k) ?? []), t])
-  }
+function ModelReadings({ objects }: { objects: OlsObjectSummary[] }) {
+  const [open, setOpen] = useState(true)
+  const withSummary = objects.filter((o) => o.aiSummary)
+  if (withSummary.length === 0) return null
 
   return (
-    <section aria-label="Indicator search" className="rounded-lg border border-border">
+    <section aria-label="Model readings" className="rounded-lg border border-border">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -233,65 +248,32 @@ function SearchTrace({ trace }: { trace: OlsSearchTrace }) {
         className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-accent/40"
       >
         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Indicator search
+          What each model says
         </span>
         <span className="text-[11px] text-muted-foreground">
-          {trace.fits} trial fit{trace.fits === 1 ? '' : 's'} · {trace.candidates} candidate
-          {trace.candidates === 1 ? '' : 's'} over {trace.l4Searched} factor
-          {trace.l4Searched === 1 ? '' : 's'} · {trace.swaps} swap{trace.swaps === 1 ? '' : 's'}
+          {withSummary.length} model{withSummary.length === 1 ? '' : 's'}
         </span>
       </button>
       {open && (
-        <div className="border-t border-border px-3 py-2.5">
-          <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">{trace.note}</p>
-          <div className="space-y-2.5">
-            {trace.perFactor.map((f) => {
-              const trials = byFactor.get(f.l4) ?? []
-              return (
-                <div key={f.l4}>
-                  <p className="text-[11px]">
-                    <span className="text-muted-foreground">{f.l4 || '—'}</span>
-                    {' → '}
-                    <span className="font-medium">{f.chosen}</span>
-                    {f.candidates.length > 1 && (
-                      <span className="text-muted-foreground"> (of {f.candidates.length} candidates)</span>
-                    )}
-                  </p>
-                  {trials.length > 0 && (
-                    <ul className="mt-0.5 space-y-0.5">
-                      {trials.map((t, i) => (
-                        <li
-                          key={i}
-                          className={cn(
-                            'flex flex-wrap items-baseline gap-x-2 text-[10.5px]',
-                            t.indicator === f.chosen ? 'text-foreground' : 'text-muted-foreground',
-                          )}
-                        >
-                          <span className="font-mono">{t.indicator}</span>
-                          <span className="font-mono">R²={t.r2.toFixed(3)}</span>
-                          <span className="font-mono">coef={num(t.coef)}</span>
-                          <span className="font-mono">t={num(t.tValue)}</span>
-                          {t.roi != null && <span className="font-mono">ROI={num(t.roi)}</span>}
-                          {t.contribution != null && (
-                            <span className="font-mono">contrib={num(t.contribution, 1)}%</span>
-                          )}
-                          {t.signExpected && (
-                            <span className={t.signCorrect ? 'text-emerald-600' : 'text-rose-600'}>
-                              {t.signCorrect ? 'sign ok' : 'wrong sign'}
-                            </span>
-                          )}
-                          {t.roiStatus === 'out' && <span className="text-amber-600">ROI out of band</span>}
-                          {t.contributionStatus === 'out' && (
-                            <span className="text-amber-600">contribution out of band</span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+        <div className="space-y-3 border-t border-border px-3 py-2.5">
+          {withSummary.map((o) => (
+            <article key={o.object}>
+              <h4 className="text-[11px] font-semibold">{o.label || o.object}</h4>
+              {o.aiKeyDrivers && o.aiKeyDrivers.length > 0 && (
+                <ul className="mt-1 flex flex-wrap gap-1">
+                  {o.aiKeyDrivers.map((d) => (
+                    <li
+                      key={d}
+                      className="rounded bg-accent px-1.5 py-0.5 font-mono text-[10.5px] text-foreground"
+                    >
+                      {d}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{o.aiSummary}</p>
+            </article>
+          ))}
         </div>
       )}
     </section>
@@ -302,16 +284,48 @@ function SearchTrace({ trace }: { trace: OlsSearchTrace }) {
 export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
   const data = asOlsTree(inst.body)
   const [filter, setFilter] = useState<Set<OlsRowStatus>>(new Set())
+  // Which model's verdicts the tree shows. '' = every model, one row each.
+  const [model, setModel] = useState<string>('')
+  // 'fits' is the read-only result table; 'verdicts' is the 2.5d review surface,
+  // mounted here so the tree and the decision on it are one screen rather than
+  // a result you have to go somewhere else to act on.
+  const [tab, setTab] = useState<'fits' | 'verdicts'>('fits')
+
+  // Every tree row is one factor's verdict in ONE model object, so with N×M models
+  // the flat table interleaves N×M verdicts per factor. Scoping to a model is what
+  // makes it readable — and it is the question a reviewer actually has ("what did
+  // Ecommerce · Aurelia Pro do with this factor"), not an average across models.
+  const scoped = useMemo(() => {
+    if (!data) return []
+    return model ? data.tree.filter((r) => r.object === model) : data.tree
+  }, [data, model])
+
+  // Counts follow the scope, or the strip would describe a different population
+  // than the table below it.
+  const summary: OlsTreeSummary = useMemo(() => {
+    if (!data) return { total: 0, inModel: 0, inRange: 0, flagged: 0, noBenchmark: 0, notInModel: 0, dropped: 0, notMapped: 0 }
+    if (!model) return data.summary
+    const n = (p: (r: OlsTreeRow) => boolean) => scoped.filter(p).length
+    return {
+      total: scoped.length,
+      inModel: n((r) => r.inModel),
+      inRange: n((r) => r.status === 'inRange'),
+      flagged: n((r) => r.status === 'review'),
+      noBenchmark: n((r) => r.status === 'noBenchmark'),
+      notInModel: n((r) => r.status === 'notInModel'),
+      dropped: n((r) => r.status === 'dropped'),
+      notMapped: n((r) => r.status === 'notMapped'),
+    }
+  }, [data, model, scoped])
 
   // Flat rows with vertical-merge flags (first-of-run per L level).
   const laidRows: Laid[] = useMemo(() => {
-    if (!data) return []
     // `notMapped` rows (2.1 had no data for the factor) are upstream coverage, not
     // an OLS verdict — hide them unless the user explicitly filters to them, so a
     // sparse dataset doesn't read as "the model dropped everything".
     const rows = filter.size
-      ? data.tree.filter((r) => filter.has(r.status))
-      : data.tree.filter((r) => r.status !== 'notMapped')
+      ? scoped.filter((r) => filter.has(r.status))
+      : scoped.filter((r) => r.status !== 'notMapped')
     return rows.map((row, i, arr) => {
       const prev = arr[i - 1]
       const firstL1 = !prev || prev.l1 !== row.l1
@@ -319,7 +333,7 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
       const firstL3 = firstL2 || prev?.l3 !== row.l3
       return { row, firstL1, firstL2, firstL3 }
     })
-  }, [data, filter])
+  }, [scoped, filter])
 
   if (!data) {
     return (
@@ -376,6 +390,7 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
   // ROI is only comparable to the Knowledge money bands when the fit produced a
   // revenue/spend ratio (money response, or volume + a unit price).
   const moneyRoi = data.setup?.roiUnit === 'revenue/spend'
+  const modelLabel = data.objects.find((o) => o.object === model)?.label || model
 
   const toggle = (k: OlsRowStatus) =>
     setFilter((prev) => {
@@ -387,27 +402,65 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+      <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+        {([['fits', 'Model fits'], ['verdicts', 'Factor tree · verdicts']] as const).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setTab(id)}
+            className={cn(
+              'rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
+              tab === id ? 'bg-accent text-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/50',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'verdicts' && <OlsFactorTreePanel />}
+
+      {tab === 'fits' && (
+      <>
       {/* fit-metric header */}
       <section aria-label="Model fit">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">National total model — fast OLS pre-fit</h3>
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {data.objects.length} model{data.objects.length === 1 ? '' : 's'} — one per channel &times; product, fast OLS
+          </h3>
         </div>
         <div className="flex gap-2.5 overflow-x-auto pb-1">
           {data.objects.map((o) => (
-            <ObjectCard key={o.object} o={o} />
+            <ObjectCard
+              key={o.object}
+              o={o}
+              selected={model === o.object}
+              onSelect={() => setModel((m) => (m === o.object ? '' : o.object))}
+            />
           ))}
         </div>
       </section>
 
-      {data.search && data.search.fits > 0 && <SearchTrace trace={data.search} />}
+      <ModelReadings objects={data.objects} />
 
       {/* summary filter strip */}
       <section aria-label="Result summary" className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setModel('')}
+          className={cn(
+            'rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors',
+            model ? 'border-primary/50 bg-accent' : 'border-border text-muted-foreground hover:bg-accent/60',
+          )}
+          title={model ? 'Show every model' : 'Showing every model — pick a card above to scope the tree'}
+        >
+          {model ? `${modelLabel} ✕` : 'All models'}
+        </button>
         <span className="mr-1 text-[11px] text-muted-foreground">
-          {data.summary.total} factors · {data.summary.inModel} in model
+          {summary.total} factors · {summary.inModel} in model
         </span>
         {SUMMARY_ORDER.map(({ key, label, countKey }) => {
-          const count = data.summary[countKey]
+          const count = summary[countKey]
           const active = filter.has(key)
           return (
             <button
@@ -472,6 +525,8 @@ export function OlsTreeView({ inst }: { inst: ArtifactInstance }) {
       </section>
 
       {data.note && <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">{data.note}</p>}
+      </>
+      )}
     </div>
   )
 }

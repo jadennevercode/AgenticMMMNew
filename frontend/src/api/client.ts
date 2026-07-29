@@ -40,6 +40,7 @@ import type {
   ProjectProfile,
   QualityScorecard,
   OlsConfig,
+  OlsRangeScorecard,
   StatScorecard,
   TemplateKind,
   TimeWindow,
@@ -206,6 +207,13 @@ export const api = {
   /** 2.5 OLS setup — saving re-fits the regression and re-renders a-ols-test. */
   updateOlsConfig: (projectId: string, cfg: OlsConfig) =>
     req<OlsConfig>(`${p(projectId)}/ols-config`, { method: 'PUT', body: JSON.stringify(cfg) }),
+
+  /** 2.5d verdicts. The PUT re-fits, so the response is the re-derived sheet —
+   *  rejected rows leave the tree — not an echo of what was sent. */
+  updateOlsScorecard: (projectId: string, card: OlsRangeScorecard) =>
+    req<OlsRangeScorecard>(`${p(projectId)}/ols-scorecard`, {
+      method: 'PUT', body: JSON.stringify(card),
+    }),
   /** 2.3a anomaly rulings — accepted handlings reach the fit (event / cap / caveat). */
   updateAnomalyReview: (projectId: string, review: AnomalyReview) =>
     req<AnomalyReview>(`${p(projectId)}/anomaly-review`, { method: 'PUT', body: JSON.stringify(review) }),

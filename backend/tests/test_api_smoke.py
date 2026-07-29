@@ -298,7 +298,7 @@ def test_validation_chain_shape() -> None:
     # 2.5 renders the OLS factor-tree view, not a plain sheet.
     assert bp.ARTIFACT_MAP["a-ols-test"]["format"] == "olsTree"
     assert bp.TASK_MAP["2.6"]["produces"] == ["a-master-data"]
-    assert bp.TASK_MAP["2.6"]["depends_on"] == ["2.5"]
+    assert bp.TASK_MAP["2.6"]["depends_on"] == ["2.5d"]
     # 2.6 is a sliceable feature table, and locking it is a human act (2.6d).
     assert bp.ARTIFACT_MAP["a-master-data"]["format"] == "masterData"
     assert bp.TASK_MAP["2.6d"]["decision"]["id"] == "d-2.6"
@@ -307,17 +307,25 @@ def test_validation_chain_shape() -> None:
     assert {s["id"] for s in bp.STAGES} == {"s1", "s2", "s4", "s5"}
 
 
-def test_ols_search_single_task() -> None:
-    """2.5 is now a single automated indicator search (寻优), not a five-step manual
-    config: the AI searches each L4's candidate indicators over repeated fits and
-    the human reviews the chosen selection at the one d-2.5 gate. The old
-    2.5y/2.5x/2.5p/2.5r sub-tasks are gone."""
+def test_ols_fit_then_review_then_gate() -> None:
+    """2.5 fits; 2.5d reviews. S2's other artifacts were all AI-proposes →
+    human-reviews → gate, and 2.5 alone jumped from a mechanical fit straight to
+    its gate, so the only lever over a factor was the gate's all-or-nothing
+    answer. The per-factor verdicts now live on a scorecard reviewed at 2.5d,
+    which is where d-2.5 moved to. The old 2.5y/2.5x/2.5p/2.5r steps stay gone."""
     t = bp.TASK_MAP["2.5"]
-    assert t["klass"] == "M", "2.5 runs the search deterministically"
+    assert t["klass"] == "M", "2.5 runs the fit deterministically"
     assert t["produces"] == ["a-ols-test"]
     assert t["depends_on"] == ["2.4d"]
-    assert t["decision"]["id"] == "d-2.5"          # the single review gate lives on 2.5
-    assert any(o.get("recommended") for o in t["decision"]["options"])
+    assert "decision" not in t, "the gate belongs to the review step, not the fit"
+
+    r = bp.TASK_MAP["2.5d"]
+    assert r["klass"] == "H" and r["depends_on"] == ["2.5"] and r["produces"] == []
+    assert r["panel"] == "ols-factor-tree"
+    assert r["decision"]["id"] == "d-2.5"
+    assert any(o.get("recommended") for o in r["decision"]["options"])
+    # Dropping is a per-factor verdict now, not a bulk answer to the gate.
+    assert {o["id"] for o in r["decision"]["options"]} == {"confirm", "rework"}
     # The former sub-steps must be fully retired from the blueprint.
     for gone in ("2.5y", "2.5x", "2.5p", "2.5r"):
         assert gone not in bp.TASK_MAP, gone

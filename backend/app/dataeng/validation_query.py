@@ -49,8 +49,24 @@ def _casefold_eq(series: pd.Series, value: str) -> pd.Series:
     return series.astype("string").str.strip().str.casefold() == value.strip().casefold()
 
 
-def _kpi_mask(df: pd.DataFrame) -> pd.Series:
-    """Rows for the sell-out KPI: explicit ``Y`` tag, else a sales-like metric."""
+def _kpi_mask(df: pd.DataFrame, st=None) -> pd.Series:
+    """Rows for the response (KPI).
+
+    Delegates to ``pivot._is_y_row`` — the same predicate 2.4, 2.5 and the object
+    enumerator use — instead of keeping a second, independent answer. The local
+    regex below stays only as the last resort for a table that carries neither a
+    role tag nor a recognisable ``l1``; when the two disagreed, 2.3's charts and
+    2.6's master table were built on a different response than the model fitted.
+    """
+    try:
+        from app.mmm.pivot import _is_y_row
+        from app.agents.vocabulary import DEFAULT_VOCAB, vocab_for
+        vocab = vocab_for(st) if st is not None else DEFAULT_VOCAB
+        mask = _is_y_row(df, vocab)
+        if bool(mask.any()):
+            return mask
+    except Exception:  # noqa: BLE001 — fall through to the local heuristic
+        pass
     mtype = df["metric_type"].astype("string").str.strip().str.casefold()
     by_tag = mtype.isin(_KPI_TYPES)
     if by_tag.any():

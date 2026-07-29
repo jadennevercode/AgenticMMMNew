@@ -17,6 +17,7 @@ from app.agents.artifact_edit import (
     ArtifactEditError,
     apply_factor_tree,
     apply_ols_config,
+    apply_ols_scorecard,
     apply_profile,
     apply_proposal,
     apply_quality_scorecard,
@@ -35,6 +36,7 @@ from app.domain.models import (
     IndustryRef,
     KnowledgeTemplate,
     OlsConfig,
+    OlsRangeScorecard,
     ProjectProfile,
     QualityScorecard,
     StatScorecard,
@@ -43,6 +45,7 @@ from app.domain.models import (
     TransformPipeline,
 )
 from app.llm.volcano import get_llm
+from app.orchestrator.engine import GateBlocked
 from app.orchestrator.runner import run_until_blocked
 from app.store.files import get_files
 from app.store.state import ProjectState, get_store, project_summary
@@ -52,7 +55,10 @@ from app.tools import registry as tools
 app = FastAPI(title="Agentic MMM Backend", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
+                   # TEMPORARY (do not commit): 5173 is taken by another project
+                   # locally; this lets the dev server run on 5174 for a look.
+                   "http://localhost:5174", "http://127.0.0.1:5174"],
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -422,7 +428,10 @@ async def apply_pack(project_id: str, body: ApplyPack) -> dict:
 @app.put("/api/projects/{project_id}/quality-scorecard")
 async def update_quality_scorecard(project_id: str, body: QualityScorecard) -> dict:
     st = _require_state(project_id)
-    apply_quality_scorecard(st, body)
+    try:
+        apply_quality_scorecard(st, body)
+    except ArtifactEditError as e:
+        raise HTTPException(409, str(e)) from e
     get_store().save(project_id)
     return body.model_dump(by_alias=True)
 
@@ -431,7 +440,10 @@ async def update_quality_scorecard(project_id: str, body: QualityScorecard) -> d
 @app.put("/api/projects/{project_id}/stat-scorecard")
 async def update_stat_scorecard(project_id: str, body: StatScorecard) -> dict:
     st = _require_state(project_id)
-    apply_stat_scorecard(st, body)
+    try:
+        apply_stat_scorecard(st, body)
+    except ArtifactEditError as e:
+        raise HTTPException(409, str(e)) from e
     get_store().save(project_id)
     return body.model_dump(by_alias=True)
 
@@ -440,9 +452,27 @@ async def update_stat_scorecard(project_id: str, body: StatScorecard) -> dict:
 @app.put("/api/projects/{project_id}/ols-config")
 async def update_ols_config(project_id: str, body: OlsConfig) -> dict:
     st = _require_state(project_id)
-    apply_ols_config(st, body)
+    try:
+        apply_ols_config(st, body)
+    except ArtifactEditError as e:
+        raise HTTPException(409, str(e)) from e
     get_store().save(project_id)
     return body.model_dump(by_alias=True)
+
+
+# ── OLS range verdicts (S2 · 2.5d · per-factor accept/reject — re-fits on save) ─
+@app.put("/api/projects/{project_id}/ols-scorecard")
+async def update_ols_scorecard(project_id: str, body: OlsRangeScorecard) -> dict:
+    st = _require_state(project_id)
+    try:
+        apply_ols_scorecard(st, body)
+    except ArtifactEditError as e:
+        raise HTTPException(409, str(e)) from e
+    get_store().save(project_id)
+    # Return what was stored, not what was sent: the re-fit re-derives every
+    # computed field and may reshape the sheet (a rejected row leaves the tree).
+    stored = getattr(st, "ols_scorecard", None) or body
+    return stored.model_dump(by_alias=True)
 
 
 # ── data engine (raw → review → clean → publish data asset) ─
@@ -1491,7 +1521,10 @@ async def resolve_decision(project_id: str, decision_id: str, body: ResolveDecis
     st = _require_state(project_id)
     if decision_id not in st.decisions:
         raise HTTPException(404, "decision not found")
-    _engine.resolve_decision(st, decision_id, body.optionId, body.note)
+    try:
+        _engine.resolve_decision(st, decision_id, body.optionId, body.note)
+    except GateBlocked as e:
+        raise HTTPException(409, str(e)) from e
     get_store().save(project_id)
     return {"ok": True}
 

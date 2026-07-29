@@ -162,6 +162,51 @@ def _scorecard_pairs(card: object, dispositions: tuple[str, ...]) -> set[tuple[s
     return out
 
 
+# The AI's provisional buckets. They are a *proposal to review*, not a verdict:
+# nothing downstream reads them, so an indicator left here is silently kept and
+# reaches the fit without anyone having decided it should. Both gates must close
+# on a binary verdict per row — see :func:`provisional_rows`.
+PROVISIONAL: dict[str, tuple[str, ...]] = {"quality": ("flag",), "statistical": ("review",)}
+_SCORECARD_ATTR = {"quality": "quality_scorecard", "statistical": "stat_scorecard"}
+
+
+def provisional_rows(st: ProjectState, layer: str) -> list[tuple[str, str]]:
+    """``(l4, indicator)`` still carrying the AI's provisional verdict at ``layer``.
+
+    A gate may not close while this is non-empty. "Needs review" is a state the
+    reviewer is meant to leave, and leaving it means the variable travels onward
+    as if it had been approved — which is how six 2.4 rows, one of them the
+    near-singular 竞品ND, reached the OLS with nobody having said yes.
+    """
+    if layer == "range":
+        # 2.5's sheet has no provisional bucket — its disposition type admits only
+        # accept/reject, which is the point (see `models.OlsRangeDisposition`). The
+        # guarantee is still checked rather than assumed.
+        from app.agents.ols_scorecard import pending_rows
+        return pending_rows(st)
+    card = getattr(st, _SCORECARD_ATTR.get(layer, ""), None)
+    buckets = PROVISIONAL.get(layer, ())
+    out: list[tuple[str, str]] = []
+    for row in (getattr(card, "rows", None) or []):
+        if getattr(row, "disposition", "") in buckets:
+            out.append((str(getattr(row, "l4", "")),
+                        str(getattr(row, "indicator", "") or getattr(row, "metric", ""))))
+    return out
+
+
+# Once the OLS selection has been confirmed, 2.5 and everything after it were
+# built on the verdicts the earlier layers had *at that moment*. Editing one
+# afterwards leaves the model asserting a filtering chain that no longer matches
+# the state it is derived from, with nothing on screen to say so.
+_LOCKING_DECISION = "d-2.5"
+
+
+def downstream_locked(st: ProjectState) -> bool:
+    """True once 2.5's selection is confirmed — upstream verdicts are then frozen."""
+    dec = (getattr(st, "decisions", None) or {}).get(_LOCKING_DECISION)
+    return dec is not None and getattr(dec, "status", "") == "resolved"
+
+
 def quality_drop_pairs(st: ProjectState) -> set[tuple[str, str]]:
     return _scorecard_pairs(getattr(st, "quality_scorecard", None), ("drop",))
 
@@ -178,9 +223,9 @@ def signoff_key(l4: object, metric: object, object: str = OBJECT_ANY) -> str:
     """The ``st.signoffs`` key for one indicator:
     ``i:<object>:<norm_l4>|<norm_metric>``.
 
-    ``object`` is the model object (channel type) the verdict applies to;
-    it defaults to ``OBJECT_ANY`` — a single "Deny" from the 2.3 deck still
-    denies the indicator for every channel unless a caller explicitly names
+    ``object`` is the model object (a ``channel::product`` cell) the verdict
+    applies to; it defaults to ``OBJECT_ANY`` — a single "Deny" from the 2.3 deck
+    still denies the indicator for every model unless a caller explicitly names
     one. The ``i:`` prefix makes the shape self-describing instead of
     inferred from the mere presence of ``|`` — an uploaded factor/metric name
     can itself contain a ``|`` (e.g. ``"Search | Brand"``), which under the
@@ -226,8 +271,15 @@ def _parse_signoff_key(key: str) -> Optional[tuple[str, str, str, str]]:
         if not psep:
             return None  # malformed — an "i:" key must carry a '|'
         if ":" in head:
-            # Current shape: "<object>:<l4>" before the '|'.
-            obj, _, l4 = head.partition(":")
+            # Current shape: "<object>:<l4>" before the '|'. Split on the LAST
+            # colon: a model object is "<channelType>::<brand>" since 2026-07-27,
+            # so it carries colons of its own, and splitting on the first one
+            # returned the channel as the object and ":<brand>:<l4>" as the
+            # factor — a pairing the round-trip guard below cannot catch, because
+            # it reassembles to the same string either way. L4 is assumed
+            # colon-free, which is the assumption this format already made (see
+            # the legacy note above).
+            obj, _, l4 = head.rpartition(":")
             metric = tail
             if f"i:{obj}:{l4}|{metric}" != key:
                 return None
@@ -470,14 +522,26 @@ def signoff_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, s
 
 
 def range_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str]]]:
-    """Per-object breakdown of what the human dropped at the ``d-2.5`` range gate.
+    """Per-object breakdown of what 2.5d rejected on ROI / contribution.
 
-    Read from ``droppedPairsByObject``, frozen by :func:`freeze_range_drops` at
-    the moment the gate was answered. Falls back to the legacy flat
-    ``droppedPairs`` (via :func:`range_drop_pairs`), applied under
-    ``OBJECT_ANY`` so every object still inherits it, for resolutions frozen
-    before this per-object shape existed.
+    The 2.5 scorecard (``st.ols_scorecard``) is the source of truth: it stores a
+    per-factor accept/reject the human can revise, exactly as 2.2 and 2.4 do. A
+    stored verdict needs no freezing — it persists because it was written down.
+
+    Falls back, in order, to the ``d-2.5`` resolution's ``droppedPairsByObject``
+    and then the legacy flat ``droppedPairs`` (:func:`range_drop_pairs`, applied
+    under ``OBJECT_ANY``). Those two exist only for projects resolved before the
+    scorecard did; see :func:`freeze_range_drops` for why the freeze was needed.
     """
+    from app.agents.ols_scorecard import reject_pairs_by_object
+
+    stored = reject_pairs_by_object(st)
+    if getattr(st, "ols_scorecard", None) is not None:
+        # A scorecard exists — it rules, even when it rejects nothing. Falling
+        # through to the frozen drops here would re-apply a stale gate answer on
+        # top of verdicts the human has since revised.
+        return stored
+
     dec = st.decisions.get("d-2.5")
     res = (dec.resolution or {}) if dec else {}
     if res.get("optionId") != "drop":
@@ -494,18 +558,12 @@ def range_drop_pairs_by_object(st: ProjectState) -> dict[str, set[tuple[str, str
     return out
 
 
-# Each layer's own rejection set, in its own key space.
-_LAYER_PAIRS = {
-    "mapping": lambda st: set(_mapping_ignored(st)),
-    "quality": quality_drop_pairs,
-    "signoff": signoff_drop_pairs,
-    "statistical": stat_drop_pairs,
-    "selection": unticked_pairs,
-    "range": range_drop_pairs,
-}
-
-# Object-aware counterpart of ``_LAYER_PAIRS`` — same keys, each resolver
-# returns a per-object mapping instead of one flat set.
+# Each layer's own rejection set, per model object. There was a flat
+# `_LAYER_PAIRS` beside this once; nothing read it after `drops_before` went
+# per-object, and it went on naming `range_drop_pairs` — which no longer consults
+# the 2.5 scorecard — so it described a filtering chain the product had stopped
+# using. The flat helpers it pointed at are still exported for callers that want
+# a global view; this map is the one inheritance walks.
 _LAYER_PAIRS_BY_OBJECT = {
     "mapping": mapping_ignored_by_object,
     "quality": quality_drop_pairs_by_object,
@@ -612,7 +670,22 @@ def _universe(st: ProjectState) -> dict[tuple[str, str], dict]:
 
 
 def _mapping_ignored(st: ProjectState) -> dict[tuple[str, str], str]:
-    """Factor-tree rows the human explicitly ignored at 2.1, keyed like the universe."""
+    """What 2.1 rejected, keyed the way the later layers actually filter.
+
+    A factor row is ignored by its **declared** ``(l4, indicator)`` name, but 2.2,
+    2.4 and 2.5 all filter on the **data's** ``(l4, metric)`` name, and those labels
+    are rarely the same string. Keying only on the declared name meant the ignore
+    matched nothing: on the reference case, 123 ignored rows against 84 data keys
+    produced **zero** hits, so a factor the human had explicitly dropped at 2.1 went
+    on being scored, screened and offered as a model variable.
+
+    So both spellings are returned — the declared name (which is what the ledger's
+    own synthetic rows are keyed by, and what a legacy stored verdict may carry) and
+    every data key a published asset claimed against that row, resolved through
+    :mod:`app.agents.factor_link`.
+    """
+    from app.agents import factor_link
+
     try:
         from app.dataeng.mapping import resolve_factor_map
         fm = resolve_factor_map(st)
@@ -621,7 +694,14 @@ def _mapping_ignored(st: ProjectState) -> dict[tuple[str, str], str]:
     out: dict[tuple[str, str], str] = {}
     for r in getattr(fm, "rows", None) or []:
         if getattr(r, "status", "") == "ignored":
-            out[_norm_pair(r.l4, r.indicator)] = getattr(r, "note", "") or ""
+            # `ignore_note`, not `note`: the latter is not a field on FactorMapRow, so
+            # every reason the human typed was dropped and every ledger row fell back
+            # to the generic "Ignored in the FactorTree↔DataAssets mapping."
+            out[_norm_pair(r.l4, r.indicator)] = getattr(r, "ignore_note", "") or ""
+    try:
+        out.update(factor_link.ignored_data_keys(st))
+    except Exception:  # noqa: BLE001 — no bridge just means no extra spellings
+        pass
     return out
 
 
@@ -805,13 +885,15 @@ def model_selection(st: ProjectState, *, cfg: OlsConfig | None = None) -> ModelS
     path, which keeps reference/demo projects (and any project that has not
     reached 2.5) fitting exactly as before.
 
-    ``cfg`` scores a **hypothetical** configuration without persisting it — the
-    2.5 indicator search needs to price dozens of candidate assignments, and it
-    used to do that by writing each one to ``st.ols_config`` and leaving it there.
-    The trial config is swapped in for the duration of the derivation (the ledger's
-    selection layer reads it too, so the two must agree) and always swapped back,
-    including on an exception. Omit it — the only call shape every downstream
-    consumer uses — and the project's own saved config is read, exactly as before.
+    ``cfg`` scores a **hypothetical** configuration without persisting it. Nothing
+    in-tree needs that since the 2.5 indicator search was removed, but a caller that
+    wants to price a configuration must have a way to do it that cannot leave a trial
+    behind: the old search wrote each candidate assignment to ``st.ols_config``, so a
+    crash mid-search left a trial persisted as if a human had chosen it. The trial
+    config is swapped in for the duration of the derivation (the ledger's selection
+    layer reads it too, so the two must agree) and always swapped back, including on
+    an exception. Omit it — the only call shape every downstream consumer uses — and
+    the project's own saved config is read.
     """
     if cfg is not None:
         saved = getattr(st, "ols_config", None)

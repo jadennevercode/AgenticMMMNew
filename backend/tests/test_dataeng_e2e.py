@@ -105,11 +105,15 @@ def main() -> int:
         assert summary.tests > 0 and summary.failed == 0
         print(f"✓ build: {summary.models} models, {summary.passed}/{summary.tests} tests passed")
 
-        # 4) publish → parquet + indicators (factor-path grounded)
+        # 4) publish → parquet + coverage (factor-path grounded). Publish attaches
+        # `indicator_coverage`; the legacy `st.indicators` catalog it used to write
+        # is drained by heal_state, so asserting on that only ever passes by accident.
         ver = service.publish(pid, st, asset)
         assert ver.version == 1 and asset.status == "published"
-        assert st.indicators and st.indicators[0].metric == "本品销量"
-        print(f"✓ published v{ver.version}: {ver.row_count} rows; {len(st.indicators)} indicator(s)")
+        covs = st.indicator_coverage
+        assert covs and covs[0].metric == "本品销量", [c.metric for c in covs]
+        print(f"✓ published v{ver.version}: {ver.row_count} rows; "
+              f"{len(covs)} coverage record(s)")
 
         # 5) binding + model_df serve the published asset (not the reference)
         bound = build_published_long_table(pid, st)

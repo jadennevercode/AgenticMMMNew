@@ -25,6 +25,7 @@ __all__ = [
     "driver_candidates_by_l4",
     "is_money_metric",
     "is_volume_metric_type",
+    "response_is_money",
 ]
 
 MIN_MONTHS = 12
@@ -122,14 +123,20 @@ class ModelFrame:
     @property
     def y_is_money(self) -> bool:
         """True when Y is a monetary metric — then ROI is already Revenue/Spend."""
-        return is_money_metric(self.y_metric_type)
+        return response_is_money(self.y_metric_type, self.y_metric)
 
 
 def _resolve_object_filter(df: pd.DataFrame, model_object: str) -> pd.Series:
-    """Boolean mask selecting rows for a model object (supports '+' unions)."""
-    parts = [p.strip().upper() for p in str(model_object).split("+") if p.strip()]
-    ct = df["channel_type"].astype("string").str.upper()
-    return ct.isin(parts)
+    """Boolean mask selecting rows for a model object.
+
+    A model object is one ``(channel_type, brand)`` cell — ``"MT::MIZONE"`` — plus
+    the channel's shared market rows (competitors, category totals, blank-brand
+    national spend), which drive every product in the channel and belong to no
+    single one. ``'+'`` channel unions and brand-less ids still work; see
+    :mod:`app.agents.model_objects`.
+    """
+    from app.agents.model_objects import object_mask
+    return object_mask(df, model_object)
 
 
 def _is_y_row(g: pd.DataFrame, vocab: Vocab = DEFAULT_VOCAB) -> pd.Series:
@@ -169,6 +176,26 @@ def is_money_metric(metric_type: object, vocab: Vocab = DEFAULT_VOCAB) -> bool:
     if is_volume_metric_type(t, vocab):
         return False
     return any(k in t for k in vocab.money_keywords)
+
+
+def response_is_money(metric_type: object, metric: object,
+                      vocab: Vocab = DEFAULT_VOCAB) -> bool:
+    """Whether the chosen response is money — the test that decides the ROI unit.
+
+    ``is_money_metric`` reads the legacy taxonomy's ``metric_type`` (``RMB`` /
+    ``value`` / ``GMV`` / ``金额``). But the Data-Engine contract every real project
+    emits is ``metric_type ∈ {Y, spending, X}``, so that test answered "not money"
+    for **every** published project — ``roi_unit`` came back ``volume/spend``,
+    ``roi_money`` was False, and 2.5's whole ROI range check silently disappeared,
+    leaving only the Contribution band. So fall back to the same semantic classifier
+    ``_pick_y_metric`` already trusts to tell a value KPI from a volume one.
+    """
+    if is_money_metric(metric_type, vocab):
+        return True
+    if is_volume_metric_type(metric_type, vocab):
+        return False
+    from app.agents.indicator_metadata import classify_indicator
+    return classify_indicator(str(metric or "")).metric_type == "kpi_value"
 
 
 def _pick_y_metric(ydf: pd.DataFrame, vocab: Vocab = DEFAULT_VOCAB) -> str:
@@ -225,7 +252,7 @@ def y_candidates(long_df: pd.DataFrame, model_object: str, vocab: Vocab = DEFAUL
             "metric": str(metric),
             "metric_type": mtype,
             "months": int(g["month"].nunique()),
-            "is_money": is_money_metric(mtype, vocab),
+            "is_money": response_is_money(mtype, metric, vocab),
             "is_volume": is_volume_metric_type(mtype, vocab),
         })
     default = _pick_y_metric(ydf, vocab)
@@ -399,8 +426,7 @@ def build_model_frame(
     different indicators everywhere else in S2 — the scorecards, the sign-off, the
     ledger and ``driver_candidates_by_l4`` all key on ``(l4, metric)`` — and
     summing them into one design column meant a verdict on one of them could not
-    be expressed in the fit at all, and the per-L4 indicator search had nothing
-    addressable to search over.
+    be expressed in the fit at all.
 
     Raises ValueError when there is no Y variable or fewer than MIN_MONTHS rows.
     """

@@ -14,6 +14,7 @@ import type {
   GlobalModelConfig,
   AnomalyReview,
   OlsConfig,
+  OlsRangeScorecard,
   ProjectFile,
   ProjectListItem,
   ProjectMeta,
@@ -131,6 +132,7 @@ interface BackendState {
   quality_scorecard?: QualityScorecard | null
   stat_scorecard?: StatScorecard | null
   ols_config?: OlsConfig | null
+  ols_scorecard?: OlsRangeScorecard | null
   anomaly_review?: AnomalyReview | null
   tick?: number
   tasks?: Record<string, Partial<TaskRuntime> & Record<string, unknown>>
@@ -213,6 +215,7 @@ interface SimStore {
   /** S2 (2.4) statistical score with per-indicator human disposition. */
   statScorecard: StatScorecard | null
   olsConfig: OlsConfig | null
+  olsScorecard: OlsRangeScorecard | null
   /** S2 (2.3a) anomaly hypotheses with the human's per-anomaly ruling. */
   anomalyReview: AnomalyReview | null
   /** 2.3s — per-target business sign-off verdicts, keyed by ledger.signoff_key
@@ -283,6 +286,7 @@ interface SimStore {
   /** Persist edits to the statistical score (per-indicator disposition). */
   updateStatScorecard: (card: StatScorecard) => Promise<void>
   updateOlsConfig: (cfg: OlsConfig) => Promise<void>
+  updateOlsScorecard: (card: OlsRangeScorecard) => Promise<void>
   /** Persist the 2.3a anomaly rulings; accepted handlings reach the fit. */
   updateAnomalyReview: (review: AnomalyReview) => Promise<void>
   /** 2.3s — persist a business sign-off at indicator or factor granularity.
@@ -375,6 +379,7 @@ function mapState(s: BackendState, currentChats: Record<string, AssistantTurn[]>
   if (s.quality_scorecard !== undefined) patch.qualityScorecard = s.quality_scorecard ?? null
   if (s.stat_scorecard !== undefined) patch.statScorecard = s.stat_scorecard ?? null
   if (s.ols_config !== undefined) patch.olsConfig = s.ols_config ?? null
+  if (s.ols_scorecard !== undefined) patch.olsScorecard = s.ols_scorecard ?? null
   if (s.anomaly_review !== undefined) patch.anomalyReview = s.anomaly_review ?? null
   if (s.signoffs !== undefined) patch.signoffs = s.signoffs ?? {}
   if (s.tasks) {
@@ -431,6 +436,7 @@ function blankRuntime(): Partial<SimStore> {
     qualityScorecard: null,
     statScorecard: null,
     olsConfig: null,
+    olsScorecard: null,
     anomalyReview: null,
     signoffs: {},
     dataAssets: [],
@@ -513,6 +519,7 @@ export const useSimStore = create<SimStore>((set, get) => {
     qualityScorecard: null,
     statScorecard: null,
     olsConfig: null,
+    olsScorecard: null,
     anomalyReview: null,
     signoffs: {},
     dataAssets: [],
@@ -952,6 +959,21 @@ export const useSimStore = create<SimStore>((set, get) => {
       // the toggle back under the user's finger before the PUT resolves.
       try {
         await api.setSignoff(pid, { ...target, verdict })
+        await get().refresh()
+      } catch (e) {
+        set({ error: errorMessage(e) })
+      }
+    },
+
+    updateOlsScorecard: async (card) => {
+      const pid = get().activeProjectId
+      if (!pid) return
+      // Optimistic, then re-sync: the PUT re-fits, so the sheet that comes back
+      // is re-derived (a rejected row leaves the tree) rather than an echo.
+      set({ olsScorecard: card })
+      try {
+        const stored = await api.updateOlsScorecard(pid, card)
+        set({ olsScorecard: stored })
         await get().refresh()
       } catch (e) {
         set({ error: errorMessage(e) })

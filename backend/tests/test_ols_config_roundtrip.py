@@ -36,7 +36,7 @@ def _proposed() -> ProjectState:
     from app.agents import data
 
     st = _state()
-    asyncio.run(data.ols_search_and_fit(build_engine(), st, {"id": "2.5"}))
+    asyncio.run(data.fit_models(build_engine(), st, {"id": "2.5"}))
     return st
 
 
@@ -83,19 +83,49 @@ def test_apply_config_refits_and_rerenders() -> None:
     assert "ols_flagged" in st.analysis
 
 
+def _in_model(st) -> set[tuple[str, str, str]]:
+    """(object, l4, indicator) for every variable that actually entered a fit."""
+    out: set[tuple[str, str, str]] = set()
+    for node in st.artifact("a-ols-test").body["tree"]:
+        for res in node.get("results") or []:
+            if res.get("inModel") or res.get("contribution") is not None:
+                out.add((res["object"], node["l4"], node["indicator"]))
+    return out
+
+
 def test_unticking_a_variable_changes_the_fit() -> None:
-    """The whole point of 2.5x: the human's selection drives the regression."""
+    """The whole point of 2.5x: the human's selection drives the regression.
+
+    Two things make the naive version of this test lie, and both are real product
+    behaviour rather than accidents:
+
+    * candidates are **per model object** (`OlsXCandidate.object`), so unticking
+      one row excludes that variable from *that* object's fit and no other;
+    * the engine independently holds out variables the design cannot identify
+      (`_drop_singular_drivers`), so unticking one that was already held out there
+      is a genuine no-op, and unticking one that was in frees a slot a previously
+      unidentifiable variable can take — leaving the driver *count* unchanged.
+
+    So: pick a candidate that actually entered its own object's fit, and assert it
+    leaves that object's fit.
+    """
     st = _proposed()
     cfg = st.ols_config
     apply_ols_config(st, cfg)
-    before = [o["drivers"] for o in st.artifact("a-ols-test").body["objects"] if not o["error"]]
+    before = _in_model(st)
+    assert before, "the first fit produced no drivers at all"
 
-    selected = [c for c in cfg.x_candidates if c.selected]
-    assert len(selected) > 1
-    selected[0].selected = False
+    victim = next((c for c in cfg.x_candidates
+                   if c.selected and (c.object, c.l4, c.indicator) in before), None)
+    assert victim is not None, "no ticked candidate actually entered its object's fit"
+
+    victim.selected = False
     apply_ols_config(st, cfg)
-    after = [o["drivers"] for o in st.artifact("a-ols-test").body["objects"] if not o["error"]]
-    assert sum(after) < sum(before), (before, after)
+    after = _in_model(st)
+
+    key = (victim.object, victim.l4, victim.indicator)
+    assert key in before and key not in after, (
+        f"unticking {key} did not remove it from that object's fit")
 
 
 def test_money_response_switches_the_roi_unit() -> None:

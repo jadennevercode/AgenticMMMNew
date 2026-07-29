@@ -27,6 +27,14 @@ from app.dataeng.dbt.service import claim_published_metrics
 from app.domain.models import DataAsset, DataAssetVersion
 
 
+# Stamped on every asset this module publishes. `dataset_cache.is_reference_seeded`
+# reads it so an artifact can never present the reference case as the client's own
+# data: seeding publishes it through the real asset path, so the dataset resolver
+# legitimately reports `source="published"` and every downstream "is this the
+# project's own data?" check answered yes.
+REFERENCE_ASSET_MARK = "[reference-case]"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -83,7 +91,7 @@ def seed_reference_assets(project_id: str, st) -> dict:
     # One asset per real data source, busiest first for stable ordering.
     for source, grp in sorted(ref.groupby("source"), key=lambda kv: -len(kv[1])):
         name = str(source).strip() or "Unnamed source"
-        asset = asset_svc.create_asset(st, name=name, description=f"Danone reference source · {name}")
+        asset = asset_svc.create_asset(st, name=name, description=f"{REFERENCE_ASSET_MARK} shared reference source · {name}")
         slice_df = grp.reset_index(drop=True)
         _publish_slice(project_id, st, asset, slice_df)
         n_ind = sum(1 for c in st.indicator_coverage if c.asset_id == asset.id)

@@ -36,6 +36,15 @@ def auto_resolve_factor_map(st: ProjectState, *, bind_threshold: float = BIND_TH
 
     Greedy by descending score with one-indicator-per-row and one-row-per-indicator
     (a single physical data series cannot stand in for two different factors)."""
+    # "No published indicator matches this factor" is a judgement about the data.
+    # With nothing published it is not a judgement at all — the Data Engine simply
+    # has not been used yet. Resolving here writes an ignore onto *every* row, and
+    # an ignore outranks coverage, so data published afterwards can never un-ignore
+    # them: the factor map stays mapped=0 and the ledger drops every indicator at
+    # the mapping layer. Autopilot must block on 2.1 exactly as a human would.
+    if not getattr(st, "indicator_coverage", None):
+        return {"bound": 0, "ignored": 0, "pending_before": 0, "no_data": True}
+
     fmap = resolve_factor_map(st)
     pending = [r for r in fmap.rows if r.status == "pending"]
     if not pending:

@@ -447,6 +447,10 @@ class QualityRow(CamelModel):
     l3: str = ""
     l4: str = ""
     indicator: str = ""
+    # The factor-tree row this indicator supplies ("" = orphan: real data the
+    # tree never asked for). This is the link that makes S2 one chain instead
+    # of three populations that merely resemble each other.
+    tree_row_id: str = Field(default="", alias="treeRowId")
     consistency: float = 0.0
     accuracy: float = 0.0          # 真实性 (accuracy / authenticity)
     completeness: float = 0.0
@@ -486,6 +490,10 @@ class StatScoreRow(CamelModel):
     l3: str = ""
     l4: str = ""
     indicator: str = ""
+    # The factor-tree row this indicator supplies ("" = orphan: real data the
+    # tree never asked for). This is the link that makes S2 one chain instead
+    # of three populations that merely resemble each other.
+    tree_row_id: str = Field(default="", alias="treeRowId")
     cv: float = 0.0                # reference CV (scaled variance / mean)
     pearson: float = 0.0           # Pearson r vs KPI (signed)
     vif: float = 1.0               # variance inflation factor
@@ -682,6 +690,62 @@ class OlsConfig(CamelModel):
     x_candidates: list[OlsXCandidate] = Field(default_factory=list, alias="xCandidates")
     params: OlsParams = Field(default_factory=OlsParams)
     proposed_at: str = Field(default="", alias="proposedAt")
+
+
+# 2.5's range verdict is binary on purpose. `flag` / `review` exist at 2.2 and 2.4
+# as the AI's *proposal*, and both gates refuse to close while one survives; there
+# is no equivalent here because 2.5 is the last layer before the master table —
+# a middle state at this point is a variable travelling into the model with nobody
+# having said yes. Accept or reject, and the earlier layers are frozen by then.
+OlsRangeDisposition = Literal["accept", "reject"]
+
+
+class OlsRangeRow(CamelModel):
+    """One factor's ROI / contribution verdict in one model object, plus the
+    human's keep decision — the 2.5 counterpart of ``QualityRow`` / ``StatScoreRow``.
+
+    ``decided_by`` is load-bearing. Re-fitting rebuilds every computed field and
+    the AI's recommendation, but a row the human has ruled on must survive that
+    untouched, or the reviewer's call is silently reverted by the next save.
+    """
+    id: str = ""                    # f"{object}|{norm_l4}|{norm_indicator}"
+    object: str = ""
+    tree_row_id: str = Field(default="", alias="treeRowId")
+    l1: str = ""
+    l2: str = ""
+    l3: str = ""
+    l4: str = ""
+    indicator: str = ""
+    metric: str = ""
+    # The fit, as 2.5 computed it.
+    coef: Optional[float] = None
+    t_value: Optional[float] = Field(default=None, alias="tValue")
+    p_value: Optional[float] = Field(default=None, alias="pValue")
+    significant: Optional[bool] = None
+    roi: Optional[float] = None
+    contribution: Optional[float] = None
+    roi_range: str = Field(default="", alias="roiRange")
+    contribution_range: str = Field(default="", alias="contributionRange")
+    roi_status: str = Field(default="none", alias="roiStatus")
+    contribution_status: str = Field(default="none", alias="contributionStatus")
+    range_source: str = Field(default="", alias="rangeSource")
+    status: str = ""                # inRange | review | noBenchmark | …
+    flag_reason: str = Field(default="", alias="flagReason")
+    # The AI's reading, and the recommendation derived from it + the range check.
+    ai_verdict: str = Field(default="", alias="aiVerdict")
+    ai_rationale: str = Field(default="", alias="aiRationale")
+    auto_verdict: OlsRangeDisposition = Field(default="accept", alias="autoVerdict")
+    auto_reason: str = Field(default="", alias="autoReason")
+    # The verdict that rules. Seeded from `auto_verdict`; `human` pins it.
+    disposition: OlsRangeDisposition = "accept"
+    decided_by: Literal["ai", "human"] = Field(default="ai", alias="decidedBy")
+    note: str = ""
+
+
+class OlsRangeScorecard(CamelModel):
+    """2.5's per-factor accept/reject sheet, reviewed at 2.5d."""
+    rows: list[OlsRangeRow] = Field(default_factory=list)
+    generated_at: str = Field(default="", alias="generatedAt")
 
 
 # ── Knowledge packs (per-industry, editable) ─────────────

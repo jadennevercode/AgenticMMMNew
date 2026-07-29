@@ -33,6 +33,12 @@ def adopt(st: ProjectState, coverage_id: str) -> str:
         raise KeyError(coverage_id)
     if cov.tree_row_id:
         return cov.tree_row_id
+    if str(cov.metric_type).strip().upper() == "Y":
+        # Sales is what the factors explain; adopting it would make the model's
+        # dependent variable one of its own drivers.
+        raise ValueError(
+            f"{cov.metric!r} is the response (Y), not a factor — it cannot be "
+            "adopted into the factor tree.")
     if st.factor_tree is None:
         st.factor_tree = FactorTree(rows=[])
     row = FactorRow(

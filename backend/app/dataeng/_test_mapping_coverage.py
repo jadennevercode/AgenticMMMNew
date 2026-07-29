@@ -122,8 +122,37 @@ def test_suggestions_only_offer_orphans() -> None:
     assert [s.indicator_id for s in sugg["ft-2"]] == ["c-free"]
 
 
+def test_autopilot_does_not_resolve_the_map_before_any_data_exists() -> None:
+    """Blanket-ignoring an unstarted Data Engine permanently guts S2.
+
+    Autopilot reaches 2.1 as soon as S1 closes, which on a real project is well
+    before anything is published. Writing "no published indicator matches this
+    factor" onto every row there is not a judgement — and because an ignore
+    outranks coverage, data published afterwards can never un-ignore them: the
+    factor map stays mapped=0 and the ledger drops every indicator at the mapping
+    layer.
+    """
+    from app.dataeng.mapping import resolve_factor_map
+    from app.dataeng.mapping_auto import auto_resolve_factor_map
+
+    st = _st()
+    result = auto_resolve_factor_map(st)
+    assert result.get("no_data") is True
+    assert st.factor_map_ignores == {}, "nothing may be ignored before data exists"
+    assert resolve_factor_map(st).complete is False, "2.1 must still block"
+
+    # Once something is published, it resolves as before.
+    st.indicator_coverage.append(IndicatorCoverage(
+        id="c1", tree_row_id="ft-1", asset_id="a1", asset_name="TV",
+        metric="TV投放金额", rows=12, bound_by="auto"))
+    auto_resolve_factor_map(st)
+    fmap = resolve_factor_map(st)
+    assert fmap.mapped == 1 and fmap.complete is True
+
+
 def main() -> int:
     for fn in (test_row_with_coverage_is_mapped,
+               test_autopilot_does_not_resolve_the_map_before_any_data_exists,
                test_multi_source_coverage_maps_once,
                test_ignored_row_clears_without_data,
                test_bind_pins_an_orphan_and_demotes_the_incumbent,

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from app.agents.dataset_cache import invalidate_project, model_objects, set_project_dataset
+from app.agents.model_objects import make_object
 from app.domain.models import IndustryRef, ProjectMeta
 from app.store.state import initial_state
 
@@ -27,6 +28,14 @@ def _month_seq(start_ym: int, n: int) -> list[int]:
 
 
 _MONTHS = _month_seq(202301, 24)  # 24 contiguous yyyymm from 2023-01
+
+# A model object is one (channel, product) cell since 2026-07-27. The fixture has
+# a single product ("B") in two channels, so it yields exactly two objects — the
+# same two the per-channel assertions below were always about, now under their
+# real composite ids rather than a bare channel type.
+BRAND = "B"
+MT = make_object("MT", BRAND)
+TT = make_object("TT", BRAND)
 
 
 def _rows_for(channel_type: str, degenerate_stock: bool) -> list[dict]:
@@ -72,22 +81,29 @@ def test_fixture() -> None:
     # MT and TT carry equal row counts in this fixture, so `model_objects`'
     # busiest-first ordering does not guarantee a specific tie order — assert
     # membership, not position (see test_model_objects_ordered_by_data below).
-    assert sorted(model_objects(st)) == ["MT", "TT"], model_objects(st)
+    assert sorted(model_objects(st)) == sorted([MT, TT]), model_objects(st)
     print("  fixture: MT + TT bound")
 
 
 def test_signoff_key_carries_object() -> None:
     from app.agents import ledger
     k_all = ledger.signoff_key("广告投放", "广告投放")
-    k_tt = ledger.signoff_key("广告投放", "广告投放", "TT")
+    k_tt = ledger.signoff_key("广告投放", "广告投放", TT)
     assert k_all == "i:*:广告投放|广告投放", k_all
     kind, obj, l4, metric = ledger._parse_signoff_key(k_tt)
-    assert (kind, obj, l4, metric) == ("indicator", "TT", "广告投放", "广告投放")
+    # A model object carries its own "::" — the key must still round-trip to the
+    # whole composite id, not to the channel half with the product bleeding into
+    # the factor name.
+    assert (kind, obj, l4, metric) == ("indicator", TT, "广告投放", "广告投放"), \
+        (kind, obj, l4, metric)
+    # The pre-composite (channel-only) key shape still parses unchanged.
+    kind2, obj2, l42, m2 = ledger._parse_signoff_key("i:TT:广告投放|广告投放")
+    assert (kind2, obj2, l42, m2) == ("indicator", "TT", "广告投放", "广告投放")
     st = make_two_channel_state()
     st.signoffs = {k_tt: "no"}
     by_obj = ledger.signoff_drop_pairs_by_object(st)
-    assert ("广告投放", "广告投放") in by_obj.get("TT", set())
-    assert ("广告投放", "广告投放") not in by_obj.get("MT", set())
+    assert ("广告投放", "广告投放") in by_obj.get(TT, set())
+    assert ("广告投放", "广告投放") not in by_obj.get(MT, set())
     # A legacy unprefixed key still parses and applies to all objects.
     st.signoffs = {"广告投放|广告投放": "no"}
     by_obj = ledger.signoff_drop_pairs_by_object(st)
@@ -108,31 +124,46 @@ def test_stat_drops_are_per_object() -> None:
     from app.domain.models import StatScorecard, StatScoreRow
     st = make_two_channel_state()
     st.stat_scorecard = StatScorecard(rows=[
-        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-mt", object=MT, l4="渠道库存", indicator="渠道库存",
                      disposition="include"),
-        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                      disposition="drop"),
     ])
     by_obj = ledger.stat_drop_pairs_by_object(st)
-    assert ("渠道库存", "渠道库存") in by_obj.get("TT", set()), by_obj
-    assert ("渠道库存", "渠道库存") not in by_obj.get("MT", set()), by_obj
+    assert ("渠道库存", "渠道库存") in by_obj.get(TT, set()), by_obj
+    assert ("渠道库存", "渠道库存") not in by_obj.get(MT, set()), by_obj
     # drops_before for the statistical layer must reflect the channel asked for.
-    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", "TT")
-    assert ("渠道库存", "渠道库存") not in ledger.drops_before(st, "range", "MT")
+    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", TT)
+    assert ("渠道库存", "渠道库存") not in ledger.drops_before(st, "range", MT)
     print("  stat drops per object")
 
 
-def test_stat_scorecard_is_per_object() -> None:
+def test_stat_scorecard_is_scored_once_over_the_panel() -> None:
+    """2.4 screens each indicator **once**, over a panel stacked across every model
+    object, and records the verdict globally (2026-07-27).
+
+    It used to re-screen every indicator inside each channel's own aggregate, which
+    meant a channel where an indicator happened to be flat produced a "drop" that
+    said more about that channel's slice than about the indicator. Scoring the
+    assembled panel asks the question once, on every channel × product at the same
+    time — and the panel is where a series that is constant *within* a channel but
+    differs *between* channels stops looking constant.
+    """
     from app.agents.stat_scoring import build_stat_scorecard
     st = make_two_channel_state()
     card = build_stat_scorecard(st)
-    objs = {r.object for r in card.rows}
-    assert objs == {"MT", "TT"}, objs
-    # 渠道库存 is constant in TT → dropped there by the degenerate-series guard,
-    # but present as a scored row in MT.
-    mt_stock = [r for r in card.rows if r.object == "MT" and r.indicator == "渠道库存"]
-    assert mt_stock, "渠道库存 should be scored in MT"
-    print("  stat scorecard per object")
+    assert card.rows, "the fixture must yield scored indicators"
+    assert {r.object for r in card.rows} == {""}, \
+        "a panel verdict is global — every model object inherits it via OBJECT_ANY"
+    per_indicator = [r.indicator for r in card.rows]
+    assert len(per_indicator) == len(set(per_indicator)), \
+        f"one row per indicator, got {per_indicator}"
+    # 渠道库存 is constant in TT and varying in MT. On the panel that is one series
+    # that moves, so it is scored — not dropped as degenerate the way TT's own
+    # slice would have had it.
+    assert any(r.indicator == "渠道库存" for r in card.rows), \
+        "an indicator flat in one channel still varies across the panel"
+    print("  stat scorecard scored once over the panel, verdict global")
 
 
 def test_ledger_is_per_object() -> None:
@@ -146,14 +177,14 @@ def test_ledger_is_per_object() -> None:
     st = make_two_channel_state()
     # Force TT to drop 渠道库存, MT to keep it.
     st.stat_scorecard = StatScorecard(rows=[
-        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-mt", object=MT, l4="渠道库存", indicator="渠道库存",
                      disposition="include"),
-        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                      disposition="drop"),
     ])
     rows = ledger.indicator_ledger(st)
-    tt = next(r for r in rows if r.object == "TT" and r.indicator == "渠道库存")
-    mt = next(r for r in rows if r.object == "MT" and r.indicator == "渠道库存")
+    tt = next(r for r in rows if r.object == TT and r.indicator == "渠道库存")
+    mt = next(r for r in rows if r.object == MT and r.indicator == "渠道库存")
     assert not tt.adopted and tt.rejected_at == "statistical", (tt.rejected_at, tt.adopted)
     assert mt.adopted, mt.rejected_at
     print("  ledger per object: 渠道库存 dropped in TT, kept in MT")
@@ -166,12 +197,12 @@ def test_ols_candidates_are_per_object() -> None:
     st.stat_scorecard = build_stat_scorecard(st)
     cfg = build_ols_proposal(st)
     objs = {c.object for c in cfg.x_candidates}
-    assert objs == {"MT", "TT"}, objs
+    assert objs == {MT, TT}, objs
     # 广告投放 offered separately in each channel.
     ads = [c for c in cfg.x_candidates if c.metric == "广告投放"]
-    assert {c.object for c in ads} == {"MT", "TT"}, [c.object for c in ads]
+    assert {c.object for c in ads} == {MT, TT}, [c.object for c in ads]
     sel = selected_x_metrics(cfg)
-    assert isinstance(sel, dict) and set(sel) <= {"MT", "TT"}
+    assert isinstance(sel, dict) and set(sel) <= {MT, TT}
     print("  OLS candidates + selection are per object")
 
 
@@ -207,26 +238,26 @@ def test_ols_tree_droppedby_is_per_object() -> None:
     card = build_stat_scorecard(st)
     rows = [r if r.indicator != "渠道库存" else r.model_copy(update={"disposition": "include"})
             for r in card.rows]
-    rows.append(StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+    rows.append(StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                               disposition="drop"))
     st.stat_scorecard = StatScorecard(rows=rows)
     # Sanity check the fixture actually forces the divergence at the ledger
     # layer before trusting the tree assertion below.
     ledger_rows = {r.object: r for r in indicator_ledger(st) if r.indicator == "渠道库存"}
-    assert not ledger_rows["TT"].adopted and ledger_rows["TT"].rejected_at == "statistical"
-    assert ledger_rows["MT"].adopted
+    assert not ledger_rows[TT].adopted and ledger_rows[TT].rejected_at == "statistical"
+    assert ledger_rows[MT].adopted
 
     st.ols_config = build_ols_proposal(st)
     body, _prefit, _flagged = build_ols_review(st, fit=True)
     tree_rows = {r["object"]: r for r in body["tree"] if r["indicator"] == "渠道库存"}
-    assert set(tree_rows) == {"MT", "TT"}, tree_rows
+    assert set(tree_rows) == {MT, TT}, tree_rows
 
-    tt = tree_rows["TT"]
+    tt = tree_rows[TT]
     assert tt["droppedBy"] == "statistical", tt
     assert tt["status"] == "dropped", tt
     assert tt["inModel"] is False, tt
 
-    mt = tree_rows["MT"]
+    mt = tree_rows[MT]
     assert mt["droppedBy"] == "", mt
     assert mt["status"] != "dropped", mt
     print("  ols tree droppedBy per object: 渠道库存 dropped-by-statistical in TT only")
@@ -247,14 +278,14 @@ def test_model_selection_is_per_object() -> None:
     from app.domain.models import StatScorecard, StatScoreRow
     st = make_two_channel_state()
     st.stat_scorecard = StatScorecard(rows=[
-        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-mt", object=MT, l4="渠道库存", indicator="渠道库存",
                      disposition="include"),
-        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                      disposition="drop"),
     ])
     sel = model_selection(st)
-    assert ("渠道库存", "渠道库存") in sel.exclude_for("TT")
-    assert ("渠道库存", "渠道库存") not in sel.exclude_for("MT")
+    assert ("渠道库存", "渠道库存") in sel.exclude_for(TT)
+    assert ("渠道库存", "渠道库存") not in sel.exclude_for(MT)
     print("  model_selection excludes per object")
 
 
@@ -272,29 +303,38 @@ def test_master_table_columns_differ_by_channel() -> None:
     from app.agents.master_data import master_table
     st = make_two_channel_state()
     st.stat_scorecard = StatScorecard(rows=[
-        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-mt", object=MT, l4="渠道库存", indicator="渠道库存",
                      disposition="include"),
-        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                      disposition="drop"),
     ])
-    mt = master_table(st, channel_type=["MT"])
-    tt = master_table(st, channel_type=["TT"])
+    mt = master_table(st, channel_type=["MT"], brand=[BRAND])
+    tt = master_table(st, channel_type=["TT"], brand=[BRAND])
     assert "渠道库存" in [c for c in mt["columns"]], mt["columns"]
     assert "渠道库存" not in [c for c in tt["columns"]], tt["columns"]
     print("  master table columns differ by channel")
 
 
 def test_adopted_mask_screens_unmapped_channel_rows() -> None:
-    """Task 7 fix: a MISSING/NaN ``channel_type`` must not escape per-object
-    screening. ``channel_type.astype("string")`` turns NaN into the literal
-    string ``"<NA>"``, which the old per-object loop treated as a real model
-    object — ``sel.exclude_for("<NA>")`` only resolves OBJECT_ANY-level drops,
-    never a per-object (TT-only) drop — so a TT-rejected indicator could leak
-    into the master table via any row whose channel could not be mapped. The
-    fix screens unmapped rows against the union of every model object's
-    excludes instead (the strict, pre-Task-7 behaviour), so a rejected-
-    anywhere indicator can never surface through an unmapped row while a
-    genuinely-adopted indicator (and the KPI) still passes through.
+    """A MISSING/NaN ``channel_type`` must not escape per-object screening, but it
+    must not be screened against *every* object either.
+
+    Task 7 fixed the escape: ``channel_type.astype("string")`` turns NaN into the
+    literal ``"<NA>"``, which the per-object loop treated as a real model object —
+    ``sel.exclude_for("<NA>")`` resolves only OBJECT_ANY drops, never a TT-only
+    one — so a TT-rejected indicator leaked through any unmappable row. That fix
+    screened unmapped rows against the **union** of every object's excludes.
+
+    The union is too strict, and the drill case showed why: a row with no channel
+    is *national*, shared into every model, so rejecting it in one channel deleted
+    it from the channel that kept it. TT was fitted with 温度 at 43.3% contribution
+    while the master table dropped it, because MT and EC had rejected it — the
+    deliverable describing a model nobody fitted.
+
+    The rule is now per-scope: an unmapped row survives when an object in
+    ``scope`` kept it, and is dropped when every one of them rejected it. Nothing
+    escapes screening; a rejection just no longer travels to models that did not
+    make it.
     """
     from app.agents.master_data import adopted_mask
     from app.domain.models import StatScorecard, StatScoreRow
@@ -303,28 +343,51 @@ def test_adopted_mask_screens_unmapped_channel_rows() -> None:
     # 渠道库存 is dropped in TT only (a per-object drop, not OBJECT_ANY) —
     # exactly the shape exclude_for("<NA>") cannot see.
     st.stat_scorecard = StatScorecard(rows=[
-        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-mt", object=MT, l4="渠道库存", indicator="渠道库存",
                      disposition="include"),
-        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                      disposition="drop"),
     ])
 
+    # A row is pinned to a model object by (channel_type, brand) — both halves are
+    # needed, so a row missing either takes the strict union path.
     df = pd.DataFrame([
         # rejected-in-TT indicator, channel unmapped — must NOT leak through.
-        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type=np.nan),
-        # same indicator, mapped to the channel that actually rejected it.
-        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type="TT"),
-        # same indicator, mapped to the channel that kept it.
-        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type="MT"),
+        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type=np.nan,
+             brand=BRAND),
+        # same indicator, pinned to the model that actually rejected it.
+        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type="TT",
+             brand=BRAND),
+        # same indicator, pinned to the model that kept it.
+        dict(l4="渠道库存", metric="渠道库存", metric_type="X", channel_type="MT",
+             brand=BRAND),
         # genuinely-adopted indicator, channel unmapped — must stay in.
-        dict(l4="广告投放", metric="广告投放", metric_type="spending", channel_type=np.nan),
+        dict(l4="广告投放", metric="广告投放", metric_type="spending", channel_type=np.nan,
+             brand=BRAND),
         # KPI row, channel unmapped — must stay in unconditionally.
-        dict(l4="本品销量", metric="销量", metric_type="Y", channel_type=np.nan),
+        dict(l4="本品销量", metric="销量", metric_type="Y", channel_type=np.nan,
+             brand=BRAND),
     ])
 
-    mask = adopted_mask(st, df)
-    assert list(mask) == [False, False, True, True, True], list(mask)
-    print("  adopted_mask screens unmapped-channel rows against all-object excludes")
+    # Default scope (every model object): MT kept 渠道库存, so the unmapped row is
+    # part of MT's model and belongs in the unsliced table. The row pinned to TT
+    # is still dropped — that is TT's own verdict on its own row.
+    assert list(adopted_mask(st, df)) == [True, False, True, True, True], list(adopted_mask(st, df))
+
+    # Scoped to the model that rejected it, the unmapped row goes too: this is
+    # what each per-object export sheet asks for, and it must not carry a variable
+    # that model rejected.
+    assert list(adopted_mask(st, df, scope=[TT])) == [False, False, True, True, True], \
+        list(adopted_mask(st, df, scope=[TT]))
+    assert list(adopted_mask(st, df, scope=[MT])) == [True, False, True, True, True], \
+        list(adopted_mask(st, df, scope=[MT]))
+
+    # The escape Task 7 closed stays closed: rejected in EVERY object → gone, even
+    # though its channel cannot be resolved.
+    st.stat_scorecard.rows[0].disposition = "drop"      # now dropped in MT as well
+    assert list(adopted_mask(st, df))[0] is False or not list(adopted_mask(st, df))[0], \
+        "an indicator every model rejected must not survive as an unmapped row"
+    print("  adopted_mask screens unmapped-channel rows per scope, not by union")
 
 
 def test_legacy_global_rows_apply_to_all_objects() -> None:
@@ -340,15 +403,15 @@ def test_legacy_global_rows_apply_to_all_objects() -> None:
             r.disposition = "drop"
     by_obj = ledger.stat_drop_pairs_by_object(st)
     assert ("渠道库存", "渠道库存") in by_obj.get(ledger.OBJECT_ANY, set())
-    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", "MT")
-    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", "TT")
+    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", MT)
+    assert ("渠道库存", "渠道库存") in ledger.drops_before(st, "range", TT)
     print("  legacy global rows apply to every channel")
 
 
 def test_model_objects_ordered_by_data() -> None:
     from app.agents.dataset_cache import model_objects
     st = make_two_channel_state()  # MT and TT have equal row counts → name order
-    assert set(model_objects(st)) == {"MT", "TT"}
+    assert set(model_objects(st)) == {MT, TT}
     print("  model_objects derived from data, no hardcoded list")
 
 
@@ -366,9 +429,9 @@ def test_drops_before_no_object_equals_global_union() -> None:
     # Force the same per-channel divergence as test_model_selection_is_per_object:
     # TT drops 渠道库存 at the statistical layer, MT keeps it.
     st.stat_scorecard = StatScorecard(rows=[
-        StatScoreRow(id="s-mt", object="MT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-mt", object=MT, l4="渠道库存", indicator="渠道库存",
                      disposition="include"),
-        StatScoreRow(id="s-tt", object="TT", l4="渠道库存", indicator="渠道库存",
+        StatScoreRow(id="s-tt", object=TT, l4="渠道库存", indicator="渠道库存",
                      disposition="drop"),
     ])
 

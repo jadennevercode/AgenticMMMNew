@@ -115,15 +115,23 @@ def resolve_factor_map(st: ProjectState) -> FactorMap:
             for c in ind.coverages_for(st, r.id)]
         cover = ind.primary_coverage(st, r.id)
         if cover is not None:
-            fm.status = "mapped"
+            # Coverage is reported whatever the verdict — a reader deciding whether
+            # to un-ignore a row needs to see what data is actually available for it.
             fm.asset_id = cover.asset_id
             fm.asset_name = cover.asset_name
             fm.metric = cover.metric
             fm.coverage_start = cover.coverage_start
             fm.coverage_end = cover.coverage_end
-        elif r.id in ignores:
+        # An explicit ignore is a human decision and outranks the automatic mapping.
+        # The other way round, a factor with data could not be rejected at 2.1 at
+        # all: the ignore was only reachable for rows nothing supplied, so saying
+        # "leave this factor out of the model" silently evaporated the moment an
+        # asset happened to cover it — and the factor went on into 2.2, 2.4 and 2.5.
+        if r.id in ignores:
             fm.status = "ignored"
             fm.ignore_note = str(ignores[r.id] or "")
+        elif cover is not None:
+            fm.status = "mapped"
         # Resolve the model role + aggregation the user maintains at 2.1: their
         # override if set, else the name-based classifier default. Keyed by the
         # covering metric label when mapped, else the factor's own indicator name.

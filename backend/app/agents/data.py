@@ -21,7 +21,8 @@ from app.agents.ledger import (
     upstream_drop_pairs,
 )
 from app.agents.master_data import dimensions
-from app.agents.ols_review import build_ols_review, build_ols_search
+from app.agents import factor_link, reconcile
+from app.agents.ols_review import build_ols_review
 from app.agents.stat_scoring import (
     DETREND_PERIOD,
     MIN_DETRENDED_POINTS,
@@ -189,10 +190,13 @@ async def data_processing(eng: Engine, st: ProjectState, task: dict) -> None:
     # place that decides where the modeling table came from, and it reports "none"
     # rather than silently substituting the reference table.
     res = resolve_dataset(st)
+    from app.agents.dataset_cache import is_reference_seeded
     source = {
-        "published": "Data Engine published assets",
+        "published": ("Reference dataset, published as assets (demo stand-in — not this "
+                      "project's own data)" if is_reference_seeded(st)
+                      else "Data Engine published assets"),
         "slot": "Uploaded data-request workbooks",
-        "reference": "Danone reference dataset",
+        "reference": "Reference dataset (demo stand-in — not this project's own data)",
         "none": "No usable project data",
     }.get(res.source, res.source)
     df = res.df if res.usable else model_df(st)
@@ -312,6 +316,29 @@ def _coerce_score(v: object, fallback: float) -> float:
     return min((0.0, 0.5, 1.0), key=lambda b: abs(b - f))
 
 
+def _guard_dimension(dimension: str, score: float, res: QualityResult) -> float:
+    """Stop an advisory subcheck from disqualifying an indicator through the AI.
+
+    A dimension's deterministic score is the weakest of its **blocking** subchecks;
+    the advisory ones are context (how much optional drill-down detail the series
+    carries) and `_roll_up` already refuses to let them drag it down. The AI review
+    had no such guard: handed a 0 on "no L5–L8 deepdive dimensions" it scored the
+    whole granularity dimension 0, which zeroes the product Total and removes the
+    indicator from the model. On the reference case those columns are populated so
+    it never fired; on a dataset without drill-down columns it condemned **every**
+    indicator, and S2 produced nothing at all downstream.
+
+    So the AI may still lower a dimension — but not to 0 when every blocking
+    subcheck passed. It has to be a blocking failure to be disqualifying.
+    """
+    if score > 0.0:
+        return score
+    blocking = [s.score for s in res.subs if s.dimension == dimension and s.blocking]
+    if blocking and min(blocking) > 0.0:
+        return min(0.5, min(blocking))
+    return score
+
+
 def _field_context(df: pd.DataFrame) -> dict[tuple, FieldContext]:
     """Per-parent-L4 spend/performance presence — grounds field completeness.
 
@@ -384,9 +411,18 @@ async def _ai_review_dimensions(rows: list[dict]) -> dict[str, dict]:
         user = (
             "You are reviewing data-quality scores. Each row already has a deterministic score "
             "per dimension (consistency, accuracy, completeness, granularity) plus the subcheck "
-            "breakdown that produced it. Keeping the rubric in mind, CONFIRM or ADJUST each of the "
-            "four dimension scores (strictly 0, 0.5 or 1) — only override the deterministic score "
-            "when the subcheck evidence clearly warrants it — and write a concise English note "
+            "breakdown that produced it.\n\n"
+            "Each subcheck is marked `blocking: true` or `blocking: false`.\n"
+            "- **Blocking** subchecks decide the dimension: its deterministic score is the weakest "
+            "of them.\n"
+            "- **Advisory** subchecks (`blocking: false`) describe how much extra detail the series "
+            "carries. They are context for your note. A dimension whose blocking subchecks all pass "
+            "MUST NOT be scored 0 because an advisory one is low — an indicator that is perfectly "
+            "modelable does not become unusable for lacking optional drill-down columns, and a 0 on "
+            "any dimension zeroes the product Total and removes it from the model entirely.\n\n"
+            "Keeping the rubric in mind, CONFIRM or ADJUST each of the four dimension scores "
+            "(strictly 0, 0.5 or 1) — only override the deterministic score when a BLOCKING "
+            "subcheck's evidence clearly warrants it — and write a concise English note "
             "(≤90 chars) per dimension explaining the score from the evidence. Return a JSON array "
             'of {"id","consistency","accuracy","completeness","granularity","notes":'
             '{"consistency","accuracy","completeness","granularity"}}.\n\n'
@@ -413,60 +449,65 @@ def _verdict(total: float) -> str:
 
 async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
     """2.2 — score every factor×metric on the four 2.11 validation dimensions,
-    per model object.
+    straight off the assembled data.
 
     A deterministic subcheck scorer (`quality_scoring`) computes the 10 subchecks
-    and a baseline dimension score straight from the real long table; the AI then
-    reviews the four dimension scores on that grounding. Total = product of the
-    four dimensions (Excel 2.12). The human reviews the verdicts in 2.2d.
+    and a baseline dimension score from the long table **as it was published**; the
+    AI then reviews the four dimension scores on that grounding. Total = product of
+    the four dimensions (Excel 2.12). The human reviews the verdicts in 2.2d.
 
-    Each model object (channel_type) is scored on its own data slice — an
-    indicator's quality can differ by channel (e.g. sparser reporting in one
-    channel than another), so it is screened once per channel, not once globally.
+    Nothing is aggregated first (2026-07-27). The previous roll-up to a national
+    total made four of the ten subchecks unable to fail: it rewrote every row's
+    ``source`` to one constant (so the caliber check never saw a source change),
+    collapsed ``province_group``/``channel`` to one value each (so the granularity
+    check scored every indicator the same), and dropped NaNs while summing (so
+    per-channel missingness never reached the completeness check). Scoring the
+    assembled rows gives those checks their real evidence back.
+
+    One row per indicator, as before — the verdict is a property of the indicator
+    across the whole dataset, so it is recorded globally and every model object
+    inherits it.
     """
     from app.agents.ledger import _matches, _norm_pair, drops_before
 
-    full = model_df(st)
+    df = model_df(st)
+    link = factor_link.build(st)
     # 1) deterministic subcheck evidence, then the four registered quality tools —
-    #    one explicit call each, batched over every series (see app/tools) —
-    #    computed per object on that channel's own slice.
+    #    one explicit call each, batched over every series (see app/tools).
     base: list[tuple[str, str, dict, QualityResult]] = []  # (rid, obj, meta, res)
-    for obj in model_objects(st):
-        df = full[full["channel_type"].astype("string").str.strip() == obj]
-        fields = _field_context(df)
-        evidences: list[QualityEvidence] = []
-        contexts: list[FieldContext] = []
-        metas: list[dict] = []
-        grouped = df.groupby(["l1", "l2", "l3", "l4", "metric"], dropna=False)
-        for i, ((l1, l2, l3, l4, metric), grp) in enumerate(grouped):
-            if not str(metric).strip() or str(metric) == "<NA>":
-                continue
-            evidences.append(compute_series_evidence(grp))
-            contexts.append(fields.get((l1, l2, l3, l4), FieldContext(False, True)))
-            metas.append({"id": f"{obj}|q-{i}", "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
-                          "l4": _s(l4), "indicator": _s(metric)})
-        if not metas:
+    fields = _field_context(df)
+    evidences: list[QualityEvidence] = []
+    contexts: list[FieldContext] = []
+    metas: list[dict] = []
+    grouped = df.groupby(["l1", "l2", "l3", "l4", "metric"], dropna=False)
+    for i, ((l1, l2, l3, l4, metric), grp) in enumerate(grouped):
+        if not str(metric).strip() or str(metric) == "<NA>":
             continue
+        evidences.append(compute_series_evidence(grp))
+        contexts.append(fields.get((l1, l2, l3, l4), FieldContext(False, True)))
+        metas.append({"id": f"q-{i}", "l1": _s(l1), "l2": _s(l2), "l3": _s(l3),
+                      "l4": _s(l4), "indicator": _s(metric),
+                      "treeRowId": link.row_for(l4, metric)})
 
-        inherited = drops_before(st, "quality", obj)
-        if inherited:
-            keep = [not _matches(_norm_pair(m["l4"], m["indicator"]), inherited) for m in metas]
-            metas = [m for m, k in zip(metas, keep) if k]
-            evidences = [e for e, k in zip(evidences, keep) if k]
-            contexts = [c for c, k in zip(contexts, keep) if k]
-            if not metas:
-                continue
+    inherited = drops_before(st, "quality")
+    if inherited:
+        keep = [not _matches(_norm_pair(m["l4"], m["indicator"]), inherited) for m in metas]
+        metas = [m for m, k in zip(metas, keep) if k]
+        evidences = [e for e, k in zip(evidences, keep) if k]
+        contexts = [c for c, k in zip(contexts, keep) if k]
 
-        subs_by_dim = _run_quality_tools(eng, st, task["id"], evidences, contexts, obj)
+    if metas:
+        subs_by_dim = _run_quality_tools(eng, st, task["id"], evidences, contexts)
         base.extend(
-            (meta["id"], obj, meta, roll_up_quality([s for dim in subs_by_dim for s in dim[idx]]))
+            (meta["id"], "", meta, roll_up_quality([s for dim in subs_by_dim for s in dim[idx]]))
             for idx, meta in enumerate(metas)
         )
     # 2) AI reviews the dimension scores over the subcheck breakdown (falls back to baseline).
     review_rows = [{**meta,
                     "baseline": {d: getattr(res, d) for d in DIMENSIONS},
                     "subchecks": [{"dimension": s.dimension, "label": s.label,
-                                   "score": s.score, "evidence": s.note} for s in res.subs]}
+                                   "score": s.score, "blocking": s.blocking,
+                                   "evidence": s.note} for s in res.subs]}
                    for (_rid, _obj, meta, res) in base]
     ai = await _ai_review_dimensions(review_rows)
     used_ai = bool(ai)
@@ -477,17 +518,18 @@ async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
     for (rid, obj, meta, res) in base:
         a = ai.get(rid, {})
         notes = a.get("notes", {}) if isinstance(a.get("notes"), dict) else {}
-        dims = {d: _coerce_score(a.get(d), getattr(res, d)) for d in DIMENSIONS}
+        dims = {d: _guard_dimension(d, _coerce_score(a.get(d), getattr(res, d)), res)
+                for d in DIMENSIONS}
         total = round(dims["consistency"] * dims["accuracy"]
                       * dims["completeness"] * dims["granularity"], 4)
         verdict = _verdict(total)
-        label = f"{obj} · {meta['l4'] or meta['l3'] or meta['l1']} · {meta['indicator']}".strip(" ·")
+        label = f"{meta['l4'] or meta['l3'] or meta['l1']} · {meta['indicator']}".strip(" ·")
         subs = [QualitySubScore(key=s.key, dimension=s.dimension, label=s.label,
                                 score=s.score, note=s.note, computed=s.computed, blocking=s.blocking)
                 for s in res.subs]
         qrows.append(QualityRow(
             id=rid, object=obj, l1=meta["l1"], l2=meta["l2"], l3=meta["l3"], l4=meta["l4"],
-            indicator=meta["indicator"],
+            indicator=meta["indicator"], treeRowId=meta.get("treeRowId", ""),
             consistency=dims["consistency"], accuracy=dims["accuracy"],
             completeness=dims["completeness"], granularity=dims["granularity"],
             consistencyNote=str(notes.get("consistency") or res.dimension_note("consistency")),
@@ -503,7 +545,11 @@ async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
     qrows.sort(key=lambda r: (r.object, r.total))
     card = QualityScorecard(rows=qrows)
     st.quality_scorecard = card
-    eng.produce(st, "a-quality-scorecard", body=quality_sheet(card), state="confirmed", agent="data")
+    body = quality_sheet(card)
+    # Say where the factor count went. 2.1 counts declared factor rows, 2.2 counts
+    # supplied metric groups; without this the two headline numbers just disagree.
+    body["sheets"].append(reconcile.build(st).sheet())
+    eng.produce(st, "a-quality-scorecard", body=body, state="confirmed", agent="data")
     eng.set_analysis(st, "quality", {
         "total": len(qrows), "accepted": len(accepted_metric_labels(card)),
         "borderline": borderline[:20], "unusable": unusable[:20],
@@ -530,13 +576,36 @@ async def score_data(eng: Engine, st: ProjectState, task: dict) -> None:
         st.decisions["d-2.2"].question = q
 
 
-def _anomalies(df: pd.DataFrame) -> list[dict]:
-    """Find YoY growth anomalies per channel_type for a sales-like metric."""
-    out = []
-    sales = df[df["metric"].astype(str).str.contains("sales|offtake|GMV|箱|volume|Volume|销",
-                                                     case=False, na=False, regex=True)]
+def _anomalies(df: pd.DataFrame, st: ProjectState | None = None) -> list[dict]:
+    """Find YoY growth anomalies per channel_type in the **response**.
+
+    The response is whichever series 2.1 tagged Y, resolved the same way every other
+    S2 step resolves it. This used to carry its own `sales|offtake|GMV|箱|volume|销`
+    keyword list and, when it matched nothing, fall back to summing **every metric in
+    the table** — spend in RMB, temperature in °C, rates, indices — into one number
+    per channel-year and report ±40% moves in that as business anomalies. A KPI named
+    `Net Sales Units`, `Bookings` or `订单量` matched nothing, so that fallback was
+    the normal path for any project that is not the reference case. The anomalies are
+    not cosmetic: accepted at 2.3a they become an event dummy or winsorize the
+    response, so a fabricated one reaches the model.
+
+    No recognisable response → no anomalies, which the caller reports.
+    """
+    from app.agents.overrides import resolved_y_metric
+    from app.dataeng.validation_query import _kpi_mask
+
+    out: list[dict] = []
+    try:
+        sales = df[_kpi_mask(df)]
+    except Exception:  # noqa: BLE001 — an untaggable table simply has no response
+        return []
     if sales.empty:
-        sales = df
+        return []
+    metric = resolved_y_metric(st, df) if st is not None else None
+    if metric:
+        picked = sales[sales["metric"].astype("string").str.strip() == str(metric).strip()]
+        if not picked.empty:
+            sales = picked
     g = sales.groupby(["channel_type", "year"])["value"].sum().reset_index()
     for ctype in g["channel_type"].dropna().unique():
         sub = g[g["channel_type"] == ctype].sort_values("year")
@@ -558,14 +627,18 @@ def _bv_yoy_latest(by_year: dict[int, float]) -> float | None:
     return round((by_year[ys[-1]] - by_year[ys[-2]]) / by_year[ys[-2]] * 100, 1)
 
 
-def _bv_interpretation(df: pd.DataFrame, l3: str, indicators: list[str]) -> str:
-    """A deterministic one-line read for an L3 factor: sell-out YoY vs the factor's
-    lead indicator YoY (the AI narrator may refine this afterwards)."""
+def _bv_interpretation(df: pd.DataFrame, l3: str, indicators: list[str],
+                       kpi_metric: str = "") -> str:
+    """A deterministic one-line read for an L3 factor: the response's YoY vs the
+    factor's lead indicator YoY (the AI narrator may refine this afterwards)."""
     from app.dataeng import validation_query as vq
     parts: list[str] = []
-    kpi_delta = _bv_yoy_latest(vq._sum_by_period(df[vq._kpi_mask(df)], "year"))
+    kpi_mask = vq._kpi_mask(df)
+    kpi_delta = _bv_yoy_latest(vq._sum_by_period(df[kpi_mask], "year"))
     if kpi_delta is not None:
-        parts.append(f"Sell-out {kpi_delta:+}% YoY")
+        label = kpi_metric or (str(df[kpi_mask]["metric"].mode().iloc[0])
+                               if not df[kpi_mask].empty else "Response")
+        parts.append(f"{label} {kpi_delta:+}% YoY")
     if indicators:
         sub = df[vq._casefold_eq(df["l3"], l3)]
         top = indicators[0]
@@ -575,7 +648,7 @@ def _bv_interpretation(df: pd.DataFrame, l3: str, indicators: list[str]) -> str:
     return "; ".join(parts) or "No overlay indicators mapped for this factor yet."
 
 
-def _bv_groups(st: ProjectState, df: pd.DataFrame) -> list[dict]:
+def _bv_groups(st: ProjectState, df: pd.DataFrame, kpi_metric: str = "") -> list[dict]:
     """One group per factor (L1 › L2 › L3), driven by the modeling table's own factor
     columns so every chart has overlay data. The long table's l1/l2/l3 IS the factor
     hierarchy as realized in the data; the FactorTree object only contributes each
@@ -610,7 +683,7 @@ def _bv_groups(st: ProjectState, df: pd.DataFrame) -> list[dict]:
             "l1": row["l1"] or "", "l2": row["l2"] or "", "l3": l3,
             "rowIds": rows_by_l3.get(l3.casefold(), []),
             "defaultIndicators": indicators,
-            "interpretation": _bv_interpretation(df, l3, indicators),
+            "interpretation": _bv_interpretation(df, l3, indicators, kpi_metric),
             # Reflect the durable verdict, so re-running 2.3 cannot erase a
             # sign-off the client already gave (`st.signoffs` is the truth —
             # this field is a rendering of it). Derived from THIS group's own
@@ -767,7 +840,9 @@ async def _bv_narrate(groups: list[dict]) -> None:
         reply = await llm.json(system=SYS, user=(
             "For each marketing factor (L3), rewrite `reading` as a concise English business "
             "interpretation (≤20 words) grounded ONLY in the numbers/indicators given — how the "
-            "factor tracks against sell-out. Return a JSON array of {\"l3\",\"interpretation\"}.\n\n"
+            "factor tracks against the response. Name the response exactly as the reading names "
+            "it; do not substitute a category word like 'sell-out'. "
+            "Return a JSON array of {\"l3\",\"interpretation\"}.\n\n"
             + json.dumps(payload, ensure_ascii=False)))
     except LLMError:
         return
@@ -781,7 +856,7 @@ async def _bv_narrate(groups: list[dict]) -> None:
 
 async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None:
     """2.3 — Business Validation: one interactive chart per FactorTree L3 (a constant
-    sell-out area background overlaid with the factor's indicators; filterable by data
+    response area background overlaid with the factor's indicators; filterable by data
     source / sub-factor / indicator / time grain / model dimension) plus a yearly+YoY
     table. The artifact carries per-factor metadata + interpretation + the `specs` that
     drive the self-serve Graphic Walker explorer (`ExploreTab`); sign-off is a separate
@@ -789,13 +864,13 @@ async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None
     from app.dataeng import validation_query as vq
     from app.dataeng import validation_specs as vspecs
     df = model_df(st)
-    anomalies = _anomalies(df)
+    anomalies = _anomalies(df, st)
     eng.set_analysis(st, "anomalies", anomalies)
 
     tid = task["id"]
     kpi_df = df[vq._kpi_mask(df)]
     kpi_metric = str(kpi_df["metric"].mode().iloc[0]) if not kpi_df.empty else ""
-    groups = _bv_groups(st, df)
+    groups = _bv_groups(st, df, kpi_metric)
     eng.emit(st, "data", "info",
              f"Charted {len(groups)} factor(s) against {kpi_metric or 'the response'} "
              f"({df['month'].nunique() if 'month' in df.columns else 0} months).", tid)
@@ -807,13 +882,19 @@ async def business_validation(eng: Engine, st: ProjectState, task: dict) -> None
         "specs": vspecs.default_specs(st),
         "anomalies": [{"channel": a["channel"], "year": a["year"],
                        "growthPct": a["growth_pct"]} for a in anomalies],
-        "note": ("Explore each factor against sell-out — adjust axes, chart type, and "
+        "note": (f"Explore each factor against {kpi_metric or 'the response'} — adjust axes, chart type, and "
                  "dimensions freely, then sign off indicators in the Sign-off tab."),
     }
     eng.produce(st, "a-business-validation", body=body, state="proposed", agent="data")
     findings = [TaskFinding(
         text=f"Anomaly: {a['channel']} {a['year']} growth {a['growth_pct']:+}% — needs a business explanation.",
         tone="flag", evidence=[EvidenceRef(artifactId="a-business-validation")]) for a in anomalies[:3]]
+    if not kpi_metric:
+        findings.append(TaskFinding(
+            text="No response (Y) could be identified in the data, so the factor charts have "
+                 "no response baseline and no anomalies were scanned for. Tag the KPI metric's "
+                 "model role at 2.1 Data Processing.",
+            tone="flag", evidence=[EvidenceRef(artifactId="a-business-validation")]))
     eng.add_findings(st, task["id"], findings)
     if anomalies:
         a0 = anomalies[0]
@@ -874,7 +955,7 @@ async def review_anomalies(eng: Engine, st: ProjectState, task: dict) -> None:
     becomes a dummy control, `cap` winsorizes the response over the window, and
     `raw` rides as a caveat (see `ledger.anomaly_effects`).
     """
-    anomalies = st.analysis.get("anomalies") or _anomalies(model_df(st))
+    anomalies = st.analysis.get("anomalies") or _anomalies(model_df(st), st)
     existing = {r.id: r for r in getattr(getattr(st, "anomaly_review", None), "rows", None) or []}
     payload = [{"id": f"an-{i}", "channel": a["channel"], "year": a["year"],
                 "growthPct": a["growth_pct"]} for i, a in enumerate(anomalies)]
@@ -988,7 +1069,9 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     for r in card.rows:
         r.rationale = ai.get(r.id) or _stat_fallback_rationale(r)
     st.stat_scorecard = card
-    eng.produce(st, "a-stat-tests", body=stat_sheet(card), state="confirmed", agent="data")
+    stat_body = stat_sheet(card)
+    stat_body["sheets"].append(reconcile.build(st).sheet())
+    eng.produce(st, "a-stat-tests", body=stat_body, state="confirmed", agent="data")
 
     def _label(r: StatScoreRow) -> str:
         return f"{r.l4 or r.l3} · {r.indicator}".strip(" ·")
@@ -1062,61 +1145,86 @@ async def stat_screening(eng: Engine, st: ProjectState, task: dict) -> None:
     eng.add_findings(st, task["id"], findings)
 
 
-async def ols_search_and_fit(eng: Engine, st: ProjectState, task: dict) -> None:
-    """2.5 — search each L4 factor's candidate indicators and fit the winner.
+async def fit_models(eng: Engine, st: ProjectState, task: dict) -> None:
+    """2.5 — fit one OLS per channel × product, with every surviving variable in it.
 
-    The design (02-data-agent §2.34) is a per-L4 indicator search, not a manual
-    variable pick: for each factor the AI tries its candidate indicators across
-    repeated OLS fits and keeps the choice that lands the factor in its Knowledge
-    ROI / Contribution range (maximising the in-range factor count, tie-broken on
-    R²), under a fit budget. The single response (Y) comes from the 2.1 Metrics
-    Type; transforms/controls scale to the series length. The chosen selection is
-    written to ``st.ols_config`` (so the ledger, 2.6 and 3.2 all read the same
-    resolved selection), then fitted and rendered as the ``olsTree`` for the d-2.5
-    review. Nothing is invented — every number is computed or reused from 2.4.
+    N channels × M products = N×M regressions (2026-07-27). Each one takes the whole
+    driver universe that survived mapping, quality, sign-off and statistical
+    screening and puts it in the model at once: the question the artifact answers is
+    "what did each variable do to Y in this cell", not "which combination of
+    indicators reads best". The per-L4 indicator search that used to answer the
+    second question — up to 96 trial fits, keeping whichever assignment landed the
+    most factors inside a Knowledge band — is gone; a benchmark is now something a
+    result is compared against, never something the variable set is tuned towards.
+
+    The response (Y) comes from the 2.1 Metrics Type; transforms/controls scale to
+    the series length. The selection is written to ``st.ols_config`` (so the ledger,
+    2.6 and 3.2 all read the same resolved selection), then fitted and rendered as
+    the ``olsTree`` for the d-2.5 review. Nothing is invented — every number is
+    computed or reused from 2.4.
+
+    A model object that cannot be fitted (too few months, no usable driver, more
+    variables than observations) reports its own error on its own card and the
+    other N×M-1 carry on.
 
     The step emits its own stages as activity events so the Build Process shows the
-    work — aggregate, enumerate, search, refit, AI benchmark review, summary —
+    work — enumerate, fit, AI benchmark review, AI model summaries, summary —
     rather than a single opaque "2.5 ran" line."""
-    from app.agents import ols_benchmark
+    from app.agents import ols_benchmark, ols_scorecard, ols_summary
     from app.agents.dataset_cache import model_df, model_objects
+    from app.agents.model_objects import object_label, skipped_objects
+    from app.agents.ols_review import build_ols_proposal
 
     tid = task["id"]
 
-    # 1 · the data the model is fitted on.
+    # 1 · the data the models are fitted on — assembled, not aggregated.
     df = model_df(st)
     months = int(df["month"].nunique()) if not df.empty and "month" in df.columns else 0
     metrics = int(df["metric"].nunique()) if not df.empty and "metric" in df.columns else 0
     objs = model_objects(st)
     eng.emit(st, "data", "info",
-             f"Aggregated the long table to {len(objs) or 0} national total model "
-             f"({len(df)} rows · {months} months · {metrics} indicators).", tid)
-
-    # 2 · what survived the earlier layers and is therefore searchable.
-    def on_pass(info: dict) -> None:
+             f"Assembled long table: {len(df)} rows · {months} months · {metrics} indicators "
+             f"→ {len(objs)} model object(s), one per channel × product.", tid)
+    skipped = skipped_objects(df)
+    if skipped:
         eng.emit(st, "data", "info",
-                 f"Search pass {info['pass']}: {info['fits']} trial regression(s), "
-                 f"{info['swaps']} indicator swap(s) improved the model "
-                 f"(in-range {info['inRange']} · correct paid-driver signs {info['signed']} "
-                 f"· R²={info['r2']:.3f}).", tid)
+                 f"{len(skipped)} channel × product cell(s) carry a response but no drivers "
+                 f"and cannot be modeled: {', '.join(object_label(o) for o in skipped[:5])}"
+                 + (f" +{len(skipped) - 5} more" if len(skipped) > 5 else "") + ".", tid)
 
-    cfg, trace = build_ols_search(st, on_pass=on_pass)
+    # 2 · every variable that survived the earlier layers goes into its model.
+    cfg = build_ols_proposal(st)
+    n_locked = sum(1 for c in cfg.x_candidates if c.locked)
+    n_open = len(cfg.x_candidates) - n_locked
+    n_ticked = sum(1 for c in cfg.x_candidates if c.selected)
     eng.emit(st, "data", "info",
-             f"Enumerated {trace.get('candidates', 0)} candidate indicator(s) across "
-             f"{trace.get('l4Searched', 0)} factor(s) that survived mapping, quality, "
-             f"sign-off and statistical screening.", tid)
+             f"Enumerated {len(cfg.x_candidates)} candidate indicator slot(s) across the "
+             f"model objects; {n_open} survived mapping, quality, sign-off and statistical "
+             f"screening. No search and no pre-selection — {n_ticked} enter their model at "
+             f"once"
+             + (f"; {n_open - n_ticked} sit beyond what their object's month count can "
+                f"identify and are left for the human to tick." if n_open > n_ticked
+                else "."), tid)
 
-    # 3 · the winning setup, refitted and rendered.
+    # 3 · fit and render.
     st.ols_config = cfg
     body, prefit, flagged = build_ols_review(st, eng=eng, task_id=tid)
-    fit = next((o for o in body.get("objects", []) if not o.get("error")), {})
-    eng.emit(st, "data", "info",
-             "Best model refit: "
-             + (f"R²={fit.get('r2'):.3f} · adj R²={fit.get('adjR2'):.3f} · "
-                f"{fit.get('nObs')} obs · {fit.get('drivers')} drivers · "
-                f"baseline {fit.get('baselinePct')}%."
-                if fit.get("r2") is not None else "the fit produced no usable model object."),
-             tid)
+    fitted = [o for o in body.get("objects", []) if not o.get("error")]
+    failed = [o for o in body.get("objects", []) if o.get("error")]
+    if fitted:
+        best = max(fitted, key=lambda o: o.get("r2") if o.get("r2") is not None else -1)
+        eng.emit(st, "data", "info",
+                 f"Fitted {len(fitted)} of {len(body.get('objects', []))} model(s). Best: "
+                 f"{best.get('label') or best.get('object')} R²={best.get('r2')} · "
+                 f"{best.get('nObs')} obs · {best.get('drivers')} drivers · "
+                 f"{best.get('dfRemaining')} residual df.", tid)
+    else:
+        eng.emit(st, "data", "info", "No model object produced a usable fit.", tid)
+    if failed:
+        eng.emit(st, "data", "info",
+                 f"{len(failed)} model(s) could not be fitted: "
+                 + "; ".join(f"{o.get('label') or o.get('object')} — {o.get('error')}"
+                             for o in failed[:3]) + ".", tid)
 
     # 4 · the AI reads each fitted factor against its Knowledge band.
     in_model = [r for r in body.get("tree", []) if r.get("inModel")]
@@ -1141,11 +1249,36 @@ async def ols_search_and_fit(eng: Engine, st: ProjectState, task: dict) -> None:
              + ("" if ai_written else " (computed readout — no language model configured)")
              + ".", tid)
 
-    body["search"] = trace
+    # 5 · the AI summarises each model: its key indicators and how to read it.
+    rows_by_object: dict[str, list[dict]] = {}
+    for r in in_model:
+        rows_by_object.setdefault(str(r.get("object", "")), []).append(r)
+    summaries = await ols_summary.summarize_models(body.get("objects", []), rows_by_object)
+    for o in body.get("objects", []):
+        s = summaries.get(str(o.get("object", "")))
+        if s:
+            o["aiSummary"] = s["summary"]
+            o["aiKeyDrivers"] = s["keyDrivers"]
+    ai_models = sum(1 for s in summaries.values() if s.get("ai"))
+    eng.emit(st, "data", "info",
+             f"Summarised {len(summaries)} model(s) — key indicators and how each fit reads"
+             + ("" if ai_models else " (computed readout — no language model configured)")
+             + ".", tid)
+
+    # 6 · the review sheet 2.5d rules on — the AI's accept/reject per factor, in
+    #     the same shape 2.2 and 2.4 hand their reviewer. Built after the benchmark
+    #     verdicts land so the recommendation can read them.
+    st.ols_scorecard = ols_scorecard.build_scorecard(st, body)
+    card = ols_scorecard.summary(st)
+    eng.emit(st, "data", "info",
+             f"Proposed a verdict for {card['total']} fitted factor(s): "
+             f"{card['accepted']} accept, {card['rejected']} reject. Review and adjust "
+             f"them at 2.5d before confirming the selection.", tid)
+
     eng.produce(st, "a-ols-test", body=body, state="confirmed", agent="data")
     eng.set_analysis(st, "prefit", prefit)
     eng.set_analysis(st, "ols_flagged", flagged)
-    eng.set_analysis(st, "ols_search", trace)
+    eng.set_analysis(st, "ols_summaries", summaries)
     # Human-readable warning strings reused by the 2.6 funnel.
     warnings = [f"{f['l4']} · {f['indicator']}" for f in flagged]
     eng.set_analysis(st, "selection_warnings", warnings[:20])
@@ -1154,21 +1287,43 @@ async def ols_search_and_fit(eng: Engine, st: ProjectState, task: dict) -> None:
     no_metric = summary.get("notInModel", 0)
     n_sel = sum(1 for c in cfg.x_candidates if c.selected)
     eng.emit(st, "data", "info",
-             f"Summary: {n_sel} indicator(s) adopted into the national model, "
-             f"{summary.get('inRange', 0)} inside their Knowledge band, "
+             f"Summary: {n_sel} indicator slot(s) adopted across {len(fitted)} fitted "
+             f"model(s), {summary.get('inRange', 0)} inside their Knowledge band, "
              f"{len(flagged)} flagged for the sign-off gate.", tid)
     findings = [TaskFinding(
-        text=f"OLS indicator search: {trace.get('note', '')} "
-        f"{n_sel} indicator(s) chosen; {summary.get('inModel', 0)} entered the fit, "
+        text=f"OLS: {len(fitted)} of {len(body.get('objects', []))} channel × product model(s) "
+        f"fitted with every surviving variable in at once. {n_sel} indicator slot(s) adopted; "
+        f"{summary.get('inModel', 0)} entered a fit, "
         f"{summary.get('inRange', 0)} within their industry ROI / Contribution band, "
         f"{len(flagged)} flagged for review, {summary.get('noBenchmark', 0)} without a benchmark.",
         tone="flag" if flagged else "info", evidence=[EvidenceRef(artifactId="a-ols-test")])]
+    if failed:
+        findings.append(TaskFinding(
+            text=f"{len(failed)} channel × product model(s) could not be fitted: "
+            + "; ".join(f"{o.get('label') or o.get('object')} — {o.get('error')}"
+                        for o in failed[:5]) + ".",
+            tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
+    starved = n_open - n_ticked
+    if starved > 0:
+        findings.append(TaskFinding(
+            text=f"{starved} surviving indicator slot(s) were left out of their model "
+            "because the model object has too few months to estimate them — a degrees-of-"
+            "freedom limit, not a verdict on the indicator. They are listed unticked with "
+            "the reason on each; tick any of them in the OLS settings to spend the "
+            "residual df.",
+            tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
+    if skipped:
+        findings.append(TaskFinding(
+            text=f"{len(skipped)} channel × product cell(s) carry a response but no driver "
+            f"data, so no model was built for them: "
+            + ", ".join(object_label(o) for o in skipped[:5]) + ".",
+            evidence=[EvidenceRef(artifactId="a-ols-test")]))
     if cfg.data_source == "reference":
         findings.append(TaskFinding(
-            text="No published project data — the search ran against the reference dataset. "
+            text="No published project data — the fits ran against the reference dataset. "
             "Publish the project's own assets in the Data Engine for a real fit.",
             tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
-    red_flagged = [o for o, v in prefit.items() if v.get("red_flags")]
+    red_flagged = [object_label(o) for o, v in prefit.items() if v.get("red_flags")]
     if red_flagged:
         findings.append(TaskFinding(text=f"OLS red flags on: {', '.join(red_flagged)}.",
                                     tone="flag", evidence=[EvidenceRef(artifactId="a-ols-test")]))
@@ -1178,7 +1333,7 @@ async def ols_search_and_fit(eng: Engine, st: ProjectState, task: dict) -> None:
     # outside every Knowledge band. Recommend reducing the controls (fewer Fourier
     # terms / drop the trend in 2.5p) instead of dropping the flagged indicators.
     misspecified = [
-        o.get("object", "") for o in body.get("objects", [])
+        o.get("label") or o.get("object", "") for o in body.get("objects", [])
         if (o.get("baselinePct") is not None and o["baselinePct"] > 100)
         or any("Wrong-sign" in f or "wrong-sign" in f for f in (o.get("redFlags") or []))
     ]
@@ -1254,8 +1409,14 @@ async def assemble_master_data(eng: Engine, st: ProjectState, task: dict) -> Non
             rejected_rows.append(r)
     rejected = rejected_rows
     from app.agents.master_data import granularity_reference
+    # The complete factor tree, every row with its fate and where it was decided —
+    # what Business Understanding asked for, closed out. Everything else in this
+    # body is keyed on what the data delivered; this is keyed on what was wanted.
+    tree_rows = factor_link.factor_tree_verdicts(st)
     body = {
         "objects": obj_rows,
+        "factorTree": tree_rows,
+        "factorTreeSummary": factor_link.factor_tree_summary(tree_rows),
         # 2.32 reference deliverable · sheet 1: per-indicator model granularity
         # (渠道 scope × 区域 granularity; blank = not selected into the model). The
         # Data Station (sheet 2) is queried live via POST /master-data/data-station.

@@ -26,7 +26,7 @@ def build_engine() -> Engine:
     eng.register("2.3a", data.review_anomalies)      # Anomaly hypothesis cards
     # 2.3s is a human sign-off gate — no handler (cf. 2.2d).
     eng.register("2.4", data.stat_screening)         # Statistical Score
-    eng.register("2.5", data.ols_search_and_fit)     # OLS per-L4 indicator search + fit
+    eng.register("2.5", data.fit_models)             # one OLS per channel x product
     eng.register("2.6", data.assemble_master_data)   # Master Data feature wide table
     # d-2.5 freezes its dropped indicators onto the resolution, so a later re-fit
     # (which no longer flags them, having excluded them) cannot revive them.

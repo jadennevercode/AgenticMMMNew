@@ -43,6 +43,7 @@ from app.domain.models import (
     ArtifactInstance,
     FactorTree,
     OlsConfig,
+    OlsRangeScorecard,
     ProjectProfile,
     QualityScorecard,
     StatScorecard,
@@ -53,6 +54,13 @@ from app.store.state import ProjectState
 
 class ArtifactEditError(Exception):
     """A chat edit could not be drafted or applied (surfaced to the user)."""
+
+
+# How many times `apply_ols_config` may re-fit to settle the 2.5 verdicts against
+# the model they describe. Two passes is what convergence takes in practice (the
+# fit, then the fit without whatever the first pass rejected); the rest is a
+# backstop against a pathological oscillation, not an expected path.
+_SETTLE_REFITS = 4
 
 
 # ── model-backed re-render helpers (shared with the PUT routes in main.py) ─
@@ -81,9 +89,26 @@ def apply_factor_tree(st: ProjectState, model: FactorTree) -> None:
     st.analysis["factor_l4"] = sorted({r.l4 for r in active if r.l4})
 
 
+def _refuse_if_locked(st: ProjectState, what: str) -> None:
+    """Upstream verdicts are frozen once 2.5's selection is signed off.
+
+    Everything from 2.5 on was fitted against the verdicts as they stood then, so
+    an edit here would leave the model claiming a filtering chain that no longer
+    describes it — and nothing on screen would say the two had diverged.
+    """
+    from app.agents.ledger import downstream_locked
+
+    if downstream_locked(st):
+        raise ArtifactEditError(
+            f"{what} is locked: the OLS selection (d-2.5) is already signed off, and "
+            "2.5 / 2.6 were built on these verdicts. Re-open d-2.5 first, then edit "
+            "and re-run — changing it here would silently invalidate them.")
+
+
 def apply_quality_scorecard(st: ProjectState, model: QualityScorecard) -> None:
     from app.agents.data import accepted_metric_labels, quality_sheet
 
+    _refuse_if_locked(st, "The 2.2 data-quality scorecard")
     st.quality_scorecard = model
     art = st.artifact("a-quality-scorecard")
     if art is not None:
@@ -100,6 +125,7 @@ def apply_quality_scorecard(st: ProjectState, model: QualityScorecard) -> None:
 def apply_stat_scorecard(st: ProjectState, model: StatScorecard) -> None:
     from app.agents.stat_scoring import accepted_stat_labels, stat_sheet
 
+    _refuse_if_locked(st, "The 2.4 statistical scorecard")
     st.stat_scorecard = model
     art = st.artifact("a-stat-tests")
     if art is not None:
@@ -123,19 +149,64 @@ def apply_ols_config(st: ProjectState, model: OlsConfig) -> None:
     resets 2.3 and everything downstream, which is far too destructive for a
     configuration tweak. Before Y is confirmed there is nothing to fit, so the
     config is just persisted.
+
+    Iterating is the point of this surface — but only until `d-2.5` is signed off.
+    After that, 2.6 and the master data are built on this exact selection, and
+    d-2.5 has pinned its own drops onto its resolution; re-fitting underneath them
+    would leave every one of those claims describing a model that no longer exists.
     """
+    _refuse_if_locked(st, "The 2.5 OLS setup")
+
     from app.agents.ols_review import build_ols_review
+    from app.agents.ols_scorecard import build_scorecard
 
     st.ols_config = model
     art = st.artifact("a-ols-test")
     if art is None:
         return
     fit = bool(model.y)  # no response confirmed yet → stay in the setup state
-    try:
-        body, prefit, flagged = build_ols_review(st, fit=fit)
-    except Exception as e:  # noqa: BLE001 — a bad setup must not 500 the editor
-        body, prefit, flagged = build_ols_review(st, fit=False)
-        body["note"] = f"The fit could not run with this setup: {e}"
+
+    def _render() -> tuple[dict, dict, list]:
+        try:
+            return build_ols_review(st, fit=fit)
+        except Exception as e:  # noqa: BLE001 — a bad setup must not 500 the editor
+            body, prefit, flagged = build_ols_review(st, fit=False)
+            body["note"] = f"The fit could not run with this setup: {e}"
+            return body, prefit, flagged
+
+    body, prefit, flagged = _render()
+    if fit:
+        # Refresh the 2.5d review sheet against the new fit, then settle.
+        #
+        # One pass is not enough, and the reason is structural: the fit is run on
+        # the selection as it stood, and the sheet is derived *from that fit* — so
+        # a newly out-of-range factor is rejected only after the model that
+        # produced it was already rendered. The artifact would then show a model
+        # containing variables its own verdicts reject, which is precisely the
+        # "the deliverable describes a model nobody fitted" failure this work is
+        # about. Re-fit until the reject set stops moving.
+        #
+        # The merge keeps every verdict the human has already made
+        # (`ols_scorecard.build_scorecard`), so this can never revert a reviewer's
+        # call — only settle the rows the AI still owns. It converges in one extra
+        # pass in practice; the cap is a backstop, not the expected path.
+        from app.agents.ols_scorecard import reject_pairs_by_object
+
+        # `used` is the reject set the current `body` was fitted under. Rebuild the
+        # sheet from it; if that yields the same set, the two agree and we stop.
+        used = reject_pairs_by_object(st)
+        for _ in range(_SETTLE_REFITS):
+            st.ols_scorecard = build_scorecard(st, body)
+            derived = reject_pairs_by_object(st)
+            if derived == used:
+                break
+            used = derived
+            body, prefit, flagged = _render()
+        else:
+            # Cap reached (oscillating verdicts). Keep the sheet describing the
+            # model actually rendered rather than leaving the two disagreeing.
+            st.ols_scorecard = build_scorecard(st, body)
+
     art.body = body
     art.version += 1
     art.edited_at_tick = st.tick
@@ -144,6 +215,30 @@ def apply_ols_config(st: ProjectState, model: OlsConfig) -> None:
         st.analysis["ols_flagged"] = flagged
         st.analysis["selection_warnings"] = [
             f"{f['l4']} · {f['indicator']}" for f in flagged][:20]
+
+
+def apply_ols_scorecard(st: ProjectState, model: OlsRangeScorecard) -> None:
+    """Persist the 2.5d accept/reject verdicts and re-fit.
+
+    Unlike 2.2 and 2.4 — where a disposition only changes what a later layer
+    inherits — a rejection here removes the variable from a model that has already
+    been fitted, so the remaining coefficients are no longer the ones on screen.
+    Re-fitting is the honest response, and it is what the reviewer is asking for
+    when they reject a variable.
+
+    The re-fit re-derives the sheet, which is where the merge earns its keep: the
+    rejected rows vanish from the new tree (they were excluded) and every row the
+    human ruled on must come back unchanged.
+    """
+    _refuse_if_locked(st, "The 2.5 range verdicts")
+
+    st.ols_scorecard = model
+    cfg = getattr(st, "ols_config", None)
+    if cfg is None:
+        return
+    # Route through apply_ols_config so there is exactly one re-fit path; it
+    # rebuilds the sheet from the new body, merging over what we just stored.
+    apply_ols_config(st, cfg)
 
 
 # Registry: artifact id -> how to read / revise / apply its backing model.

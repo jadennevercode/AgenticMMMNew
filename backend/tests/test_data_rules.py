@@ -100,6 +100,35 @@ def test_factor_range_match() -> None:
     assert dd is not None and dd.roi == (0.8, 1.3) and dd.contribution == (0.0, 1.5)
     assert match_factor_range("社媒").roi == (1.5, 6.0)
     assert match_factor_range("一个不存在的因子") is None
+    # A name that merely CONTAINS a library name is not that factor. Substring
+    # matching manufactured bands — `Connected TV` judged against `TV`, `OOH
+    # Billboards` against `OOH` — and a fabricated band is what a factor then gets
+    # flagged for and dropped over at the d-2.5 gate.
+    assert match_factor_range("Connected TV") is None
+    assert match_factor_range("Digital Display Ads") is None
+
+
+def test_reference_ranges_apply_only_to_the_reference_industry() -> None:
+    """The reference band library is one FMCG client's case — its own workbook says
+    so ("区间为Danone Mizone案例示例，新项目须替换"). Applying it to a skincare or
+    pharma project is not a lenient default: those factors get judged against
+    beverage ROIs, flagged, and offered for dropping at the d-2.5 gate."""
+    from app.agents.data_rules import REFERENCE_INDUSTRY, build_range_index
+
+    # The reference industry gets a band — from its Knowledge template if one is
+    # installed, else from the reference library. Which of the two is not the point.
+    hit = build_range_index(*REFERENCE_INDUSTRY).match("Digital Display", "曝光量")
+    assert hit is not None and hit.source in ("knowledge", "reference")
+
+    # Any other industry gets nothing rather than a beverage band.
+    assert build_range_index("beauty", "skincare").match("Digital Display", "曝光量") is None
+    assert build_range_index("pharma", None).match("TV", "GRP") is None
+
+    # The gate is on the fallback specifically: an empty index for a non-reference
+    # industry must not reach the library at all.
+    from app.agents.data_rules import RangeIndex
+    assert RangeIndex({}, {}, allow_reference=False).match("Digital Display", "x") is None
+    assert RangeIndex({}, {}, allow_reference=True).match("Digital Display", "x") is not None
 
 
 def test_in_range() -> None:
@@ -114,10 +143,11 @@ def test_range_index_precedence() -> None:
                           roi_text="2~3", contribution_text="1%~2%", source="knowledge")
     l4only = RangeBenchmark(roi=(9.0, 9.5), contribution=None,
                             roi_text="9~9.5", contribution_text="/", source="knowledge")
-    idx = RangeIndex({("冰柜", "自有冰柜"): pair}, {"冰柜": l4only})
+    idx = RangeIndex({("冰柜", "自有冰柜"): pair}, {"冰柜": l4only}, allow_reference=True)
     assert idx.match("冰柜", "自有冰柜") is pair            # exact pair wins
     assert idx.match("冰柜", "其他指标") is l4only          # l4-only fallback
-    # No knowledge match → falls back to the reference factor-ranges.json library.
+    # No knowledge match → falls back to the reference factor-ranges.json library,
+    # but ONLY when the project's industry is the one that library describes.
     ref = idx.match("Digital Display", "曝光量")
     assert ref is not None and ref.source == "reference" and ref.roi == (0.8, 1.3)
     # Nothing anywhere → None.

@@ -54,6 +54,10 @@ def data_intake_ready(st: ProjectState, asg: dict) -> bool:
 
 
 
+class GateBlocked(Exception):
+    """A human gate cannot close yet — surfaced to the user, not a server fault."""
+
+
 class Engine:
     def __init__(self) -> None:
         self.handlers: dict[str, Handler] = {}
@@ -233,7 +237,23 @@ class Engine:
                 return True
         return False
 
+    # The gate that closes each screening layer, and the layer whose per-row
+    # verdicts it is closing. A gate cannot close while any of them is still the
+    # AI's provisional bucket — see `ledger.provisional_rows`.
+    _VERDICT_GATES = {"d-2.2": "quality", "d-2.4": "statistical", "d-2.5": "range"}
+
     def resolve_decision(self, st: ProjectState, decision_id: str, option_id: str, note: str = "") -> None:
+        layer = self._VERDICT_GATES.get(decision_id)
+        if layer is not None:
+            from app.agents.ledger import provisional_rows
+
+            pending = provisional_rows(st, layer)
+            if pending:
+                shown = "; ".join(f"{l4} · {ind}" for l4, ind in pending[:5])
+                more = f" (+{len(pending) - 5} more)" if len(pending) > 5 else ""
+                raise GateBlocked(
+                    f"{len(pending)} indicator(s) still need a verdict before this gate "
+                    f"can close — decide keep or drop for each: {shown}{more}")
         for t in bp.TASKS:
             if t.get("decision", {}).get("id") == decision_id:
                 dr = st.decisions[decision_id]

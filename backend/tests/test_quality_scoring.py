@@ -189,3 +189,41 @@ def _run_all() -> None:
 
 if __name__ == "__main__":
     _run_all()
+
+
+def test_advisory_subcheck_cannot_disqualify_an_indicator() -> None:
+    """The regression the synthetic (non-reference) case exposed.
+
+    `_roll_up` already refuses to let an advisory subcheck drag a dimension down —
+    but the AI review had no such guard. Handed a 0 on the advisory "no L5–L8
+    deepdive dimensions" subcheck it scored the whole granularity dimension 0, which
+    zeroes the product Total and drops the indicator from the model. Every blocking
+    subcheck passed. On the reference case the L5–L8 columns are populated so it
+    never fired; on a dataset without drill-down columns it condemned all 20
+    indicators, 2.4 then inherited an empty set, and all 8 models failed to fit.
+    """
+    from app.agents.data import _guard_dimension
+    from app.agents.quality_scoring import SubScore, roll_up_quality
+
+    subs = [
+        SubScore("granularity.time", "granularity", "Time granularity", 1.0,
+                 "Monthly or finer.", True, True),
+        SubScore("granularity.model", "granularity", "Model granularity", 1.0,
+                 "Region × channel detail.", True, False),
+        SubScore("granularity.drilldown", "granularity", "Drilldown granularity", 0.0,
+                 "No L5–L8 deepdive dimensions.", True, False),
+    ]
+    res = roll_up_quality(subs)
+    assert res.granularity == 1.0, "the deterministic rollup already ignores advisory subchecks"
+
+    # The AI tries to zero it off the advisory evidence — the guard holds it at 0.5.
+    assert _guard_dimension("granularity", 0.0, res) == 0.5
+    # A genuine blocking failure is still allowed to disqualify.
+    blocked = roll_up_quality([
+        SubScore("granularity.time", "granularity", "Time granularity", 0.0,
+                 "Coarser than monthly.", True, True),
+    ])
+    assert _guard_dimension("granularity", 0.0, blocked) == 0.0
+    # And a non-zero AI score is passed through untouched.
+    assert _guard_dimension("granularity", 0.5, res) == 0.5
+    print("✓ an advisory subcheck cannot disqualify an indicator through the AI review")

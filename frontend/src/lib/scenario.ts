@@ -251,7 +251,7 @@ export const TASKS: TaskBlueprint[] = [
   {
     id: '2.2', name: 'Data Quality Score', agent: 'data', stage: 's2', class: 'A',
     summary: 'The AI scores every L1×L2×L3×L4×metric on the four dimensions (consistency / completeness / granularity / accuracy, each 0 / 0.5 / 1) with a note, grounded in the rubric + computed evidence.',
-    how: 'AI applies the standing rubric to the computed data evidence, assigning each dimension 0 / 0.5 / 1; the verdict (weakest dimension governs) is reviewed by a human next.',
+    how: "AI applies the standing rubric to the computed data evidence, assigning each dimension 0 / 0.5 / 1. The evidence is read off the assembled data exactly as it was published — nothing is aggregated first, so the granularity, caliber and completeness checks see the real region, channel and source spread rather than a rolled-up series that made four of the ten subchecks unable to fail. The verdict (weakest dimension governs) is reviewed by a human next, and applies to the indicator everywhere it is used.",
     basisNote: '校验标准 + 数据资产证据。',
     workNote: 'AI 逐指标四维评分；Total = 最弱维度。',
     dependsOn: ['2.1d'], duration: 3, produces: ['a-quality-scorecard'],
@@ -324,9 +324,9 @@ export const TASKS: TaskBlueprint[] = [
   {
     id: '2.4', name: 'Statistical Score', agent: 'data', stage: 's2', class: 'A',
     summary: 'Variability, correlation and collinearity tests per indicator (CV / Pearson / VIF); the combined score decides model entry. Indicators already rejected at 2.2 or 2.3 are not scored — that call is settled.',
-    how: 'CV, Pearson and VIF are each banded 0 / 0.5 / 1 and multiplied into an entry score (Total > 0.5 good, 0 < Total ≤ 0.5 acceptable, 0 dropped); the AI then writes the case for or against each borderline indicator. Excluding the already-rejected ones is not bookkeeping — VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.',
+    how: "CV, Pearson and VIF are each banded 0 / 0.5 / 1 and multiplied into an entry score (Total > 0.5 good, 0 < Total ≤ 0.5 acceptable, 0 dropped); the AI then writes the case for or against each borderline indicator. The tests run on a panel — one row per (model object, month) — so an indicator is measured across every channel × product the model will be fitted on, instead of on a single aggregated series. Excluding the already-rejected ones is not bookkeeping: VIF is computed across the whole set, so dead indicators would inflate the collinearity of the live ones.",
     basisNote: '统计筛选规则 + 上游裁决（2.2 质量 / 2.3 签核）。',
-    workNote: 'CV / Pearson / VIF computed on the indicators still in play.',
+    workNote: "CV / Pearson / VIF computed over the channel x product panel.",
     dependsOn: ['2.3s'], duration: 2, produces: ['a-stat-tests'],
   },
   {
@@ -352,21 +352,21 @@ export const TASKS: TaskBlueprint[] = [
       ],
     },
   },
-  /* ── 2.5 OLS indicator search — a single automated multi-fit search (寻优)
-        that replaces the former five-step manual config. The AI searches each
-        L4's candidate indicators over repeated fits, keeping the one that lands
-        the factor in its Knowledge range; the human reviews at the d-2.5 gate.
-        The single Y comes from 2.1 Metrics Type; params scale to length. ── */
+  /* ── 2.5 OLS regression — one fit per (channel × product) model object, each
+        taking that object's whole surviving driver universe at once. The per-L4
+        indicator search (寻优) is gone (2026-07-27): a Knowledge band is compared
+        against, never tuned towards. The human reviews at the d-2.5 gate and can
+        untick + re-fit. Y comes from 2.1 Metrics Type; params scale to length. ── */
   {
-    id: '2.5', name: 'OLS indicator search', agent: 'data', stage: 's2', class: 'M',
-    summary: 'Search each L4 factor’s candidate indicators over repeated OLS fits for the model that lands the most factors inside their industry ROI / Contribution ranges — an automated selection, not a manual variable pick.',
-    how: 'Six steps, each traced in the Build process: (1) aggregate the long table to one national total model; (2) enumerate every candidate indicator that survived mapping, quality, sign-off and statistical screening, grouped by factor; (3) search — for each factor try its candidates across repeated regressions, keeping the assignment that lands the most factors inside their Knowledge ROI / Contribution range, then the most paid drivers carrying the right sign, then the best R²; (4) refit the winning setup and record every trial’s coefficient, significance, ROI and contribution; (5) the AI reads each fitted factor against its Knowledge band and says whether the result is credible, not just whether it is inside; (6) summarise what was adopted and what is flagged. The single response (Y) is the one you tagged at 2.1 Metrics Type; transforms and controls scale to the series length. You review the chosen selection at the gate — switch any factor’s indicator and re-fit if you disagree.',
+    id: '2.5', name: 'OLS regression per channel × product', agent: 'data', stage: 's2', class: 'M',
+    summary: "Fit one OLS per channel × product with every surviving variable in it at once, then compare each factor's ROI / Contribution against its industry range — a reported result, not a tuned selection.",
+    how: "Five steps, each traced in the Build process: (1) read the assembled long table and enumerate its model objects — one per channel × product that carries both a response and drivers, so N channels and M products give N×M models; (2) enumerate every candidate indicator that survived mapping, quality, sign-off and statistical screening — all of them enter their model, with no search and no pre-selection, so each coefficient is what that variable did alongside all the others; (3) fit every model object, one regression each, and record each variable's coefficient, significance, ROI and contribution (a cell with too few months to identify its variables reports its own error and the rest carry on); (4) the AI reads each fitted factor against its Knowledge band and says whether the result is credible, not just whether it is inside, then summarises each model — the indicators that carry it and what qualifies it; (5) summarise what was adopted and what is flagged. The response (Y) is the one you tagged at 2.1 Metrics Type; transforms and controls scale to the series length. Review at the gate — untick any variable and re-fit if you disagree.",
     basisNote: '行业经验 ROI / 贡献区间（知识库）+ 2.4 统计得分 + 数据可用性。',
-    workNote: 'OLS search complete; per-factor indicators chosen and fitted.',
+    workNote: "One OLS fitted per channel × product; every surviving variable in the model.",
     dependsOn: ['2.4d'], duration: 3, produces: ['a-ols-test'],
     decision: {
       id: 'd-2.5', kind: 'choice', title: 'Confirm indicator selection',
-      question: "The OLS search checked each factor's ROI / contribution against its knowledge-base range. Confirm the selection, drop the flagged indicators, or revisit the business hypotheses?",
+      question: "The OLS fits checked each factor's ROI / contribution against its knowledge-base range. Confirm the selection, drop the flagged indicators, or revisit the business hypotheses?",
       evidence: [
         { artifactId: 'a-ols-test', note: 'Per-factor ROI / contribution vs knowledge ranges' },
         { artifactId: 'a-business-validation', note: 'Business hypotheses' },

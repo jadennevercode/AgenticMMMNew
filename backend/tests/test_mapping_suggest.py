@@ -8,21 +8,25 @@ from __future__ import annotations
 
 from app.dataeng import mapping_suggest as ms
 from app.dataeng.mapping import resolve_factor_map
-from app.domain.models import FactorRow, FactorTree, Indicator
+from app.domain.models import FactorRow, FactorTree, IndicatorCoverage
 from app.store.state import danone_meta, initial_state
 
 
+# The supply side is `indicator_coverage`, not the legacy `indicators` catalog —
+# that one is drained by `heal_state` and publish stopped writing it, so a fixture
+# built on it produces a state the resolver cannot see and every bind returns
+# False for want of a coverage record.
 def _ind(iid: str, metric: str, *, l3: str = "", l4: str = "", unit: str = "",
-         start: str = "202301", end: str = "202412") -> Indicator:
-    return Indicator(id=iid, metric=metric, l3=l3, l4=l4, unit=unit,
-                     assetId="a1", assetName="Asset One",
-                     coverageStart=start, coverageEnd=end, rows=100)
+         start: str = "202301", end: str = "202412") -> IndicatorCoverage:
+    return IndicatorCoverage(id=iid, treeRowId="", metric=metric, l3=l3, l4=l4,
+                             unit=unit, assetId="a1", assetName="Asset One",
+                             coverageStart=start, coverageEnd=end, rows=100)
 
 
-def _state(rows: list[FactorRow], inds: list[Indicator]):
+def _state(rows: list[FactorRow], covs: list[IndicatorCoverage]):
     st = initial_state(danone_meta())
     st.factor_tree = FactorTree(rows=rows)
-    st.indicators = inds
+    st.indicator_coverage = covs
     return st
 
 

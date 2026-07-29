@@ -64,10 +64,17 @@ def resolve_coverage(st: ProjectState) -> dict[str, list[IndicatorCoverage]]:
     covs = list(getattr(st, "indicator_coverage", None) or [])
     out: dict[str, list[IndicatorCoverage]] = {r.id: [] for r in rows}
 
+    by_path_metric: dict[tuple, str] = {}
     by_path: dict[tuple, str] = {}
     by_l3_metric: dict[tuple, str] = {}
     for r in rows:
-        by_path.setdefault((_norm(r.l1), _norm(r.l2), _norm(r.l3), _norm(r.l4)), r.id)
+        path = (_norm(r.l1), _norm(r.l2), _norm(r.l3), _norm(r.l4))
+        by_path.setdefault(path, r.id)
+        if r.indicator:
+            # A row is its path *and* its indicator: several rows commonly share
+            # one L1–L4. Matching on the path alone hands whichever sibling was
+            # seen first every metric under it.
+            by_path_metric.setdefault((*path, _norm(r.indicator)), r.id)
         if r.l3 and r.indicator:
             by_l3_metric.setdefault((_norm(r.l3), _norm(r.indicator)), r.id)
 
@@ -79,8 +86,11 @@ def resolve_coverage(st: ProjectState) -> dict[str, list[IndicatorCoverage]]:
     for c in covs:
         if c.id in claimed or c.tree_row_id:
             continue
-        hit = (by_path.get((_norm(c.l1), _norm(c.l2), _norm(c.l3), _norm(c.l4)))
-               or (by_l3_metric.get((_norm(c.l3), _norm(c.metric))) if c.metric else None))
+        path = (_norm(c.l1), _norm(c.l2), _norm(c.l3), _norm(c.l4))
+        metric = _norm(c.metric) if c.metric else ""
+        hit = ((by_path_metric.get((*path, metric)) if metric else None)
+               or by_path.get(path)
+               or (by_l3_metric.get((_norm(c.l3), metric)) if metric else None))
         if hit is not None:
             out[hit].append(c)
             claimed.add(c.id)
@@ -165,14 +175,30 @@ def declared_indicators(st: ProjectState) -> list[Indicator]:
     return [_declared(r, _primary(resolved.get(r.id, []))) for r in active_rows(st)]
 
 
+def response_coverages(st: ProjectState) -> list[IndicatorCoverage]:
+    """The published metrics that ARE the response (``metric_type == "Y"``).
+
+    The response is not a driver, so no factor tree derived from an industry
+    template declares it: the beverage template is entirely 生意基本盘 /
+    消费者需求驱动 / 渠道成交驱动 / 促销优惠, all of them things that *explain*
+    sales. Sales itself therefore matched nothing and was offered up for adoption
+    as "data nobody asked for" — the one series the whole model is built on.
+    """
+    return [c for c in (getattr(st, "indicator_coverage", None) or [])
+            if str(c.metric_type).strip().upper() == "Y"]
+
+
 def orphan_indicators(st: ProjectState) -> list[Indicator]:
     """Supplied metrics reaching no factor row — awaiting adoption or dismissal.
 
     A coverage matched to a row by `resolve_coverage` is NOT an orphan even
     without an explicit `tree_row_id`; otherwise the same record would appear as
-    both a supplied factor and an unclaimed metric.
+    both a supplied factor and an unclaimed metric. Neither is the response:
+    adopting sales *into* the factor tree would make the model's own dependent
+    variable one of its explanatory factors.
     """
     supplied = {c.id for covs in resolve_coverage(st).values() for c in covs}
+    supplied |= {c.id for c in response_coverages(st)}
     return [_orphan(c) for c in (getattr(st, "indicator_coverage", None) or [])
             if c.id not in supplied]
 

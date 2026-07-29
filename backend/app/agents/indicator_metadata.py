@@ -28,14 +28,30 @@ INDICATOR_META_RULE_VERSION = "1.0"
 
 # The KPI (response) and spending gates are the exact rules the OLS tagging has
 # always used — kept verbatim so model_role() reproduces the legacy Y/spending/X.
-_KPI_RE = re.compile(r"本品.*(销量|销售)|kpi|本品月度销量|offtake|本品.*volume", re.I)
+# `本品` ("our product") is how the reference case names its own KPI, and for a
+# while it was the only way an indicator could be recognised as one: a client whose
+# KPI reads `Net Sales Units`, `Sell-out Volume` or `Bookings` matched nothing, so
+# the volume-vs-value preference that picks the default response never engaged and Y
+# was decided by month coverage alone. The English sell-out vocabulary below is the
+# same concept without the reference case's possessive prefix.
+_KPI_RE = re.compile(
+    r"本品.*(销量|销售)|本品月度销量|本品.*volume"
+    r"|kpi|offtake|sell[-\s]?out|sell[-\s]?through"
+    r"|\bnet sales\b|\bgross sales\b|\bsales (volume|value|units?|revenue)\b"
+    r"|\bunits? sold\b|\bsales$",
+    re.I)
 _VALUE_RE = re.compile(r"销售额|销额|金额|收入|value|revenue|gmv|营业额", re.I)
 _SPEND_RE = re.compile(r"花费|费用|投放|金额|spend|promotion|投入|预算|budget", re.I)
 # Finer buckets for the non-KPI / non-spending remainder (semantic only — every one
 # of these maps to the OLS driver role X, so this never perturbs the fit).
-_RATE_RE = re.compile(r"率|占比|渗透|覆盖|ndwd|distribution|percentage|percent|ratio|%", re.I)
+# `share` matters beyond naming: a rate aggregates by AVERAGE, everything else by
+# SUM, so a "Shelf Share" classified as `other` gets summed across regions into a
+# number with no meaning — and that number is what CV / Pearson / VIF then score.
+_RATE_RE = re.compile(
+    r"率|占比|渗透|覆盖|ndwd|distribution|percentage|percent|ratio|%|\bshare\b|\bsov\b|\bsos\b",
+    re.I)
 _INDEX_RE = re.compile(r"指数|index|价格指数|tps|情感|sentiment|score", re.I)
-_COUNT_RE = re.compile(r"门店|家数|铺货|网点|store|count|数量|个数|条数|次数", re.I)
+_COUNT_RE = re.compile(r"门店|家数|铺货|网点|store|count|数量|个数|条数|次数|\bdoors?\b|\boutlets?\b|\bevents?\b|\bposts?\b|\bmembers?\b", re.I)
 
 
 @dataclass(frozen=True)

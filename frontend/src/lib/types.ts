@@ -309,7 +309,12 @@ export interface ValidationChartAnalysis {
 export type OlsRowStatus = 'inRange' | 'review' | 'noBenchmark' | 'notInModel' | 'dropped' | 'notMapped'
 export type OlsRangeStatus = 'in' | 'out' | 'none'
 export interface OlsObjectSummary {
+  /** Machine id of the model object — `"{channelType}::{brand}"`, or a bare
+   *  channel type on data with no product column. Opaque: never split it for
+   *  display, use `label`. */
   object: string
+  /** The id as a reader sees it: `"MT · Mizone"`. */
+  label?: string
   nObs: number
   drivers: number
   r2: number | null
@@ -324,6 +329,13 @@ export interface OlsObjectSummary {
   roiUnit?: string
   dfRemaining?: number | null
   controls?: string[]
+  /** How this model reads: the AI's 2-4 sentence account of what carries it and
+   *  what qualifies it, grounded in the computed coefficients. Falls back to a
+   *  deterministic reading of the same numbers when no LLM is configured. */
+  aiSummary?: string
+  /** The indicators that carry this model — computed (significant drivers ranked
+   *  by contribution), not the model's opinion. */
+  aiKeyDrivers?: string[]
 }
 export interface OlsRowResult {
   object: string
@@ -334,7 +346,12 @@ export interface OlsRowResult {
   contribution: number | null
 }
 export interface OlsTreeRow {
+  /** Unique per row. Carries the factor row's own id: two factor rows can collect
+   *  the same metric under the same L4, so l4+metric is not an identity. */
   key: string
+  /** The model object this verdict belongs to. Every row is one factor's verdict in
+   *  ONE model, so with N×M models each factor appears N×M times. */
+  object: string
   treeRowId: string
   l1: string
   l2: string
@@ -354,6 +371,10 @@ export interface OlsTreeRow {
   /** Set only when the ROI borrowed its L4's spend as the denominator (the
    *  indicator itself is not a spend metric) — e.g. `÷ 站内投流 spend (Spending)`. */
   roiBasis?: string
+  /** What the contribution was measured against — `vs zero` for spend, or
+   *  `vs its lowest month (x)` for a level driver like a price or a distribution
+   *  rate, which never goes to zero and so cannot be decomposed from it. */
+  contributionBasis?: string
   roiRange: string
   contributionRange: string
   rangeSource: 'knowledge' | 'reference' | ''
@@ -366,50 +387,6 @@ export interface OlsTreeRow {
    *  `roiStatus` / `contributionStatus` — it never replaces the computed check. */
   aiVerdict?: '' | 'consistent' | 'questionable' | 'implausible' | 'noBenchmark'
   aiRationale?: string
-}
-/** One trial regression the 2.5 indicator search ran. */
-export interface OlsSearchTrial {
-  trial: number
-  seed: boolean
-  triedFor: string
-  alternate: string
-  l4: string
-  indicator: string
-  r2: number
-  coef: number | null
-  tValue: number | null
-  pValue: number | null
-  significant: boolean | null
-  signExpected: boolean
-  signCorrect: boolean
-  roi: number | null
-  contribution: number | null
-  roiStatus: OlsRangeStatus
-  contributionStatus: OlsRangeStatus
-  roiRange: string
-  contributionRange: string
-  objectiveInRange: number
-  objectiveSigned: number
-}
-export interface OlsSearchFactor {
-  l4: string
-  chosen: string
-  candidates: string[]
-  status: OlsRangeStatus
-}
-/** What the per-L4 indicator search tried, and what won. */
-export interface OlsSearchTrace {
-  fits: number
-  l4Searched: number
-  candidates: number
-  swaps: number
-  inRange: number
-  signedOk?: number
-  r2: number
-  factorsSkipped?: number
-  trials: OlsSearchTrial[]
-  perFactor: OlsSearchFactor[]
-  note: string
 }
 export interface OlsTreeSummary {
   total: number
@@ -436,8 +413,6 @@ export interface OlsTreeData {
   summary: OlsTreeSummary
   setup?: OlsSetupSummary
   note?: string
-  /** Present once 2.5 has run its per-L4 indicator search. */
-  search?: OlsSearchTrace | null
 }
 
 /**
@@ -502,6 +477,55 @@ export interface OlsConfig {
   xCandidates: OlsXCandidate[]
   params: OlsParams
   proposedAt: string
+}
+
+/**
+ * 2.5's per-factor range verdict, reviewed at 2.5d. Mirrors
+ * backend/app/domain/models.py::OlsRangeRow.
+ *
+ * Binary on purpose — 2.2's `flag` and 2.4's `review` have no counterpart here,
+ * because 2.5 is the last layer before the master table and a middle state at
+ * that point is a variable entering the model with nobody having said yes.
+ */
+export type OlsRangeDisposition = 'accept' | 'reject'
+
+export interface OlsRangeRow {
+  id: string
+  object: string
+  treeRowId: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  metric: string
+  coef: number | null
+  tValue: number | null
+  pValue: number | null
+  significant: boolean | null
+  roi: number | null
+  contribution: number | null
+  roiRange: string
+  contributionRange: string
+  roiStatus: string
+  contributionStatus: string
+  rangeSource: string
+  status: string
+  flagReason: string
+  aiVerdict: string
+  aiRationale: string
+  /** The AI's recommendation. Keeps being recomputed on every re-fit. */
+  autoVerdict: OlsRangeDisposition
+  autoReason: string
+  /** The verdict that rules. `decidedBy: 'human'` pins it against re-fits. */
+  disposition: OlsRangeDisposition
+  decidedBy: 'ai' | 'human'
+  note: string
+}
+
+export interface OlsRangeScorecard {
+  rows: OlsRangeRow[]
+  generatedAt: string
 }
 
 /**
@@ -575,10 +599,56 @@ export interface MasterData {
   /** Per-object adopted/rejected indicators, each carrying its full verdict
    *  chain (spec §3.5) — Tab 2's per-channel breakdown. */
   byObject?: Record<string, { adopted: MasterDataObjectAdopted[]; rejected: MasterDataRejected[] }>
+  /** The COMPLETE factor tree from Business Understanding, every row carrying its
+   *  fate and the stage that decided it. Everything else here is keyed on what the
+   *  data delivered; this is keyed on what was asked for, so a factor nothing ever
+   *  supplied still appears instead of silently vanishing. */
+  factorTree?: FactorTreeVerdict[]
+  factorTreeSummary?: FactorTreeSummary
   note?: string
+}
+export type FactorVerdict = 'adopted' | 'rejected' | 'partial' | 'notSupplied' | 'notModeled'
+export interface FactorTreeVerdictObject {
+  object: string
+  adopted: boolean
+  rejectedAt: string
+  reason: string
+}
+export interface FactorTreeVerdict {
+  rowId: string
+  l1: string
+  l2: string
+  l3: string
+  l4: string
+  indicator: string
+  verdict: FactorVerdict
+  /** Set on the response row — it is measured, not explained. */
+  role?: string
+  /** The stage that rejected it, as id / task number / human label. */
+  rejectedAt: string
+  rejectedAtTask: string
+  rejectedAtLabel: string
+  reason: string
+  /** The metric labels that actually supplied this factor row. */
+  supplyingMetrics: string[]
+  /** Per model object, when the verdict differs between them. */
+  objects: FactorTreeVerdictObject[]
+}
+export interface FactorTreeSummary {
+  total: number
+  adopted: number
+  partial: number
+  rejected: number
+  notSupplied: number
+  notModeled: number
+  rejectedByLayer: Record<string, number>
 }
 /** 2.32 模型颗粒度参考表 row: a factor's model granularity. */
 export interface MasterGranularityRow {
+  /** "driver" | "response". The response is not a factor — no factor tree
+   *  declares the thing its factors explain — but it is part of the model input,
+   *  so it appears here as an adopted row with this role. */
+  role?: string
   l1: string
   l2: string
   l3: string
@@ -890,7 +960,8 @@ export interface TaskBlueprint {
 
 /** Panels a Process step can render inline (see components/project/ols/). */
 export type TaskPanelKind =
-  | 'ols-y' | 'ols-x' | 'ols-params' | 'quality-review' | 'stat-review' | 'anomaly-review'
+  | 'ols-y' | 'ols-x' | 'ols-params' | 'ols-factor-tree'
+  | 'quality-review' | 'stat-review' | 'anomaly-review'
 
 /**
  * 2.3a anomaly review — the AI hypothesizes a cause per detected anomaly and

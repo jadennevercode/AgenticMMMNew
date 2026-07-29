@@ -22,7 +22,7 @@ from app.agents.indicator_metadata import (
 from app.dataeng import indicators
 from app.domain.models import (
     DataAsset, DataAssetVersion, DbtNode, DbtSummary, EnumMapEntry, EnumViolation,
-    IndicatorCoverage, SchemaConformance,
+    FactorRow, IndicatorCoverage, SchemaConformance,
 )
 
 
@@ -554,17 +554,41 @@ def claim_published_metrics(st, asset: DataAsset, df: pd.DataFrame) -> list[Indi
     if "metric" not in df.columns:
         return []
 
-    # Factor-tree lookup: full L1–L4 path first, then L3-only as a looser anchor.
+    # Factor-tree lookup, most specific first. A factor row is identified by its
+    # path *and* its indicator — the tree routinely carries several rows per L1–L4
+    # (旺点促销 declares both 花费 and 执行门店数), so a path-keyed lookup is not a
+    # lookup at all: it silently keeps one arbitrary sibling and hands every metric
+    # under that path to it. On the reference tree that bound 温度 to the row
+    # declaring 降水量 and 竞品ND to the row declaring 竞品WD, marked them
+    # `boundBy="auto"`, and left the rows that actually declare those metrics
+    # looking unsupplied. Consult the indicator before falling back to the path.
     tree_rows = [r for r in (st.factor_tree.rows if getattr(st, "factor_tree", None) else [])
                  if r.status in indicators.ACTIVE_STATUSES]
-    by_path = {_norm_path(r.l1, r.l2, r.l3, r.l4): r for r in tree_rows}
-    by_l3 = {}
+    by_path_metric: dict[str, FactorRow] = {}
+    by_path: dict[str, FactorRow] = {}
+    by_l3_metric: dict[str, FactorRow] = {}
+    by_l3: dict[str, FactorRow] = {}
     for r in tree_rows:
+        path = _norm_path(r.l1, r.l2, r.l3, r.l4)
+        by_path.setdefault(path, r)
+        if r.indicator:
+            by_path_metric.setdefault(_norm_path(path, r.indicator), r)
         if r.l3:
             by_l3.setdefault(_norm_path(r.l3), r)
+            if r.indicator:
+                by_l3_metric.setdefault(_norm_path(r.l3, r.indicator), r)
 
     key_cols = [c for c in ("metric", "metric_type", "l1", "l2", "l3", "l4") if c in df.columns]
     period = df["month"] if "month" in df.columns else (df["year"] if "year" in df.columns else None)
+    # row id → the (normalised) metric that claimed it, so the coarse tiers cannot
+    # collapse several metrics onto one row. Seeded from the *other* assets'
+    # coverage, because publish runs per asset and a collision across two of them
+    # is the documented case (one factor supplied by several sources) only when
+    # they are the same metric.
+    claimed_metric: dict[str, str] = {}
+    for c in st.indicator_coverage:
+        if c.asset_id != asset.id and c.tree_row_id:
+            claimed_metric.setdefault(c.tree_row_id, _norm_path(c.metric))
     new: list[IndicatorCoverage] = []
     for keys, grp in df.groupby(key_cols, dropna=False):
         vals = dict(zip(key_cols, keys if isinstance(keys, tuple) else (keys,)))
@@ -573,9 +597,30 @@ def claim_published_metrics(st, asset: DataAsset, df: pd.DataFrame) -> list[Indi
             sub = period.loc[grp.index].dropna()
             if not sub.empty:
                 cov_start, cov_end = str(sub.min()), str(sub.max())
-        row = (by_path.get(_norm_path(vals.get("l1", ""), vals.get("l2", ""),
-                                      vals.get("l3", ""), vals.get("l4", "")))
-               or by_l3.get(_norm_path(vals.get("l3", ""))))
+        path = _norm_path(vals.get("l1", ""), vals.get("l2", ""),
+                          vals.get("l3", ""), vals.get("l4", ""))
+        metric = str(vals.get("metric", ""))
+        l3 = _norm_path(vals.get("l3", ""))
+        # Metric-aware tiers are one-to-one by construction. The coarse ones are
+        # not: they know the path (or only the L3) and nothing about which metric
+        # they are placing, so they will hand the same row to every metric under
+        # it — 促销优惠's 花费 and PPI both landed on one row, which then read as
+        # supplied while both metrics read as accounted for. A row already spoken
+        # for by a *different* metric is therefore off limits to them, and a
+        # metric they cannot place is an orphan, which 2.1 exists to resolve.
+        norm_metric = _norm_path(metric)
+        row = by_path_metric.get(_norm_path(path, metric))
+        if row is None:
+            for candidate in (by_path.get(path),
+                              by_l3_metric.get(_norm_path(l3, metric)),
+                              by_l3.get(l3)):
+                if candidate is None:
+                    continue
+                if claimed_metric.get(candidate.id, norm_metric) == norm_metric:
+                    row = candidate
+                    break
+        if row is not None:
+            claimed_metric.setdefault(row.id, norm_metric)
         # FND-001: classify the metric's semantic profile (type/unit/aggregation/
         # format) from its name once, at publish, so downstream reads metadata
         # rather than re-guessing. The OLS role (`metricType`) is left as-is.

@@ -86,9 +86,79 @@ def test_republish_replaces_only_this_asset() -> None:
     assert {c.asset_id for c in st.indicator_coverage} == {"a1", "a2"}
 
 
+def test_siblings_on_one_path_each_claim_their_own_indicator() -> None:
+    """The tree carries several rows per L1–L4, one per indicator.
+
+    A path-keyed lookup silently keeps one arbitrary sibling and hands it every
+    metric under that path. On the reference tree that bound 温度 to the row
+    declaring 降水量 — marked ``auto``, with the row that actually declares 温度
+    left looking unsupplied, and nothing downstream re-examining it.
+    """
+    from app.dataeng.dbt import service
+
+    st = ProjectState(project_id="_t")
+    st.factor_tree = FactorTree(rows=[
+        FactorRow(id="ft-rain", l1="BASE", l2="EXT", l3="品类趋势", l4="季节性趋势",
+                  indicator="降水量", source="template", status="baseline"),
+        FactorRow(id="ft-temp", l1="BASE", l2="EXT", l3="品类趋势", l4="季节性趋势",
+                  indicator="温度", source="template", status="baseline"),
+    ])
+    df = pd.DataFrame({
+        "metric": ["温度", "降水量"],
+        "metric_type": ["X", "X"],
+        "l1": ["BASE"] * 2, "l2": ["EXT"] * 2,
+        "l3": ["品类趋势"] * 2, "l4": ["季节性趋势"] * 2,
+        "month": [202201, 202201], "value": [21.0, 90.0],
+    })
+    covs = service.claim_published_metrics(st, _asset(), df)
+    bound = {c.metric: c.tree_row_id for c in covs}
+    assert bound["温度"] == "ft-temp", f"温度 claimed {bound['温度']!r}"
+    assert bound["降水量"] == "ft-rain", f"降水量 claimed {bound['降水量']!r}"
+
+
+def test_the_l3_fallback_will_not_hand_one_row_to_two_metrics() -> None:
+    """The coarse tier knows nothing about which metric it is placing.
+
+    On the drill's tree 促销优惠's 花费 and PPI both fell through to the row
+    declaring 满减活动花费 — the row then read as supplied and both metrics read
+    as accounted for, three claims deep. One of them may anchor there; the rest
+    are orphans, which is exactly what 2.1 exists to resolve.
+    """
+    from app.dataeng.dbt import service
+
+    st = ProjectState(project_id="_t")
+    st.factor_tree = FactorTree(rows=[
+        FactorRow(id="ft-mj", l1="促销优惠", l2="促销优惠", l3="促销优惠", l4="满减",
+                  indicator="满减活动花费", source="template", status="baseline"),
+    ])
+    df = pd.DataFrame({
+        "metric": ["花费", "PPI"],
+        "metric_type": ["spending", "X"],
+        "l1": ["促销优惠"] * 2, "l2": ["促销优惠"] * 2,
+        "l3": ["促销优惠"] * 2, "l4": ["促销优惠"] * 2,
+        "month": [202201, 202201], "value": [1.0, 2.0],
+    })
+    covs = service.claim_published_metrics(st, _asset(), df)
+    claimed = [c for c in covs if c.tree_row_id == "ft-mj"]
+    assert len(claimed) == 1, [(c.metric, c.tree_row_id) for c in covs]
+    assert len([c for c in covs if not c.tree_row_id]) == 1, "the rest are orphans"
+
+
+def test_metric_no_sibling_declares_still_claims_the_path() -> None:
+    """Preferring the indicator must not turn a known factor into an orphan."""
+    from app.dataeng.dbt import service
+
+    st = _st()
+    covs = service.claim_published_metrics(st, _asset(), _df(metric="TV曝光量"))
+    assert covs[0].tree_row_id == "ft-1", "an undeclared metric still anchors on its path"
+
+
 def main() -> int:
     for fn in (test_matching_mart_claims_the_row_and_makes_no_indicator,
                test_unmatched_metric_becomes_an_orphan,
+               test_siblings_on_one_path_each_claim_their_own_indicator,
+               test_the_l3_fallback_will_not_hand_one_row_to_two_metrics,
+               test_metric_no_sibling_declares_still_claims_the_path,
                test_human_pin_survives_republish,
                test_republish_replaces_only_this_asset):
         fn()

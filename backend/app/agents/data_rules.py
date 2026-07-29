@@ -324,8 +324,25 @@ def factor_ranges() -> dict[str, FactorRange]:
     return out
 
 
+# The reference range library is one client's case, by its own declaration: the
+# workbook's `purpose` field reads "区间为Danone Mizone案例示例，新项目须替换"
+# (ranges are Danone Mizone case examples; new projects must replace them). It is a
+# usable prior for the industry it came from and misinformation for any other, so
+# `RangeIndex` applies it only to that industry — see `REFERENCE_INDUSTRY`.
+REFERENCE_INDUSTRY = ("food-bev", "beverage")
+
+
 def match_factor_range(l4_name: str) -> FactorRange | None:
-    """Find the expected ranges for an L4 factor (exact, else normalised match)."""
+    """Find the expected ranges for an L4 factor — exact name match only.
+
+    Substring matching used to stand in for a real lookup and manufactured
+    benchmarks that were never in the library: `Connected TV` matched `TV`,
+    `OOH Billboards` matched `OOH`, `Digital Display Ads` matched `Digital Display`,
+    `价格变动率` matched `价格变动`. Each of those produced an ROI band a factor was
+    then judged against, flagged for, and could be dropped at the d-2.5 gate over —
+    all from a name that merely contained another name. A benchmark has to be a
+    benchmark for *this* factor or it is worse than none.
+    """
     if not l4_name:
         return None
     ranges = factor_ranges()
@@ -333,8 +350,7 @@ def match_factor_range(l4_name: str) -> FactorRange | None:
         return ranges[l4_name]
     norm = l4_name.strip().lower()
     for key, val in ranges.items():
-        kn = key.strip().lower()
-        if kn and (kn in norm or norm in kn):
+        if key.strip().lower() == norm:
             return val
     return None
 
@@ -377,9 +393,11 @@ class RangeIndex:
         self,
         pair_index: dict[tuple[str, str], RangeBenchmark],
         l4_index: dict[str, RangeBenchmark],
+        allow_reference: bool = False,
     ) -> None:
         self._pairs = pair_index
         self._l4 = l4_index
+        self._allow_reference = allow_reference
 
     def match(self, l4: str, indicator: str) -> RangeBenchmark | None:
         l4n, indn = _norm(l4), _norm(indicator)
@@ -393,7 +411,12 @@ class RangeIndex:
         for key, val in self._l4.items():
             if key and (key in l4n or l4n in key):
                 return val
-        # 3) reference fallback.
+        # 3) reference fallback — only for the industry the reference case IS.
+        #    Judging a pharma or auto factor against a beverage ROI band and then
+        #    offering to drop it at the d-2.5 gate is not a lenient default, it is a
+        #    wrong answer delivered with the same confidence as a right one.
+        if not self._allow_reference:
+            return None
         ref = match_factor_range(l4)
         if ref is not None:
             return RangeBenchmark(
@@ -419,17 +442,24 @@ def build_range_index(industry_l1: str | None, industry_l2: str | None) -> Range
     """Build a :class:`RangeIndex` from the industry Knowledge factor-tree template.
 
     Reads the ``factor_tree`` template for the project industry (l2 beats l1),
-    indexing every row that carries a parseable ROI or Contribution band. The
-    reference library is used per-lookup as the final fallback in
-    :meth:`RangeIndex.match`, so an empty template still yields reference ranges.
+    indexing every row that carries a parseable ROI or Contribution band.
+
+    The reference library is a per-lookup fallback in :meth:`RangeIndex.match`, but
+    **only when the project's industry is the one the reference case belongs to**
+    (:data:`REFERENCE_INDUSTRY`). Everyone else gets no benchmark rather than a
+    beverage benchmark — 2.5 renders those rows as ``noBenchmark``, which is the
+    honest state, and the way to give a project real bands is to maintain them in
+    the industry Knowledge pack.
     """
+    allow_ref = _norm(industry_l1) == REFERENCE_INDUSTRY[0] and (
+        not industry_l2 or _norm(industry_l2) == REFERENCE_INDUSTRY[1])
     pair_index: dict[tuple[str, str], RangeBenchmark] = {}
     l4_index: dict[str, RangeBenchmark] = {}
     # Lazy import to avoid an import cycle (templates → domain.models → agents).
     try:
         from app.store.templates import get_templates
     except Exception:
-        return RangeIndex(pair_index, l4_index)
+        return RangeIndex(pair_index, l4_index, allow_ref)
 
     tpl = None
     if industry_l1:
@@ -438,7 +468,7 @@ def build_range_index(industry_l1: str | None, industry_l2: str | None) -> Range
         except Exception:
             tpl = None
     if tpl is None:
-        return RangeIndex(pair_index, l4_index)
+        return RangeIndex(pair_index, l4_index, allow_ref)
 
     for row in tpl.factor_rows:
         roi_txt = str(getattr(row, "roi_range", "") or "")
@@ -457,4 +487,4 @@ def build_range_index(industry_l1: str | None, industry_l2: str | None) -> Range
             pair_index.setdefault((l4n, indn), bench)
         if l4n:
             l4_index.setdefault(l4n, bench)  # first-wins
-    return RangeIndex(pair_index, l4_index)
+    return RangeIndex(pair_index, l4_index, allow_ref)

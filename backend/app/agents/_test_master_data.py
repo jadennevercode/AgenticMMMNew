@@ -55,15 +55,12 @@ def test_master_table_acceptance():
     st = types.SimpleNamespace(project_id="mock-test", indicators=[])
 
     # No drops → all four indicators adopted; period key unique; NDWD averaged.
-    # The model is national since the 2026-07-23 de-channelization: `_adopted_df`
-    # returns the collapsed frame where every row is channel_type = TOTAL, so the
-    # slice asks for TOTAL, not a single channel. The rate/sum assertions below are
-    # the point of the test and are unchanged — they now run across all 3 channels
-    # × 2 geos instead of 1 channel × 2 geos.
+    # `_adopted_df` serves the assembled table since the 2026-07-27 change, so the
+    # slice asks for a real channel again. The rate/sum assertions below are the
+    # point of the test: they run across that channel's 2 geos.
     from app.agents.ledger import OBJECT_ANY, ModelSelection
-    from app.agents.national import TOTAL_OBJECT
     md.model_selection = lambda s: ModelSelection()
-    mt = md.master_table(st, brand=["b"], channel_type=[TOTAL_OBJECT], grain="month")
+    mt = md.master_table(st, brand=["b"], channel_type=["MT"], grain="month")
     periods = [r[0] for r in mt["rows"]]
     assert len(periods) == len(set(periods)), "period key must be unique per row"
     assert mt["kpi"] == "本品销量", "primary KPI should be Volume (matches OLS default Y)"
@@ -79,7 +76,7 @@ def test_master_table_acceptance():
     # drop, which every object inherits via `exclude_for` — so it excludes the
     # pair for MT here too, regardless of the concrete object key.
     md.model_selection = lambda s: ModelSelection(exclude={OBJECT_ANY: frozenset([("", "投放花费")])})
-    dropped = md.master_table(st, brand=["b"], channel_type=[TOTAL_OBJECT], grain="month")
+    dropped = md.master_table(st, brand=["b"], channel_type=["MT"], grain="month")
     assert "投放花费" not in dropped["columns"], "a rejected indicator must not reach the table"
 
     dc.invalidate_project("mock-test")

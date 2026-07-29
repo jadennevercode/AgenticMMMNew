@@ -39,6 +39,7 @@ from app.domain.models import (
     LedgerEntry,
     MasterDataMap,
     OlsConfig,
+    OlsRangeScorecard,
     ProjectMeta,
     TargetColumn,
     ProjectProfile,
@@ -96,6 +97,12 @@ class ProjectState(BaseModel):
     # snake_case (it is a plain BaseModel), and an aliased field here emits a
     # camelCase key the frontend's snake_case reader silently misses.
     ols_config: Optional[OlsConfig] = None
+    # S2 · 2.5d: the per-factor ROI/contribution accept-reject sheet the human
+    # reviews (`app/agents/ols_scorecard.py`). Source of truth for the ledger's
+    # `range` layer — storing the verdict is what makes it survive a re-fit, and
+    # is why d-2.5 no longer has to freeze its drops onto its own resolution.
+    # No alias — see the note on `ols_config`.
+    ols_scorecard: Optional[OlsRangeScorecard] = None
     # S2 · 2.3s: the client's business-validation sign-off ("<l4>|<indicator>" ->
     # "yes"|"no", both normalised — see `ledger.signoff_key`). Bare keys with no
     # '|' are legacy: they carry a normalised L3 and mean "this whole factor",
@@ -349,7 +356,20 @@ def heal_state(st: ProjectState) -> ProjectState:
     template = initial_state(st.meta or danone_meta())
     pre_existing = set(st.tasks)
     for tid, rt in template.tasks.items():
-        st.tasks.setdefault(tid, rt)
+        existing = st.tasks.get(tid)
+        if existing is None:
+            st.tasks[tid] = rt
+            continue
+        # Refresh the blueprint-derived fields on a task that already exists,
+        # preserving everything runtime (status/progress/runs/ticks). `setdefault`
+        # alone left them frozen at whatever the blueprint said when the project
+        # was created: moving `d-2.5` from 2.5 to the new 2.5d left 2.5 still
+        # claiming `has_decision`, and 2.6 still declaring `depends_on: ["2.5"]`,
+        # so the DAG a saved project walked was not the one in this file.
+        for f in ("name", "agent", "stage", "klass", "summary", "how", "basis_note",
+                  "work_note", "depends_on", "duration", "produces",
+                  "has_decision", "has_assignment", "has_ai_options"):
+            setattr(existing, f, getattr(rt, f))
     # New ASR step 1.4b sits between 1.4a and 1.4. On a project that already
     # finished 1.4 before this step existed, mark the freshly back-filled 1.4b as
     # done so the completed run isn't re-blocked waiting for transcription.
@@ -365,6 +385,16 @@ def heal_state(st: ProjectState) -> ProjectState:
             and st.tasks.get("2.2") is not None and st.tasks["2.2"].status == "done"):
         st.tasks["2.1d"].status = "done"
         st.tasks["2.1d"].progress = 100.0
+    # 2.5d is the new OLS range review; `d-2.5` moved onto it from 2.5. A project
+    # that already answered that gate decided exactly what 2.5d exists to decide,
+    # so the back-filled task is done — leaving it pending would re-open a signed-
+    # off run at a gate whose decision is already resolved, and 2.6 (now depending
+    # on 2.5d rather than 2.5) would never become actionable again.
+    if "2.5d" not in pre_existing and "2.5d" in st.tasks:
+        d25 = st.decisions.get("d-2.5")
+        if d25 is not None and d25.status == "resolved":
+            st.tasks["2.5d"].status = "done"
+            st.tasks["2.5d"].progress = 100.0
     for did, dr in template.decisions.items():
         st.decisions.setdefault(did, dr)
     for aid, ar in template.assignments.items():

@@ -261,19 +261,19 @@ is an AI-proposes → human-reviews → gate Process, not a single step:
 2.3s Client sign-off    (H)                         → d-2.3
 2.4  Statistical Score  (A)  a-stat-tests           CV/Pearson/VIF + AI per-row case
 2.4d Review verdicts    (H)  panel:stat-review      → d-2.4
-2.5  Propose setup      (A)  a-ols-test             Y/X candidates + params
-2.5y/2.5x/2.5p          (H)  panel:ols-*            → d-2.5y / d-2.5x / d-2.5p
-2.5r Fit & review       (M)  a-ols-test             → d-2.5 (ROI/contribution vs KB ranges)
+2.5  OLS per channel×product (M) a-ols-test        N×M fits, every surviving variable in each
+2.5d Review range verdicts (H) panel:ols-factor-tree accept/reject per fitted factor vs its KB
+                                                    band; saving re-fits → d-2.5
 2.6  Assemble master    (M)  a-master-data          adopted indicators → feature wide table
 2.6d Lock master data   (H)                         → d-2.6   (`3.1` depends on `2.6d`)
 ```
 
 **The indicator lifecycle ledger (`app/agents/ledger.py`) is S2's spine.** Six layers rule in
-order — mapping (2.1) → quality (2.2d) → signoff (2.3) → statistical (2.4d) → selection (2.5x)
-→ range (2.5r) — and **a rejection at any layer is inherited by every later one**: the indicator
+order — mapping (2.1) → quality (2.2d) → signoff (2.3) → statistical (2.4d) → selection (2.5)
+→ range (2.5d) — and **a rejection at any layer is inherited by every later one**: the indicator
 is not re-scored, not re-offered, and never reaches the model. The ledger stores nothing; it
-*derives* each indicator's fate from the layers' own records (the two scorecards, the sign-offs,
-`ols_config`, the `d-2.5` resolution), so it cannot disagree with them. Two rules matter:
+*derives* each indicator's fate from the layers' own records (the three scorecards, the
+sign-offs and `ols_config`), so it cannot disagree with them. Two rules matter:
 
 - `model_selection(st) -> ModelSelection{exclude, include, y, params}` is the **one** resolved
   selection every downstream fit must use — `2.5r`, `2.6` **and `3.2` training**. Re-deriving it
@@ -281,10 +281,24 @@ is not re-scored, not re-offered, and never reaches the model. The ledger stores
 - `drops_before(st, layer)` gives a layer everything earlier layers rejected — never hand-union
   drop sets (a layer must inherit every earlier verdict and never its own).
 
-Indicator keys are `(norm_l4, norm_metric)` — `build_model_frame`'s own key space. Verdicts that
-later steps depend on are **frozen when made**, not re-derived: `d-2.5`'s drops are pinned onto
-its resolution by an engine decision-effect (`register_decision`), because a re-fit excludes them
-and so stops flagging them.
+Indicator keys are `(norm_l4, norm_metric)` — `build_model_frame`'s own key space.
+
+**The `range` layer is a stored scorecard, not a re-derivation** (`app/agents/ols_scorecard.py`,
+`ProjectState.ols_scorecard`). 2.5 proposes accept/reject per fitted factor from the KB band
+plus the benchmark review; 2.5d is where a human changes any of it. Three rules:
+
+- **`decided_by="human"` pins a row against every later re-fit.** The recommendation keeps being
+  recomputed and shown; the human's verdict is what rules. Overwriting it on refresh silently
+  reverts the reviewer.
+- **A rejected row is carried forward even though the new fit no longer mentions it** — it was
+  excluded, so it cannot appear. Dropping rows the tree stops mentioning deletes the very
+  verdict that removed them. This is also why `d-2.5` no longer has to **freeze** its drops
+  onto its own resolution (`ledger.freeze_range_drops` survives only for projects resolved
+  before the scorecard existed): a stored verdict persists because it was written down.
+- **`apply_ols_config` re-fits to a fixed point.** The fit runs on the selection as it stood and
+  the sheet is derived *from that fit*, so a newly out-of-range factor is rejected only after
+  the model containing it was rendered. One pass leaves the artifact showing a model its own
+  verdicts reject; it settles in one extra pass (`_SETTLE_REFITS` is a backstop).
 
 `2.3a` handlings actually bite (`ledger.anomaly_effects`): accepted `event` → a dummy control over
 the window, `cap` → the response is winsorized there, `raw` → a caveat only. Pending/rejected
@@ -295,16 +309,111 @@ indicator's verdict chain; the wide table itself is queried live per product × 
 (`POST /master-data/table`, `app/agents/master_data.py`) against the 2.24 long-table schema.
 Endpoints: `GET /indicator-ledger`, `PUT /anomaly-review`, `PUT /factor-map/bind`.
 
+**`master_data.adopted_indicators(st)` is the one answer to "what is the model built on".**
+The granularity reference, the Data Station, the export and 2.6's factor-tree close-out all
+ask that question, and they used to answer it three different ways (7 / 5 / 8 on the drill
+case). Two rules, each a fixed bug:
+
+- **The response is part of the model input.** No layer rules on Y — the drivers explain it —
+  so it has no ledger row, and every surface that filtered on the ledger silently dropped it.
+  The exported 2.32 "model input" shipped without its dependent variable.
+- **A national row belongs to every model, so it follows the model that kept it.** Screening
+  rows with no channel against the *union* of every object's excludes reads as the safe
+  direction and is not: TT was fitted with 温度 at 43% contribution while the master table
+  deleted it because MT and EC had rejected it. `adopted_mask(..., scope=[obj])` narrows it,
+  and each per-object export sheet selects rows with `model_objects.object_mask` — the same
+  predicate the **fit** uses. Slicing by brand + channel_type instead looks equivalent and
+  drops exactly the shared national and competitor rows the model is fitted on.
+
 The per-factor industry ROI/contribution ranges are meant to be maintained in Knowledge; today
 they load from the reference rule library (`data_rules.match_factor_range`). See
 `docs/agent-design/02-data-agent.md` for the original design (pre-merge task ids 2.0a–2.34).
+
+**S2 scores and fits the assembled data — nothing is aggregated first (2026-07-27).** This
+replaced the 2026-07-23 "national TOTAL" roll-up, which collapsed channel, product and region
+into one series *before* 2.2, 2.4 and the OLS ever saw the data. Three consequences, and each
+is the reason for a rule:
+
+- **Nothing is required to have a channel.** A row with a blank `channel_type` is
+  *national* — media bought once for the country — and is shared into **every**
+  model object, exactly as a brand no product model can claim is. Requiring a
+  channel is what made per-channel modeling delete national media: on the synthetic
+  case every model went from 17 drivers to 6.
+- **A model object is one `(channel_type, brand)` cell** — `app/agents/model_objects.py`,
+  id `"MT::MIZONE"`, label `"MT · MIZONE"`. N channels × M products = N×M models. A cell
+  qualifies only if it carries **both** a response and a driver; cells with a response but no
+  drivers (a competitor's sell-out) are reported by `skipped_objects`, never modeled. A brand
+  that carries no response is *market context*: its rows are **shared into every product's
+  model in that channel**, because competitor spend drives all of them and belongs to none.
+  The id is opaque everywhere downstream (`ModelSelection`, `OlsConfig`, the `olsTree` body,
+  React) — only `pivot._resolve_object_filter` parses it. It contains `::`, so
+  `ledger._parse_signoff_key` splits on the **last** colon.
+- **2.2 scores the published rows; 2.4 scores a panel.** 2.2's granularity/caliber/completeness
+  subchecks were literally unable to fail under the roll-up (one source, one region, one
+  channel, NaNs dropped while summing). 2.4 stacks one row per `(model object, month)` — YoY
+  differencing runs **within** each object (`_panel_yoy`), never down the stack. Both now record
+  **one row per indicator** under `OBJECT_ANY`: an indicator is judged once, on all the evidence,
+  and every model inherits the verdict. Region and L5–L8 still roll up *inside* a cell with that
+  indicator's 2.1 aggregation — indicators disagree about how deep they report, so a panel keyed
+  on them would leave two indicators sharing no rows and correlate them on nothing.
+- **2.5 has no indicator search.** The per-L4 coordinate descent (寻优, up to 96 trial fits,
+  keeping whichever assignment landed the most factors in a Knowledge band) is gone: a benchmark
+  is compared against, never tuned towards. Every surviving variable enters its model at once.
+  The **only** thing that holds one out is `ols_review.affordable_drivers` — the identifiability
+  limit `n_months - controls - 1 - MIN_RESIDUAL_DF`, since OLS with p ≥ n has no solution at
+  all. The surplus is left unticked, ranked by |r| with Y, labelled a degrees-of-freedom limit
+  rather than a verdict, and reported as a finding. `app/agents/ols_summary.py` then has the AI
+  summarise each fitted model; its `keyDrivers` list is **computed** (significant drivers by
+  contribution) and the LLM explains that list rather than choosing it.
+
+**The Factor Tree is S2's spine, and `app/agents/factor_link.py` is what makes that true.**
+Business Understanding's tree declares what to collect; the data delivers metrics under
+whatever label the source file used. Those two key spaces — `(l4, indicator)` and
+`(l4, metric)` — had nothing joining them, so on the reference case 123 factor rows the
+human had *ignored* at 2.1 matched **zero** data keys: `drops_before` was a filter that
+never filtered, and a factor you rejected went on being scored, screened and fitted. The
+join already existed unread in `IndicatorCoverage` (publish records metric → factor row).
+Rules:
+
+- **Key through `factor_link`, never by name.** `row_for(l4, metric)` gives the factor a
+  data indicator supplies (`""` = orphan — real data the tree never asked for, which 2.2
+  still scores and the Data Engine offers to adopt). `ignored_data_keys(st)` translates a
+  factor-level rejection into the space the later layers filter on.
+- **An explicit 2.1 ignore outranks the automatic mapping** (`mapping.resolve_factor_map`).
+  The other way round, a factor *with* data could not be rejected at 2.1 at all — the
+  ignore was only reachable for rows nothing supplied, so "leave this out" evaporated the
+  moment an asset covered it.
+- **Every scorecard row carries `treeRowId`** (2.2 `QualityRow`, 2.4 `StatScoreRow`), so
+  the chain is inspectable rather than inferred.
+- **2.6 closes the tree out**: `factor_tree_verdicts(st)` emits *every* active factor row
+  with `adopted | partial | rejected | notModeled | notSupplied`, the **earliest** stage
+  that rejected it, and the per-object breakdown when models disagree. `notSupplied`
+  (no data ever arrived) is deliberately distinct from `rejected` (someone judged it),
+  and the response is `adopted` with `role="response"` — it has no ledger row because it
+  is never a *driver*, and without that it read as "no data supplies this factor" for the
+  one factor the model is built on.
+
+**`scripts/make_synthetic_case.py` is the "does this work on someone else's data" test.**
+It seeds project `aurelia-skincare`: skincare not beverage, English taxonomy whose L1
+labels are none of `KPI / MARKETING FACTOR / COMMERCIAL FACTOR`, roles carried only by
+the documented `metric_type ∈ {Y, spending, X}` contract, 2 products × 4 channels ×
+36 months, national media with no channel, a competitor brand with no response, a
+known contribution per driver (so a fit can be *checked*, not just run), and a real
+2023 supply disruption for 2.3/2.3a. The reference case cannot test any of this —
+every default in the codebase was written against it. Run it before believing S2
+works. It has already caught, in one pass: national media deleted by the channel
+filter; the AI review zeroing every indicator off an *advisory* subcheck; a Danone
+ROI band applied to skincare; the anomaly detector summing °C into RMB; and 2.4's
+panel correlations attenuated to nothing by cross-sectional scale.
 
 **Per-project modeling (Y/X tagging).** `data_binding._metric_type` tags each bound metric:
 `Y` (本品销量/KPI — the response), `spending` (花费/spend — ROI-eligible X), else `X`. The OLS
 engine (`mmm/pivot.py`) is now `metric_type`-aware — `_is_y_row` accepts an explicit `Y` tag and
 X-driver selection accepts `{x,driver,spending,spend}` tags, in addition to the reference taxonomy
 (`l1` = KPI / MARKETING FACTOR / COMMERCIAL FACTOR). `build_model_frame` caps drivers at
-`MAX_DRIVERS=12` (most Y-correlated) to keep the OLS identified (p<n) on wide per-project uploads.
+`MAX_DRIVERS=12` (most Y-correlated) to keep the OLS identified (p<n) on wide per-project uploads
+— but only on the legacy auto-select path: once 2.5 passes an explicit `include`, the human's
+selection wins and `ols_review.affordable_drivers` is what bounds it.
 The data-request **export template carries no KPI** (Y is the dependent variable, not a factor), so
 uploaded data must include a `本品销量`-type metric for S3–S5 to fit; `make_sample_uploads.py` emits a
 `KPI_本品销量.xlsx` workbook (Y correlated with drivers via a shared seasonal signal) for this.

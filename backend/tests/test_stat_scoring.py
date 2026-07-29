@@ -87,50 +87,71 @@ def test_vif_identified_vs_underdetermined() -> None:
     print("✓ VIF identified + under-determined proxy")
 
 
-def test_yoy_removes_level_trend_and_season() -> None:
+def test_panel_yoy_removes_level_trend_and_season() -> None:
     """A pure seasonal-plus-trend series carries no year-over-year signal beyond its
     growth — which is exactly the confound that made every indicator correlate."""
-    from app.agents.stat_scoring import _yoy
+    import pandas as pd
+
+    from app.agents.stat_scoring import _panel_yoy
 
     t = np.arange(24, dtype=float)
     season = np.sin(2 * np.pi * t / 12.0)
     a = 100.0 + 3.0 * t + 10.0 * season          # level + linear trend + seasonality
-    d = _yoy(a)
+    idx = pd.MultiIndex.from_product([["MT::A"], _months(24)], names=["object", "month"])
+    d = _panel_yoy(pd.Series(a, index=idx)).dropna()
     assert d.shape[0] == 12, "24 monthly points yield 12 year-over-year differences"
     # Trend growth over 12 months is constant (3 * 12) and the seasonal term cancels.
-    assert np.allclose(d, 36.0, atol=1e-9), f"expected a flat 36.0, got {d[:3]}"
-    # Too short to difference → returned unchanged rather than emptied.
-    short = np.arange(8, dtype=float)
-    assert np.array_equal(_yoy(short), short)
+    assert np.allclose(d.to_numpy(), 36.0, atol=1e-9), f"expected a flat 36.0, got {d[:3]}"
     print("✓ YoY differencing removes level, trend and seasonality")
 
 
-def test_yoy_guards_on_result_size_not_input_size() -> None:
+def test_panel_yoy_never_differences_across_a_model_object() -> None:
+    """The panel stacks one channel × product after another. A positional diff down
+    the stack would subtract one object's first months from the previous object's
+    last ones at every boundary — a difference between two different models,
+    reported as one model's year-over-year change."""
+    import pandas as pd
+
+    from app.agents.stat_scoring import _panel_yoy
+
+    months = _months(24)
+    # Two objects on wildly different scales: a boundary leak is unmistakable.
+    idx = pd.MultiIndex.from_product([["MT::A", "TT::A"], months], names=["object", "month"])
+    s = pd.Series(list(np.arange(24, dtype=float)) + list(np.arange(24, dtype=float) + 10_000),
+                  index=idx)
+    d = _panel_yoy(s)
+
+    # Each object loses exactly its own first 12 months to the difference.
+    for obj in ("MT::A", "TT::A"):
+        own = d.loc[obj]
+        assert own.iloc[:12].isna().all(), f"{obj} must not difference into thin air"
+        assert np.allclose(own.iloc[12:].to_numpy(), 12.0), (
+            f"{obj} should show its own +12 growth, got {own.iloc[12:].to_numpy()[:3]}")
+    assert d.notna().sum() == 24, "12 usable differences per object, no boundary rows"
+    print("✓ year-over-year differencing stays inside each model object")
+
+
+def test_detrend_guard_is_on_the_result_size_not_the_input_size() -> None:
     """A 13-14 month project must not be differenced down to 1-2 rows -- that
     starves Pearson's `mask.sum() < 3` guard and silently drops everything with
     nothing explaining why."""
-    from app.agents.stat_scoring import MIN_DETRENDED_POINTS, _yoy
+    from app.agents.stat_scoring import MIN_DETRENDED_POINTS, can_detrend
 
     assert MIN_DETRENDED_POINTS == 6
-    # 14 months would difference down to 2 rows (14-12) -- below the minimum,
-    # so it must come back unchanged rather than starved.
-    a14 = np.arange(14, dtype=float)
-    assert np.array_equal(_yoy(a14), a14)
-    # 18 months differences down to exactly 6 rows -- right at the threshold,
-    # so it must still detrend.
-    a18 = np.arange(18, dtype=float)
-    d18 = _yoy(a18)
-    assert d18.shape[0] == 6
-    assert not np.array_equal(d18, a18)
-    print("✓ YoY guards on the RESULT size, not the input size")
+    # 14 months would difference down to 2 rows (14-12) -- below the minimum, so
+    # the screening runs on levels instead of being starved.
+    assert not can_detrend(14)
+    # 18 months differences down to exactly 6 rows -- right at the threshold.
+    assert can_detrend(18)
+    print("✓ the detrend guard is on the RESULT size, not the input size")
 
 
 def test_reindex_onto_complete_calendar_pairs_correct_months() -> None:
-    """A month missing anywhere in the panel must not turn `a[12:] - a[:-12]`
-    into a '12 rows ago' difference across the discontinuity."""
+    """A month missing anywhere in the panel must not turn a 12-row difference
+    into a '12 rows ago' one across the discontinuity."""
     import pandas as pd
 
-    from app.agents.stat_scoring import _complete_month_index, _yoy
+    from app.agents.stat_scoring import _complete_month_index, _panel_yoy
 
     # Two years of months with March 2024 (202403) missing from the raw panel.
     months = [202401, 202402, 202404, 202405, 202406, 202407, 202408, 202409,
@@ -139,20 +160,24 @@ def test_reindex_onto_complete_calendar_pairs_correct_months() -> None:
               202509, 202510, 202511, 202512]
     values = pd.Series(range(len(months)), index=months, dtype=float)
 
+    def _stack(s: pd.Series) -> pd.Series:
+        return pd.Series(s.to_numpy(), index=pd.MultiIndex.from_product(
+            [["MT::A"], list(s.index)], names=["object", "month"]))
+
     # Without the calendar reindex, "12 rows ago" is not "12 months ago" once a
     # month is missing: position 12 in the raw (gapped) array is Feb-2025, not
     # Jan-2025 -- an off-by-one diff across the March-2024 discontinuity.
     assert months[12] == 202502
-    d_raw = _yoy(values.to_numpy(dtype=float))
-    assert d_raw[0] == values.loc[202502] - values.loc[202401]  # the bug this fixes
+    d_raw = _panel_yoy(_stack(values)).dropna()
+    assert d_raw.iloc[0] == values.loc[202502] - values.loc[202401]  # the bug this fixes
 
     full_idx = _complete_month_index(values.index)
     assert 202403 in full_idx and len(full_idx) == 24
     reindexed = values.reindex(full_idx, fill_value=0.0)
-    d_fixed = _yoy(reindexed.to_numpy(dtype=float))
+    d_fixed = _panel_yoy(_stack(reindexed)).dropna()
     assert d_fixed.shape[0] == 12
     # Position 0 of the fixed differences is now truly Jan-2025 minus Jan-2024.
-    assert d_fixed[0] == values.loc[202501] - values.loc[202401]
+    assert d_fixed.iloc[0] == values.loc[202501] - values.loc[202401]
     print("✓ reindexing onto the complete calendar range keeps YoY differencing "
           "paired on real calendar months across a gap")
 
@@ -476,8 +501,9 @@ if __name__ == "__main__":
     test_reference_cv()
     test_vif_identified_vs_underdetermined()
     test_vif_band_matches_the_workbook()
-    test_yoy_removes_level_trend_and_season()
-    test_yoy_guards_on_result_size_not_input_size()
+    test_panel_yoy_removes_level_trend_and_season()
+    test_panel_yoy_never_differences_across_a_model_object()
+    test_detrend_guard_is_on_the_result_size_not_the_input_size()
     test_reindex_onto_complete_calendar_pairs_correct_months()
     test_gaps_are_not_zero_filled()
     test_short_coverage_is_scored_unconsiderable_with_a_reason()

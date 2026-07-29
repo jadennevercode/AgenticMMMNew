@@ -241,7 +241,10 @@ _ENTRIES: list[_Entry] = [
             "Time granularity (blocking) — 1 when the series is monthly or finer; 0 otherwise.",
             "Model granularity (advisory) — 1 when region and/or channel detail is present; "
             "0.5 for a national single-channel series, with a note to check it meets the L4 "
-            "model scope.",
+            "model scope. Reads real counts since 2026-07-27: 2.2 scores the assembled rows, "
+            "so a series really can be national-only or really can span 5 regions. The "
+            "national roll-up that used to run first left every series reporting 1 region and "
+            "1 channel, which pinned this subcheck to 0.5 for every indicator forever.",
             "Drilldown granularity (advisory) — 1 above 2 deepdive dimensions; 0.5 for 1–2; "
             "0 when none are populated.",
         ],
@@ -290,17 +293,21 @@ _ENTRIES: list[_Entry] = [
         outputSummary="Signed r per indicator → the 0 / 0.5 / 1 correlation band",
         wraps="agents.stat_scoring.pearson", usedBy=["2.4"],
         scenario=(
-            "Runs inside step 2.4 next to CV and VIF. The KPI series is the global monthly sum "
-            "of the Y metric; each indicator is reindexed onto that month axis before the "
-            "correlation is taken. The SIGN is kept, not just the magnitude — a negative "
-            "correlation on a media driver is exactly the kind of thing 2.4d must see. It is "
-            "also reused downstream: the 2.5x proposal will not tick an X with |r| below 0.1."),
+            "Runs inside step 2.4 next to CV and VIF, over a PANEL: one row per (model object, "
+            "month), so each indicator is correlated against the sales of the channel x product "
+            "cell it could actually have driven, across every cell at once. It used to run on "
+            "one national series per indicator — the same question asked of 34 points instead "
+            "of 34 x the number of models. The SIGN is kept, not just the magnitude — a "
+            "negative correlation on a media driver is exactly the kind of thing 2.4d must "
+            "see. It is also reused downstream: the 2.5 proposal reports an X with |r| below "
+            "0.1 as weakly correlated, though it still enters the fit."),
         method=(
             "Standard Pearson r over the months where BOTH series are present. Fewer than 3 "
             "overlapping points, or a zero-variance side, returns 0.0 rather than a spurious "
             "correlation. Runs on year-over-year differenced series, not raw levels — on raw "
             "levels every indicator correlates with the KPI, because they all ride the same "
-            "seasonal trend."),
+            "seasonal trend. The difference is taken WITHIN each model object, never down the "
+            "stacked panel, so it is never a difference between two different models."),
         logic=[
             "Align indicator and KPI on the shared month index; mask out months where either "
             "side is missing.",
@@ -312,7 +319,7 @@ _ENTRIES: list[_Entry] = [
             ["band 0", "|r| < 0.1", "No usable relationship with the KPI"],
             ["band 0.5", "0.1 ≤ |r| < 0.3", "Weak relationship"],
             ["band 1", "|r| ≥ 0.3", "Moderate or strong relationship"],
-            ["MIN_ABS_PEARSON", "0.1", "Below this the 2.5x proposal leaves the X unticked"],
+            ["MIN_ABS_PEARSON", "0.1", "Below this 2.5 flags the X as weakly correlated"],
         ],
     ), _run_pearson, "app.agents.stat_scoring", "pearson"),
 
@@ -363,13 +370,14 @@ _ENTRIES: list[_Entry] = [
         outputSummary="R², adj. R², MAPE, Durbin-Watson, baseline %, per-driver contribution/ROI",
         wraps="mmm.engine.run_mmm", usedBy=["2.5"],
         scenario=(
-            "Called once PER MODEL OBJECT PER TRIAL FIT — step 2.5 searches each L4's "
-            "candidate indicators over repeated regressions (寻优), keeping the choice that "
-            "lands the factor in its Knowledge ROI / Contribution range, so one run records "
-            "several invocations. The Y comes from the 2.1 Metrics Type; params scale to the "
-            "series length. The chosen selection drives 2.6 master data and S4 training, so "
-            "what this tool fits is exactly what the model is trained on — never a separately "
-            "re-derived set."),
+            "Called once PER MODEL OBJECT — one (channel x product) cell each, so a project "
+            "with N channels and M products records N x M invocations in a 2.5 run. Each fit "
+            "takes that object's whole surviving driver universe at once: there is no per-L4 "
+            "indicator search (寻优) any more, so a coefficient here is what that variable did "
+            "alongside all the others rather than the best result some combination produced. "
+            "The Y comes from the 2.1 Metrics Type; params scale to the series length. The "
+            "selection drives 2.6 master data and S4 training, so what this tool fits is "
+            "exactly what the model is trained on — never a separately re-derived set."),
         method=(
             "Each driver is transformed with geometric adstock (carry-over) then a Hill "
             "saturation curve (diminishing returns), optionally joined by trend and seasonality "
