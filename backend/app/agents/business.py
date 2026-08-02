@@ -801,9 +801,13 @@ def _interview_sheets(targets: list[dict]) -> dict:
     used_tabs: set[str] = {"Overview"}
     for t in targets:
         # Sheet tab name uses a tight `·` (Excel-friendly); the banner title is spaced.
-        tab = _excel_safe_tab(f"{t['layerZh']}·{t['team']}", used_tabs)
-        title = f"{t['layerZh']} · {t['team']}"
-        meta = (f"Layer: {t['layer']}  |  Duration: {t['durationMin']} min  |  "
+        # layerZh is blank for real filenames with no explicit layer marker — fall
+        # back to team alone rather than a leading `·` / ` · ` artifact.
+        label = f"{t['layerZh']}·{t['team']}" if t["layerZh"] else t["team"]
+        tab = _excel_safe_tab(label, used_tabs)
+        title = f"{t['layerZh']} · {t['team']}" if t["layerZh"] else t["team"]
+        layer_seg = f"Layer: {t['layer']}  |  " if t["layer"] else ""
+        meta = (f"{layer_seg}Duration: {t['durationMin']} min  |  "
                 f"Status: {t['status']}  |  Participants: {t.get('participants') or '—'}")
         rows = [[str(i), q["qType"], q["question"], q.get("relatedFactorPath", ""),
                  q.get("origin", "提纲"), q.get("finalAnswer", ""), q.get("answerSource", "")]
@@ -1378,10 +1382,13 @@ def _bu_stats(st: ProjectState) -> dict:
         if key and key not in seen:
             seen.add(key)
             drivers.append(key)
-    # Interview coverage by stakeholder layer.
+    # Interview coverage by department/team — real departments live on "team";
+    # layerZh is now blank for real filenames with no explicit layer marker, so
+    # it can no longer be the primary bucket key (it would collapse everything
+    # into one "—" bucket and lose the per-department breakdown).
     cats: dict[str, int] = {}
     for t in st.analysis.get("interview_targets", []):
-        label = t.get("layerZh") or t.get("layer", "—")
+        label = t.get("team") or t.get("layerZh") or "—"
         cats[label] = cats.get(label, 0) + len(t.get("questions", []))
     from app.agents.data_request import factor_tree_by_l3
     by_l3 = factor_tree_by_l3(st)

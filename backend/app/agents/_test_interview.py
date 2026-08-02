@@ -1,5 +1,6 @@
 """Runnable checks for the interview sheet + real-minutes rebuild (no LLM)."""
 from app.agents import business as B
+from app.store.state import ProjectState
 
 def test_columns_and_rows():
     q = {"qType": "business", "question": "渠道占比?", "relatedFactorPath": "",
@@ -141,6 +142,41 @@ def test_real_target_layer_and_dept():
     assert t[1]["layerZh"] == "" and t[1]["team"] == "商务部", t[1]   # no layer → blank
     print("OK real_target_layer_and_dept")
 
+def test_interview_sheets_blank_layer_tab():
+    # No layer marker (real-filename case) → tab/title fall back to team alone,
+    # no leading "·" artifact; meta line drops the "Layer: ... | " segment.
+    blank = B._make_real_target("电商部", "", [])
+    sheets = B._interview_sheets([blank])
+    tab = next(s for s in sheets["sheets"] if s["name"] != "Overview")
+    assert tab["name"] == "电商部", tab["name"]
+    assert tab["preRows"][0] == ["电商部"], tab["preRows"][0]
+    assert "Layer:" not in tab["preRows"][1][0], tab["preRows"][1]
+    assert tab["preRows"][1][0].startswith("Duration:"), tab["preRows"][1]
+
+    # A literal layer marker present → tab/title keep the "layer·team" form and
+    # the meta line keeps its "Layer: ... | " segment.
+    layered = B._make_real_target("电商部", "", [], layer="Layer3")
+    sheets2 = B._interview_sheets([layered])
+    tab2 = next(s for s in sheets2["sheets"] if s["name"] != "Overview")
+    assert tab2["name"] == "Layer3·电商部", tab2["name"]
+    assert tab2["preRows"][0] == ["Layer3 · 电商部"], tab2["preRows"][0]
+    assert tab2["preRows"][1][0].startswith("Layer: Layer3  |  Duration:"), tab2["preRows"][1]
+    print("OK interview_sheets_blank_layer_tab")
+
+def test_bu_stats_coverage_by_department():
+    # Real departments live on "team"; layerZh is blank for real filenames with
+    # no explicit layer marker, so the coverage buckets must key off team (not
+    # collapse into one blank "—" bucket).
+    st = ProjectState()
+    st.analysis["interview_targets"] = [
+        {"layerZh": "", "layer": "", "team": "电商部", "questions": [{}, {}]},
+        {"layerZh": "", "layer": "", "team": "市场部", "questions": [{}]},
+        {"layerZh": "Layer3", "layer": "Layer3", "team": "客服部", "questions": [{}, {}, {}]},
+    ]
+    stats = B._bu_stats(st)
+    assert stats["cats"] == {"电商部": 2, "市场部": 1, "客服部": 3}, stats["cats"]
+    print("OK bu_stats_coverage_by_department")
+
 def main():
     test_columns_and_rows()
     test_department_from_filename()
@@ -150,6 +186,8 @@ def main():
     test_interview_sheet_names_excel_safe()
     test_layer_from_filename()
     test_real_target_layer_and_dept()
+    test_interview_sheets_blank_layer_tab()
+    test_bu_stats_coverage_by_department()
 
 if __name__ == "__main__":
     main()
