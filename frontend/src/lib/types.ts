@@ -1272,6 +1272,8 @@ export interface FactorRow {
   status: FactorStatus
   rationale: string
   evidence: string
+  /** Direction of a proposed change: 'add' (default when absent) or 'remove' (e.g. a reconcile downgrade). */
+  proposalKind?: 'add' | 'remove'
 }
 
 export interface FactorTree {

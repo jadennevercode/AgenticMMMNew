@@ -251,7 +251,7 @@ def _apply_reconcile_verdicts(template_rows: list[FactorRow],
         elif decision == "downgrade":
             out.append(r.model_copy(update={
                 "status": "proposed", "rationale": "待确认：材料未提及/矛盾",
-                "evidence": "materials reconciliation"}))
+                "evidence": "materials reconciliation", "proposal_kind": "remove"}))
         else:  # keep (default)
             out.append(r)
     return out
@@ -524,7 +524,8 @@ def _keydiff_supplement(uploaded: list[FactorRow], template_rows: list[FactorRow
     up_keys = {_row_key(r) for r in uploaded}
     return [r.model_copy(update={"id": f"ft-tplsup-{i}", "status": "proposed",
                                  "rationale": "Template factor missing from your tree",
-                                 "evidence": "industry template (key-diff)"})
+                                 "evidence": "industry template (key-diff)",
+                                 "proposal_kind": "add"})
             for i, r in enumerate(template_rows) if _row_key(r) not in up_keys]
 
 
@@ -566,7 +567,7 @@ async def _ai_template_supplement(st: ProjectState, uploaded: list[FactorRow],
         row = FactorRow(
             id=f"ft-tplsup-{len(out)}", l1=str(rec.get("l1", "")), l2=str(rec.get("l2", "")),
             l3=str(rec.get("l3", "")), l4=str(rec.get("l4", "")), indicator=str(rec.get("indicator", "")),
-            dimension=dim, source="template", status="proposed",
+            dimension=dim, source="template", status="proposed", proposal_kind="add",
             rationale=str(rec.get("rationale", "")), evidence="industry template (AI-selected)")
         if _row_key(row) in up_keys:
             continue  # guard: skip anything the user already has verbatim
@@ -635,7 +636,8 @@ async def derive_factor_tree(eng: Engine, st: ProjectState, task: dict) -> None:
             id=f"ft-ai-{i}", l1=str(rec.get("l1", "")), l2=str(rec.get("l2", "")),
             l3=str(rec.get("l3", "")), l4=str(rec.get("l4", "")), indicator=str(rec.get("indicator", "")),
             dimension=_default_dimension(st),
-            source="ai", status="proposed", rationale=str(rec.get("rationale", "")), evidence=origin))
+            source="ai", status="proposed", proposal_kind="add",
+            rationale=str(rec.get("rationale", "")), evidence=origin))
 
     # Every L1–L4 / indicator must be a single value — split any combined cells.
     st.factor_tree = FactorTree(rows=atomic_factor_rows(baseline + supplement + proposed))
@@ -1009,18 +1011,21 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
 
 
 def accept_factor_rows(st: ProjectState, source_set: set[str]) -> None:
-    """Flip this gate's still-proposed rows to accepted; respect manual rejects.
+    """Finalize this gate's still-proposed rows by direction; respect manual rejects.
 
     `proposed` is excluded by mapping._ACTIVE_STATUSES, so a row only reaches the
-    2.1 factor map once accepted. Approving a factor-tree gate means "accept the
+    2.1 factor map once accepted. Approving a factor-tree gate means "finalize the
     proposals I did not manually reject" — so only `proposed` rows of the gate's
-    own source-set flip; `rejected` and `baseline` rows are left alone.
+    own source-set flip: `proposal_kind == "remove"` (a downgrade / interview-driven
+    removal) confirms the removal → `rejected`; everything else (add, or the
+    None/absent legacy default) → `accepted`. `rejected` and `baseline` rows are
+    left alone.
     """
     if st.factor_tree is None:
         return
     for r in st.factor_tree.rows:
         if r.status == "proposed" and r.source in source_set:
-            r.status = "accepted"
+            r.status = "rejected" if r.proposal_kind == "remove" else "accepted"
     art = st.artifact("a-factor-tree")
     if art is not None:
         art.body = _factor_tree_sheet(st.factor_tree)
@@ -1102,7 +1107,7 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
                 id=f"ft-iv-{st.tick}-{i}", l1=str(ch.get("l1", "")), l2=str(ch.get("l2", "")),
                 l3=str(ch.get("l3", "")), l4=str(ch.get("l4", "")), indicator=str(ch.get("indicator", "")),
                 dimension=_default_dimension(st),
-                source="interview", status="proposed",
+                source="interview", status="proposed", proposal_kind="add",
                 rationale=f"{ch.get('op', 'add')} · {ch.get('rationale', '')} · granularity: {ch.get('granularity', '—')}",
                 evidence=str(ch.get("quote", ""))[:200])
             for i, ch in enumerate(changes)

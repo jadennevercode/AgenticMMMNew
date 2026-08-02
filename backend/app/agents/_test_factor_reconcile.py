@@ -46,10 +46,31 @@ def test_reconcile_falls_back_without_materials():
     assert all(r.status == "baseline" for r in out)   # untouched verbatim
     print("OK reconcile_falls_back_without_materials")
 
+def test_downgrade_sets_remove_kind():
+    rows = [_row(0, "天气温度指数")]
+    out = B._apply_reconcile_verdicts(rows, {1: {"decision": "downgrade", "rationale": "材料未提及"}})
+    assert out[0].status == "proposed" and out[0].proposal_kind == "remove", out[0]
+    print("OK downgrade_sets_remove_kind")
+
+def test_accept_factor_rows_direction():
+    from app.store.state import ProjectState
+    from app.domain.models import ProjectMeta, IndustryRef, FactorTree, FactorRow
+    st = ProjectState(meta=ProjectMeta(id="t", name="t", brand="b", createdAt="2026-01-01T00:00:00+00:00",
+        industry=IndustryRef(l1="food-bev", l2="beverage", l3="sports-functional")))
+    add = FactorRow(id="a", indicator="x", source="ai", status="proposed", proposalKind="add")
+    rem = FactorRow(id="b", indicator="y", source="template", status="proposed", proposalKind="remove")
+    st.factor_tree = FactorTree(rows=[add, rem])
+    B.accept_factor_rows(st, {"ai", "template"})
+    assert st.factor_tree.rows[0].status == "accepted", "add-kind → accepted"
+    assert st.factor_tree.rows[1].status == "rejected", "remove-kind → rejected (confirm removal)"
+    print("OK accept_factor_rows_direction")
+
 def main():
     test_apply_reconcile_verdicts()
     test_missing_verdict_defaults_to_keep()
     test_reconcile_falls_back_without_materials()
+    test_downgrade_sets_remove_kind()
+    test_accept_factor_rows_direction()
 
 if __name__ == "__main__":
     main()

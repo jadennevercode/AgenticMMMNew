@@ -417,6 +417,7 @@ class FactorRow(CamelModel):
     status: FactorStatus = "baseline"
     rationale: str = ""
     evidence: str = ""  # source quote / citation
+    proposal_kind: Optional[Literal["add", "remove"]] = Field(default=None, alias="proposalKind")
 
 
 class FactorTree(CamelModel):
