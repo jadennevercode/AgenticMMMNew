@@ -65,12 +65,20 @@ def test_accept_factor_rows_direction():
     assert st.factor_tree.rows[1].status == "rejected", "remove-kind → rejected (confirm removal)"
     print("OK accept_factor_rows_direction")
 
+def test_atomic_factor_rows_preserves_proposal_kind():
+    from app.domain.models import FactorRow
+    rows = B.atomic_factor_rows([FactorRow(id="x", l1="A", indicator="i",
+                                           status="proposed", proposal_kind="remove")])
+    assert rows and rows[0].proposal_kind == "remove", rows
+    print("OK atomic_factor_rows_preserves_proposal_kind")
+
 def main():
     test_apply_reconcile_verdicts()
     test_missing_verdict_defaults_to_keep()
     test_reconcile_falls_back_without_materials()
     test_downgrade_sets_remove_kind()
     test_accept_factor_rows_direction()
+    test_atomic_factor_rows_preserves_proposal_kind()
 
 if __name__ == "__main__":
     main()

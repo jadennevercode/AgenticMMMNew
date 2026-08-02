@@ -502,7 +502,8 @@ def atomic_factor_rows(rows: list[FactorRow]) -> list[FactorRow]:
             out.append(FactorRow(
                 id=r.id if single else f"{r.id}-{i}",
                 l1=l1, l2=l2, l3=l3, l4=l4, indicator=ind, dimension=r.dimension,
-                source=r.source, status=r.status, rationale=r.rationale, evidence=r.evidence))
+                source=r.source, status=r.status, rationale=r.rationale, evidence=r.evidence,
+                proposal_kind=r.proposal_kind))
     return out
 
 
