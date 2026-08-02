@@ -196,6 +196,22 @@ def test_apply_interview_removals():
     assert B._apply_interview_removals(st, [{"op": "remove", "indicator": "不存在指标"}]) == 0
     print("OK apply_interview_removals")
 
+def test_writeback_no_changes_guard_includes_removed_n():
+    # Fix-review finding: when a transcript's ONLY factor changes are removals,
+    # removed_n>0 but adds (=changes after the split) is empty — the "No
+    # interview-driven factor changes were extracted ... re-run if the model
+    # timed out" finding must NOT also fire (misleading after a real removal
+    # succeeded). writeback_minutes is LLM-coupled (each call goes through
+    # _digest_transcript -> get_llm().json over the network), so rather than
+    # fabricate an LLM call we characterize the actual guard in source: it must
+    # require BOTH "no adds" and "no removes", not bare "not changes". The
+    # removal mechanics themselves (row demoted to proposed/remove/interview)
+    # are already exercised end-to-end by test_apply_interview_removals above.
+    import inspect
+    src = inspect.getsource(B.writeback_minutes)
+    assert "if not changes and not removed_n:" in src, src
+    print("OK writeback_no_changes_guard_includes_removed_n")
+
 def main():
     test_columns_and_rows()
     test_department_from_filename()
@@ -208,6 +224,7 @@ def main():
     test_interview_sheets_blank_layer_tab()
     test_bu_stats_coverage_by_department()
     test_apply_interview_removals()
+    test_writeback_no_changes_guard_includes_removed_n()
 
 if __name__ == "__main__":
     main()

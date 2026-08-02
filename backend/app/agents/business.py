@@ -1132,7 +1132,7 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
         eng.emit(st, "business", "info",
                  f"{removed_n} factor(s) demoted to 建议删减 from the interviews.", task["id"])
     changes = adds   # the existing add/modify block below runs on adds only
-    if not changes:
+    if not changes and not removed_n:
         eng.emit(st, "business", "finding",
                  "No interview-driven factor changes were extracted from the minutes — "
                  "review the minutes or re-run if the model timed out.", task["id"])
