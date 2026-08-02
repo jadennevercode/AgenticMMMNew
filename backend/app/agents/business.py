@@ -986,7 +986,9 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
                 "(2) FACTOR CHANGES — propose the factor-tree changes this transcript implies "
                 "(add a new factor, or modify an existing factor's indicator / granularity / "
                 "channel caliber), each traced to a verbatim quote; plus up to 2 cross-source "
-                "insights.\n"
+                "insights. Use op=remove ONLY when the interview explicitly says an existing "
+                "factor should be dropped / is not needed / has no usable data — name its "
+                "l3/l4/indicator.\n"
                 "(3) NEW QUESTIONS — list questions the interviewees themselves raised that are "
                 "NOT in the outline, each with the answer given and its source. Skip if none.\n"
                 "Each of l1/l2/l3/l4 and indicator must be a SINGLE atomic value — never combine "
@@ -998,7 +1000,7 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
                 "Return JSON: {\"department\":str,\"participants\":str,"
                 "\"answers\":[{\"n\":int,\"answer\":str,\"source\":str}],"
                 "\"new_questions\":[{\"question\":str,\"answer\":str,\"source\":str}],"
-                "\"factor_changes\":[{\"op\":\"add|modify\",\"l1\":str,\"l2\":str,\"l3\":str,"
+                "\"factor_changes\":[{\"op\":\"add|modify|remove\",\"l1\":str,\"l2\":str,\"l3\":str,"
                 "\"l4\":str,\"indicator\":str,\"granularity\":str,\"rationale\":str,\"quote\":str}],"
                 "\"insights\":[{\"kind\":\"connection|gap|conflict|reference\",\"title\":str,"
                 "\"finding\":str,\"confidence\":0-1}]}\n\n"
@@ -1009,6 +1011,33 @@ async def _digest_transcript(filename: str, text: str, qlist: str,
         return obj if isinstance(obj, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _apply_interview_removals(st: ProjectState, changes: list[dict]) -> int:
+    """Demote existing factor rows the interview says to drop → proposed + remove
+    (source=interview), so they surface in the 建议删减 tab. Returns count demoted."""
+    if st.factor_tree is None:
+        return 0
+    n = 0
+    for ch in changes:
+        if not isinstance(ch, dict) or str(ch.get("op", "")) != "remove":
+            continue
+        ind = str(ch.get("indicator", "")).strip().lower()
+        l3, l4 = str(ch.get("l3", "")).strip(), str(ch.get("l4", "")).strip()
+        for r in st.factor_tree.rows:
+            if r.status not in ("baseline", "accepted"):
+                continue
+            hit = (ind and r.indicator.strip().lower() == ind) or \
+                  (not ind and l3 and l4 and r.l3 == l3 and r.l4 == l4)
+            if not hit:
+                continue
+            r.status = "proposed"
+            r.source = "interview"
+            r.proposal_kind = "remove"
+            r.rationale = f"访谈建议删减 · {ch.get('rationale', '')}"
+            r.evidence = str(ch.get("quote", ""))[:200]
+            n += 1
+    return n
 
 
 def accept_factor_rows(st: ProjectState, source_set: set[str]) -> None:
@@ -1094,6 +1123,15 @@ async def writeback_minutes(eng: Engine, st: ProjectState, task: dict) -> None:
     # tree (user accepts at gate 1.4d) + proposals. ──
     merged = _merge_factor_side(results)
     changes = merged["factor_changes"]
+    removes = [c for c in changes if isinstance(c, dict) and str(c.get("op", "")) == "remove"]
+    adds = [c for c in changes if c not in removes]
+    removed_n = _apply_interview_removals(st, removes)
+    if removed_n:
+        eng.produce(st, "a-factor-tree", body=_factor_tree_sheet(st.factor_tree),
+                    state="proposed", agent="business")
+        eng.emit(st, "business", "info",
+                 f"{removed_n} factor(s) demoted to 建议删减 from the interviews.", task["id"])
+    changes = adds   # the existing add/modify block below runs on adds only
     if not changes:
         eng.emit(st, "business", "finding",
                  "No interview-driven factor changes were extracted from the minutes — "

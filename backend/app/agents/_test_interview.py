@@ -177,6 +177,25 @@ def test_bu_stats_coverage_by_department():
     assert stats["cats"] == {"电商部": 2, "市场部": 1, "客服部": 3}, stats["cats"]
     print("OK bu_stats_coverage_by_department")
 
+def test_apply_interview_removals():
+    from app.store.state import ProjectState
+    from app.domain.models import ProjectMeta, IndustryRef, FactorTree, FactorRow
+    st = ProjectState(meta=ProjectMeta(id="t", name="t", brand="b", createdAt="2026-01-01T00:00:00+00:00",
+        industry=IndustryRef(l1="food-bev", l2="beverage", l3="sports-functional")))
+    keep = FactorRow(id="k", l3="电商", l4="平台", indicator="电商GMV", source="template", status="baseline")
+    drop = FactorRow(id="d", l3="批发", l4="经销", indicator="经销商出货", source="template", status="accepted")
+    st.factor_tree = FactorTree(rows=[keep, drop])
+    n = B._apply_interview_removals(st, [{"op": "remove", "indicator": "经销商出货",
+                                          "rationale": "没有月度台账", "quote": "经销出货没系统数据"}])
+    assert n == 1, n
+    d = next(r for r in st.factor_tree.rows if r.id == "d")
+    assert d.status == "proposed" and d.proposal_kind == "remove" and d.source == "interview", d
+    k = next(r for r in st.factor_tree.rows if r.id == "k")
+    assert k.status == "baseline", "non-matching row untouched"
+    # a remove with no matching row demotes nothing
+    assert B._apply_interview_removals(st, [{"op": "remove", "indicator": "不存在指标"}]) == 0
+    print("OK apply_interview_removals")
+
 def main():
     test_columns_and_rows()
     test_department_from_filename()
@@ -188,6 +207,7 @@ def main():
     test_real_target_layer_and_dept()
     test_interview_sheets_blank_layer_tab()
     test_bu_stats_coverage_by_department()
+    test_apply_interview_removals()
 
 if __name__ == "__main__":
     main()
