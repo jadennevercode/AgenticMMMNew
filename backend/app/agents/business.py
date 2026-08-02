@@ -838,6 +838,16 @@ _DEPT_PREFIX = re.compile(r"^(?:layer\d+|第[0-9一二三四五六七八九十]+
 _DEPT_TRAILING = re.compile(
     r"[ _\-·]*(?:会议纪要|会议记录|访谈|纪要|记录|minutes|interview)$", re.IGNORECASE)
 
+_LAYER_IN_FILENAME = re.compile(
+    r"(layer\d+|第[0-9一二三四五六七八九十]+层|高层|管理层|执行层|数据团队)", re.IGNORECASE)
+
+
+def _layer_from_filename(filename: str) -> str:
+    """The layer marker literally as written in the file name, else ''. No mapping."""
+    stem = os.path.splitext(os.path.basename(filename or ""))[0]
+    m = _LAYER_IN_FILENAME.search(stem)
+    return m.group(1) if m else ""
+
 
 def _department_from_filename(filename: str) -> str:
     """Best-effort department label from an interview file name. Client file names
@@ -845,6 +855,7 @@ def _department_from_filename(filename: str) -> str:
     fallback used by the digest, not here."""
     stem = os.path.splitext(os.path.basename(filename or ""))[0]
     stem = _DEPT_PREFIX.sub("", stem)
+    stem = re.sub(r"^(?:高层|管理层|执行层|数据团队)[ _\-·]+", "", stem)   # layer word prefix
     prev = None
     while stem != prev:  # peel repeated trailing markers ('客户访谈纪要' → '客户')
         prev = stem
@@ -862,9 +873,9 @@ def _minutes_files(st: ProjectState) -> list[tuple[str, str]]:
                                   per_file_cap=_MINUTES_PER_FILE_CHARS)
 
 
-def _make_real_target(department: str, participants: str, questions: list[dict]) -> dict:
+def _make_real_target(department: str, participants: str, questions: list[dict], layer: str = "") -> dict:
     return {
-        "id": _target_id("field", department), "layer": "field", "layerZh": department,
+        "id": _target_id(layer or "field", department), "layer": layer, "layerZh": layer,
         "team": department, "participants": participants or "", "schedule": "",
         "durationMin": 0, "status": "completed", "questions": questions,
     }
@@ -916,7 +927,8 @@ def _rebuild_targets_from_real_minutes(biz, files, results) -> list[dict]:
                          "relatedFactorPath": "", "origin": "新问题",
                          "finalAnswer": str(nq.get("answer", "")).strip(),
                          "answerSource": str(nq.get("source", "")).strip()})
-        targets.append(_make_real_target(dept, str(res.get("participants") or ""), rows))
+        layer = _layer_from_filename(filename)
+        targets.append(_make_real_target(dept, str(res.get("participants") or ""), rows, layer))
     return targets
 
 

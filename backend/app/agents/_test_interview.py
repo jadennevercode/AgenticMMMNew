@@ -64,8 +64,13 @@ def test_rebuild_targets():
          "new_questions": []},
     ]
     targets = B._rebuild_targets_from_real_minutes(biz, files, results)
-    assert [t["layerZh"] for t in targets] == ["市场部", "管理层访谈".replace("访谈", "")], \
-        [t["layerZh"] for t in targets]   # file-2 dept falls back to filename
+    # department lives on "team" now (layerZh is the literal filename layer marker,
+    # blank here since neither file name carries one after dept extraction below —
+    # note file-2's fallback department IS itself the layer word "管理层", so its
+    # layerZh is "管理层" while file-1 (no layer marker) is blank).
+    assert [t["team"] for t in targets] == ["市场部", "管理层访谈".replace("访谈", "")], \
+        [t["team"] for t in targets]   # file-2 dept falls back to filename
+    assert [t["layerZh"] for t in targets] == ["", "管理层"], [t["layerZh"] for t in targets]
     mkt, mgmt = targets[0], targets[1]
     mkt_origins = [(q["question"], q["origin"], q.get("finalAnswer", "")) for q in mkt["questions"]]
     mgmt_origins = [(q["question"], q["origin"], q.get("finalAnswer", "")) for q in mgmt["questions"]]
@@ -109,11 +114,32 @@ def test_rebuild_targets_dedupes_duplicate_department():
     assert len(targets) == 2, targets
     t1, t2 = targets
     assert t1["id"] != t2["id"], (t1["id"], t2["id"])
-    assert t1["layerZh"] != t2["layerZh"], (t1["layerZh"], t2["layerZh"])
+    # department (disambiguated) lives on "team"; neither filename carries a layer
+    # marker, so layerZh is blank for both.
     assert t1["team"] != t2["team"], (t1["team"], t2["team"])
-    assert t1["layerZh"] == "市场部", t1["layerZh"]
-    assert t2["layerZh"] == "市场部 (2)", t2["layerZh"]
+    assert t1["team"] == "市场部", t1["team"]
+    assert t2["team"] == "市场部 (2)", t2["team"]
+    assert t1["layerZh"] == "" and t2["layerZh"] == "", (t1["layerZh"], t2["layerZh"])
     print("OK rebuild_targets_dedupes_duplicate_department")
+
+def test_layer_from_filename():
+    f = B._layer_from_filename
+    assert f("Layer3_电商部_纪要.txt") == "Layer3", f("Layer3_电商部_纪要.txt")
+    assert f("第2层_管理层访谈.docx") == "第2层", f("第2层_管理层访谈.docx")
+    assert f("管理层_商务部访谈.docx") == "管理层", f("管理层_商务部访谈.docx")
+    assert f("商务部访谈.docx") == "", f("商务部访谈.docx")   # no layer marker → blank
+    print("OK layer_from_filename")
+
+def test_real_target_layer_and_dept():
+    # filename with a layer marker: layer literal + clean department
+    biz = []
+    files = [("Layer3_电商部_纪要.txt", "..."), ("商务部访谈.docx", "...")]
+    results = [{"department": "", "answers": [], "new_questions": []},
+               {"department": "", "answers": [], "new_questions": []}]
+    t = B._rebuild_targets_from_real_minutes(biz, files, results)
+    assert t[0]["layerZh"] == "Layer3" and t[0]["team"] == "电商部", t[0]
+    assert t[1]["layerZh"] == "" and t[1]["team"] == "商务部", t[1]   # no layer → blank
+    print("OK real_target_layer_and_dept")
 
 def main():
     test_columns_and_rows()
@@ -122,6 +148,8 @@ def main():
     test_merge_factor_side_keeps_changes()
     test_rebuild_targets_dedupes_duplicate_department()
     test_interview_sheet_names_excel_safe()
+    test_layer_from_filename()
+    test_real_target_layer_and_dept()
 
 if __name__ == "__main__":
     main()
