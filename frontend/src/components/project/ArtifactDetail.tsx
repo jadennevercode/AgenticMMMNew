@@ -14,7 +14,6 @@ import { AssignmentCard } from '../workbench/AssignmentCard'
 import { Field, RunTimeline, Findings } from '../workbench/TaskTrace'
 import { ArtifactCanvas } from './canvas/ArtifactCanvas'
 import { TaskStepPanel } from './panels/TaskStepPanel'
-import { DataRequestReviewPanel } from './panels/DataRequestReviewPanel'
 import { ToolTimeline } from '../tools/ToolTimeline'
 import { ProfileEditor } from './ProfileEditor'
 import { FactorTreeEditor } from './FactorTreeEditor'
@@ -187,12 +186,6 @@ function BuildStep({ task, index, total }: { task: TaskBlueprint; index: number;
                 so a confirmed step can be reopened, adjusted and re-fitted
                 without sending the whole stage back through rework. */}
             {task.panel && <TaskStepPanel kind={task.panel} />}
-
-            {/* 1.5 has no `panel` kind of its own (it is klass "A", not a
-                human review step) — the AI's interview-driven proposals still
-                need a human ruling, so it mounts alongside instead of through
-                TaskStepPanel. Renders nothing while there is nothing pending. */}
-            {task.id === '1.5' && <DataRequestReviewPanel />}
 
             {task.aiOptions && <AiOptionsCard task={task} />}
 

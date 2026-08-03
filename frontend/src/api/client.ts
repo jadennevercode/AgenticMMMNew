@@ -209,13 +209,6 @@ export const api = {
   /** 2.3a anomaly rulings — accepted handlings reach the fit (event / cap / caveat). */
   updateAnomalyReview: (projectId: string, review: AnomalyReview) =>
     req<AnomalyReview>(`${p(projectId)}/anomaly-review`, { method: 'PUT', body: JSON.stringify(review) }),
-  /** 1.6r — accept/reject one interview-driven data-request field proposal. Accept
-   *  records the add/remove; reject is sticky too, so a dismissed proposal is never
-   *  re-offered. Re-renders a-data-request. */
-  reviewDataRequest: (projectId: string, body: { op: string; l3: string; l4: string; indicator: string; accept: boolean }) =>
-    req<{ dataRequestFieldEdits: Record<string, { added: string[]; removed: string[]; rejected: string[] }> }>(
-      `${p(projectId)}/data-request/review`, { method: 'PUT', body: JSON.stringify(body) }),
-
   /** 2.3s — the client's business-validation sign-off, at indicator or factor
    *  granularity. Supply `l4` + `indicator` for a single indicator, or `l3`
    *  alone to apply the verdict to every indicator under that factor. An

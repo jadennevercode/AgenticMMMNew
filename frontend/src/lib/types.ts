@@ -920,21 +920,6 @@ export interface AnomalyReview {
   rows: AnomalyHypothesis[]
 }
 
-/**
- * 1.5 data-request review — an interview-driven field add/remove proposed
- * from the minutes, pending accept/reject. Read off the "Interview-driven
- * changes (proposed)" sheet appended to a-data-request (only present while
- * proposals are pending); mirrors the backend's proposal dict shape.
- */
-export interface DataRequestProposal {
-  op: 'add' | 'remove'
-  l3: string
-  l4: string
-  indicator: string
-  rationale: string
-  quote: string
-}
-
 /** What this task needs from a person, if anything */
 export function taskNeed(task: TaskBlueprint): 'decision' | 'input' | null {
   if (task.decision) return 'decision'
