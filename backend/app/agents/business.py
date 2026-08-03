@@ -1027,8 +1027,9 @@ def _apply_interview_removals(st: ProjectState, changes: list[dict]) -> int:
         for r in st.factor_tree.rows:
             if r.status not in ("baseline", "accepted"):
                 continue
-            hit = (ind and r.indicator.strip().lower() == ind) or \
-                  (not ind and l3 and l4 and r.l3 == l3 and r.l4 == l4)
+            hit = ((ind and r.indicator.strip().lower() == ind
+                    and (not l3 or r.l3 == l3) and (not l4 or r.l4 == l4))
+                   or (not ind and l3 and l4 and r.l3 == l3 and r.l4 == l4))
             if not hit:
                 continue
             r.status = "proposed"

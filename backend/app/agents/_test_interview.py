@@ -194,6 +194,31 @@ def test_apply_interview_removals():
     assert k.status == "baseline", "non-matching row untouched"
     # a remove with no matching row demotes nothing
     assert B._apply_interview_removals(st, [{"op": "remove", "indicator": "不存在指标"}]) == 0
+
+    # Narrowing: a recurring indicator name under two different l3/l4 branches —
+    # a change that supplies BOTH the indicator AND a specific l3/l4 must demote
+    # only the row matching that branch, not every row sharing the indicator.
+    spend_a = FactorRow(id="sa", l3="电商", l4="平台A", indicator="花费", source="template", status="accepted")
+    spend_b = FactorRow(id="sb", l3="批发", l4="经销B", indicator="花费", source="template", status="accepted")
+    st.factor_tree = FactorTree(rows=[spend_a, spend_b])
+    n2 = B._apply_interview_removals(st, [{"op": "remove", "indicator": "花费", "l3": "电商", "l4": "平台A",
+                                           "rationale": "重复统计", "quote": "这个花费口径重复了"}])
+    assert n2 == 1, n2
+    sa = next(r for r in st.factor_tree.rows if r.id == "sa")
+    sb = next(r for r in st.factor_tree.rows if r.id == "sb")
+    assert sa.status == "proposed" and sa.proposal_kind == "remove" and sa.source == "interview", sa
+    assert sb.status == "accepted", "other branch sharing the indicator must stay untouched"
+
+    # Back-compat: indicator given with NO l3/l4 on the change still demotes
+    # every row matching that indicator tree-wide.
+    spend_c = FactorRow(id="sc", l3="电商", l4="平台A", indicator="花费", source="template", status="accepted")
+    spend_d = FactorRow(id="sd", l3="批发", l4="经销B", indicator="花费", source="template", status="accepted")
+    st.factor_tree = FactorTree(rows=[spend_c, spend_d])
+    n3 = B._apply_interview_removals(st, [{"op": "remove", "indicator": "花费",
+                                           "rationale": "全部删减", "quote": "花费口径都不要了"}])
+    assert n3 == 2, n3
+    assert all(r.status == "proposed" and r.proposal_kind == "remove" for r in st.factor_tree.rows), \
+        st.factor_tree.rows
     print("OK apply_interview_removals")
 
 def test_writeback_no_changes_guard_includes_removed_n():
