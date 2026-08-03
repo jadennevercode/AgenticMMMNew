@@ -1250,103 +1250,6 @@ async def transcribe_audio(eng: Engine, st: ProjectState, task: dict) -> None:
 _MAX_REQUEST_SHEETS = 12
 
 
-def _dr_key(l3: str, l4: str) -> str:
-    return f"{l3}||{l4}"
-
-
-def _apply_field_edits(by_l3: dict, edits: dict) -> dict:
-    """Apply accepted per-L4 indicator add/removes to the L3->L4->[indicators] map.
-
-    Pure: returns a new map, never mutates `by_l3`. Reads only `added`/`removed`
-    from each edit bucket (robust to a missing `rejected` key — that bucket is
-    populated by the review UI in a later task and ignored here).
-    """
-    out: dict = {}
-    for l3, l4s in by_l3.items():
-        out[l3] = {}
-        for l4, indicators in l4s.items():
-            e = edits.get(_dr_key(l3, l4), {}) if isinstance(edits, dict) else {}
-            removed = set(e.get("removed", []) or [])
-            cols = [i for i in indicators if i not in removed]
-            for add in e.get("added", []) or []:
-                if add and add not in cols:
-                    cols.append(add)
-            out[l3][l4] = cols
-    return out
-
-
-_DR_REVIEW_COLUMNS = ["Op", "L3", "L4", "Indicator", "Rationale", "Quote"]
-
-
-def _datareq_review_sheet(proposals: list[dict]) -> dict | None:
-    """Pure renderer: interview-driven add/remove proposals -> a review sheet, or
-    None when there is nothing pending (no sheet appended, nothing to review)."""
-    if not proposals:
-        return None
-    rows = [[str(p.get("op", "")), str(p.get("l3", "")), str(p.get("l4", "")),
-             str(p.get("indicator", "")), str(p.get("rationale", "")), str(p.get("quote", ""))]
-            for p in proposals]
-    return {"name": "Interview-driven changes (proposed)", "columns": _DR_REVIEW_COLUMNS, "rows": rows}
-
-
-def _filter_proposals(raw: list, edits: dict) -> list[dict]:
-    """Pure filter: raw LLM proposal list -> cleaned/kept proposals.
-
-    Drops non-dict entries and entries whose `op` is not "add"/"remove"; skips an
-    indicator already recorded in `st.data_request_field_edits` — accepted (indicator
-    present in the L4 key's `added`/`removed`) or rejected (`"{op}:{indicator}"` in
-    `rejected`) — so re-runs never re-offer a decided proposal.
-    """
-    out: list[dict] = []
-    for p in raw:
-        if not isinstance(p, dict) or str(p.get("op", "")) not in ("add", "remove"):
-            continue
-        key = _dr_key(str(p.get("l3", "")), str(p.get("l4", "")))
-        ind = str(p.get("indicator", "")).strip()
-        acc = edits.get(key, {}) if isinstance(edits, dict) else {}
-        if ind in (acc.get("added", []) or []) or ind in (acc.get("removed", []) or []):
-            continue   # already accepted
-        if f"{p['op']}:{ind}" in (acc.get("rejected", []) or []):
-            continue   # already rejected -- don't re-offer (sticky reject)
-        out.append({"op": str(p["op"]), "l3": str(p.get("l3", "")), "l4": str(p.get("l4", "")),
-                    "indicator": ind, "rationale": str(p.get("rationale", "")), "quote": str(p.get("quote", ""))})
-    return out
-
-
-async def _datareq_proposals(st: ProjectState, by_l3: dict) -> list[dict]:
-    """From the interview minutes, propose per-L4 data-request indicator add/removes.
-
-    Empty when no minutes are uploaded or the LLM yields nothing. Filters out any
-    proposal already recorded in `st.data_request_field_edits` via `_filter_proposals`
-    (accepted or rejected) — so re-runs never re-offer a decided proposal.
-    """
-    files = _minutes_files(st)
-    if not files:
-        return []
-    structure = "\n".join(
-        f"- {l3} / {l4}: {', '.join(inds) or '—'}" for l3, l4s in by_l3.items() for l4, inds in l4s.items())
-    minutes = "\n\n".join(f"[{fn}]\n{tx}" for fn, tx in files)[:8000]
-    try:
-        obj = await get_llm().json(
-            system=agent_system("business", st),
-            user=(
-                "Given the DATA REQUEST structure (L3/L4 -> indicators to collect) and the interview "
-                "minutes, propose indicator FIELD changes ONLY (not factor changes):\n"
-                "- add: the minutes say a metric is needed/available for an L4 that the request lacks.\n"
-                "- remove: the minutes say a listed indicator is NOT available / not tracked.\n"
-                "Each l3/l4/indicator must match the structure's wording (for 'add', a new indicator "
-                "under an existing l3/l4). Ground every proposal in a verbatim quote. Return JSON: "
-                "{\"proposals\":[{\"op\":\"add|remove\",\"l3\":str,\"l4\":str,\"indicator\":str,"
-                "\"rationale\":str,\"quote\":str}]}\n\n"
-                f"DATA REQUEST STRUCTURE:\n{structure}\n\nINTERVIEW MINUTES:\n{minutes}"
-            ),
-        )
-    except Exception:  # noqa: BLE001
-        obj = {}
-    raw = obj.get("proposals", []) if isinstance(obj, dict) else []
-    return _filter_proposals(raw, st.data_request_field_edits)
-
-
 async def gen_data_request(eng: Engine, st: ProjectState, task: dict) -> None:
     """Lay out the data-request workbook: one template per L3, one sheet per L4.
 
@@ -1367,7 +1270,6 @@ async def gen_data_request(eng: Engine, st: ProjectState, task: dict) -> None:
         by_l3.setdefault(l3, {}).setdefault(l4, [])
         if r.indicator and r.indicator not in by_l3[l3][l4]:
             by_l3[l3][l4].append(r.indicator)
-    by_l3 = _apply_field_edits(by_l3, st.data_request_field_edits)
 
     index_rows = [[l3, str(len(l4s)), str(sum(len(i) for i in l4s.values()))]
                   for l3, l4s in by_l3.items()]
@@ -1395,12 +1297,6 @@ async def gen_data_request(eng: Engine, st: ProjectState, task: dict) -> None:
     sheets.append({"name": "Review & Sign-off", "columns": ["Item", "Status"],
                    "rows": [["Fields & granularity", "pending"], ["Owners assigned", "pending"],
                             ["Client sign-off", "pending"]]})
-
-    proposals = await _datareq_proposals(st, by_l3)
-    eng.set_analysis(st, "data_request_proposals", proposals)
-    review_sheet = _datareq_review_sheet(proposals)
-    if review_sheet is not None:
-        sheets.append(review_sheet)
 
     eng.produce(st, "a-data-request", body={"sheets": sheets}, state="proposed", agent="business")
     eng.emit(st, "business", "info",

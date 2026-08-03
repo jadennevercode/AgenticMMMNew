@@ -120,14 +120,6 @@ class ProjectState(BaseModel):
     # either mapped by a published indicator or listed here; the 2.1 gate blocks
     # while any active row is still unresolved. Not blueprint-derived → persists.
     factor_map_ignores: dict[str, str] = Field(default_factory=dict, alias="factorMapIgnores")
-    # S2 · 1.6r review: per-L4 interview-driven edits to the data-request field list,
-    # keyed by `_dr_key(l3, l4)` = "{l3}||{l4}" -> {"added": [indicator,...],
-    # "removed": [indicator,...], "rejected": ["{op}:{indicator}",...]}. `added`/
-    # `removed` are accepted edits applied in `gen_data_request` (business.py); a
-    # rejected proposal is recorded so it is not re-offered on the next AI pass.
-    # Not blueprint-derived → persists. No frontend surface yet (Tasks 4-6).
-    data_request_field_edits: dict[str, dict[str, list[str]]] = Field(
-        default_factory=dict, alias="dataRequestFieldEdits")
     # 2.1 Data Processing: per-indicator human overrides keyed by
     # `indicator_metadata.indicator_key(l4, metric)`.
     #  · metric_type_overrides: the model role the user assigned — "Y" (response) /
