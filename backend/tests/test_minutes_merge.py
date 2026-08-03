@@ -77,7 +77,8 @@ def test_answers_fill_first_across_files() -> None:
                                          {"n": 8, "answer": "a8", "source": "EC"}]},
     ]
     targets = _rebuild_targets_from_real_minutes(biz, files, results)
-    assert [t["layerZh"] for t in targets] == ["GM", "Media", "EC"], targets
+    # department now lives on "team" (layerZh is the filename layer marker, blank here)
+    assert [t["team"] for t in targets] == ["GM", "Media", "EC"], targets
 
     def answer_of(target, question_text):
         return next((row["finalAnswer"] for row in target["questions"]
